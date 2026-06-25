@@ -1,0 +1,101 @@
+from urllib.parse import parse_qs
+import httpx
+from content_factory.publish.telegram import publish_post, PublishState
+
+
+def _client(handler):
+    return httpx.Client(transport=httpx.MockTransport(handler),
+                        base_url="https://api.telegram.org")
+
+
+def _form(req):
+    """Распарсить x-www-form-urlencoded тело запроса (когда photo передаётся URL-ом)."""
+    return {k: v[0] for k, v in parse_qs(req.content.decode("utf-8")).items()}
+
+
+def test_sendphoto_by_url_ok():
+    captured = {}
+
+    def handler(req):
+        captured["path"] = req.url.path
+        captured["form"] = _form(req)
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 42}})
+
+    res = publish_post("TOK", "@chan", "https://x/static/card.jpg", "Подпись",
+                       http=_client(handler), parse_mode="HTML")
+    assert res.ok and res.message_id == 42 and not res.skipped
+    assert captured["path"] == "/botTOK/sendPhoto"
+    assert captured["form"]["chat_id"] == "@chan"
+    assert captured["form"]["caption"] == "Подпись"
+    assert captured["form"]["photo"] == "https://x/static/card.jpg"
+    assert captured["form"]["parse_mode"] == "HTML"
+
+
+def test_sendphoto_local_file_multipart(tmp_path):
+    card = tmp_path / "card.jpg"
+    card.write_bytes(b"JPEGDATA")
+    captured = {}
+
+    def handler(req):
+        captured["ctype"] = req.headers.get("content-type", "")
+        captured["body"] = req.content
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 7}})
+
+    res = publish_post("TOK", "-100123", str(card), "Локальный файл", http=_client(handler))
+    assert res.ok and res.message_id == 7
+    assert "multipart/form-data" in captured["ctype"]
+    assert b"JPEGDATA" in captured["body"]
+
+
+def test_caption_truncated_to_limit():
+    captured = {}
+
+    def handler(req):
+        captured["form"] = _form(req)
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
+
+    publish_post("TOK", "@chan", "https://x/c.jpg", "Я" * 2000, http=_client(handler))
+    assert len(captured["form"]["caption"]) <= 1024
+
+
+def test_idempotent_skip_does_not_resend(tmp_path):
+    state = PublishState(tmp_path / "pub.db")
+    calls = {"n": 0}
+
+    def handler(req):
+        calls["n"] += 1
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 5}})
+
+    r1 = publish_post("TOK", "@chan", "https://x/c.jpg", "txt",
+                      http=_client(handler), key="breeze:NC1", state=state)
+    r2 = publish_post("TOK", "@chan", "https://x/c.jpg", "txt",
+                      http=_client(handler), key="breeze:NC1", state=state)
+    assert r1.ok and not r1.skipped
+    assert r2.ok and r2.skipped            # второй раз — пропуск
+    assert calls["n"] == 1                  # http вызван только один раз
+
+
+def test_tg_error_returns_held_and_not_marked(tmp_path):
+    state = PublishState(tmp_path / "pub.db")
+
+    def handler(req):
+        return httpx.Response(200, json={"ok": False, "description": "chat not found"})
+
+    res = publish_post("TOK", "@chan", "https://x/c.jpg", "txt",
+                       http=_client(handler), key="breeze:NC1", state=state)
+    assert not res.ok and "chat not found" in (res.error or "")
+    assert not state.is_published("breeze:NC1")   # ошибку не считаем опубликованной
+
+
+def test_retry_then_success():
+    state_calls = {"n": 0}
+
+    def handler(req):
+        state_calls["n"] += 1
+        if state_calls["n"] == 1:
+            raise httpx.ConnectError("boom")           # первая попытка — сетевой сбой
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 9}})
+
+    res = publish_post("TOK", "@chan", "https://x/c.jpg", "txt",
+                       http=_client(handler), retries=2, backoff=0)
+    assert res.ok and res.message_id == 9 and state_calls["n"] == 2

@@ -1,0 +1,18 @@
+[project]
+name = "content-factory"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic>=2.6",
+  "psycopg2-binary>=2.9",
+  "httpx>=0.27",
+  "python-decouple>=3.8",
+  "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

@@ -1,0 +1,11 @@
+[
+  {"article": "MDV-AB-07", "name": "MDV CLASSIC 07", "brand": "MDV", "stock_qty": 5,
+   "stock_raw": "5", "price": 42000, "currency": "RUB", "warehouse": "Крым",
+   "source": "jac_b2b", "attributes": {"РРЦ": "55000", "Холод, кВт": "2.05", "категория": "Бытовые сплит-системы"}},
+  {"article": "MDV-MULTI-2", "name": "MDV мульти 2x", "brand": "MDV", "stock_qty": 1,
+   "price": 90000, "warehouse": "Крым", "source": "jac_b2b",
+   "attributes": {"категория": "Мультисплит-системы", "Холод, кВт": "5"}},
+  {"article": "ACC-1", "name": "Кронштейн", "brand": "MDV", "stock_qty": 10,
+   "price": 500, "warehouse": "Крым", "source": "jac_b2b",
+   "attributes": {"категория": "Аксессуары"}}
+]
