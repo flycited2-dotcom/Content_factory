@@ -1,0 +1,13 @@
+# Секреты и состояние — НЕ в git
+.env
+state/
+__pycache__/
+*.pyc
+.venv/
+.worktrees/
+
+# Если добавишь широкие игноры (*.txt/*.json) — добавь негейты для контента:
+# !descriptions/
+# !descriptions/*.txt
+# !descriptions/*.json
+# !config/card_modes.json
