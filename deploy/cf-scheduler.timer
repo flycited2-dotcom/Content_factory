@@ -1,0 +1,9 @@
+[Unit]
+Description=Run Content Factory scheduler каждые 5 минут (ловит дозревшие слоты)
+
+[Timer]
+OnCalendar=*:0/5
+Persistent=true
+
+[Install]
+WantedBy=timers.target

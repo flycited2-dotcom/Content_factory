@@ -1,0 +1,9 @@
+[Unit]
+Description=Run Content Factory card worker каждые 30 минут
+
+[Timer]
+OnCalendar=*:0/30
+Persistent=true
+
+[Install]
+WantedBy=timers.target

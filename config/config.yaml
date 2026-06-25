@@ -1,0 +1,46 @@
+# Конфиг Контент-завода (несекретный — в git). Секреты (токен бота, id канала, креды БД,
+# токен фотоагента) — ТОЛЬКО в .env (gitignored). Канал/токен берутся из .env, не отсюда.
+
+source:                          # источник контента (БД oasis)
+  warehouse: "Симферополь"
+  categories: [2, 6, 7]          # пилот: кондиционеры
+  exclude_title_patterns: ["%мульти%", "%зимн%", "%виброопор%"]
+
+pricing:
+  default_markup_pct: 5          # опт +5% → округление …90
+  rounding: up_to_90
+  min_margin_abs: 0
+
+content:
+  caption_max: 1024              # лимит подписи фото в Telegram
+  stop_words: ["скидка только сегодня", "звоните"]
+  # descriptions_manifest: "descriptions/manifest.json"   # ручные тексты на серию (опц.)
+
+cards:                           # карточки-картинки (через фотоагент)
+  dir: "/opt/oasis/staticfiles/cf-cards"
+  base_url: "https://splithome.ru/static/cf-cards"
+  default_mode: "mcp"
+  require_for_publish: true      # публиковать только товар с готовой карточкой
+
+fotogen:                         # очередь фотоагента (токен/пути — в .env)
+  api_url: "http://127.0.0.1:8765"
+  per_run: 10
+  max_pending: 12
+  max_total: 100000
+
+telegram:                        # channel_id и токен — из .env (TELEGRAM_CHANNEL_ID/TELEGRAM_BOT_TOKEN)
+  channel_id: ""
+  test_channel_id: ""
+  min_seconds_between_posts: 180
+  parse_mode: "HTML"
+
+review:                          # детерминированные правила (без LLM)
+  price_min: 1000
+  price_max: 1000000
+  require_specs: true
+  require_card: true
+  caption_max: 1024
+
+state:
+  db: "state/content_factory.db"
+  card_jobs_db: "state/card_jobs.db"

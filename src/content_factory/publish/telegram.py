@@ -40,6 +40,11 @@ class PublishState:
         with self._c() as c:
             return c.execute("SELECT 1 FROM published WHERE key=?", (key,)).fetchone() is not None
 
+    def published_keys(self) -> set:
+        """Все опубликованные ключи (для анти-дубля в планировщике)."""
+        with self._c() as c:
+            return {r[0] for r in c.execute("SELECT key FROM published").fetchall()}
+
     def mark(self, key: str, message_id: int | None) -> None:
         with self._c() as c:
             c.execute("INSERT OR REPLACE INTO published(key, message_id, ts) VALUES(?,?,?)",
@@ -53,6 +58,18 @@ class PublishState:
     def seconds_since_last(self) -> float | None:
         ts = self.last_ts()
         return None if ts is None else max(0.0, time.time() - ts)
+
+
+def send_message(bot_token: str, chat_id: str, text: str,
+                 http: httpx.Client | None = None) -> bool:
+    """Текстовое сообщение владельцу (алерты fail-ревизии/ошибок). Возвращает ok."""
+    client = http or httpx.Client(timeout=30)
+    try:
+        r = client.post(f"{TG_API}/bot{bot_token}/sendMessage",
+                        data={"chat_id": str(chat_id), "text": text})
+        return bool((r.json() or {}).get("ok"))
+    except (httpx.HTTPError, ValueError):
+        return False
 
 
 def _is_url(s: str) -> bool:

@@ -23,7 +23,9 @@ _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 HELP = ("Команды:\n"
         "/plan <N> <категория> <завтра|сегодня|ДАТА> <ЧЧ:ММ[,ЧЧ:ММ]> "
         "[mode=] [source=] [cat=] [confirm] [channel=] [id=]\n"
-        "/status — что в очереди   /cancel <id> — отменить   /held — отложенные")
+        "/status — что в очереди   /cancel <id> — отменить\n"
+        "/pending — посты на подтверждении   /approve <key> — опубликовать   "
+        "/reject <key> — отклонить   /held — отложенные")
 
 
 def _norm_time(t: str) -> str:
@@ -105,10 +107,41 @@ def _status(queue) -> str:
     return "\n".join(lines)
 
 
-def handle_command(text: str, queue, today: date | None = None, held_provider=None) -> str:
-    """Маршрутизация команды → действие над очередью → текст ответа владельцу."""
+def handle_command(text: str, queue, today: date | None = None, held_provider=None,
+                   confirm_store=None, publish_fn=None, publish_state=None) -> str:
+    """Маршрутизация команды → действие → текст ответа владельцу.
+    confirm_store/publish_fn/publish_state нужны для confirm-пилота (/approve, /reject, /pending).
+    publish_fn(awaiting) -> PublishResult публикует подтверждённый пост в канал."""
     text = (text or "").strip()
-    cmd = (text.split()[0].lower() if text else "")
+    parts = text.split()
+    cmd = (parts[0].lower() if parts else "")
+
+    if cmd.startswith("/approve"):
+        if not (confirm_store and publish_fn):
+            return "❌ подтверждение недоступно"
+        if len(parts) < 2:
+            return "❌ укажите ключ: /approve <key>"
+        key = parts[1]
+        a = confirm_store.get(key)
+        if not a or a.status != "pending":
+            return f"❌ нет поста на подтверждении: {key}"
+        res = publish_fn(a)
+        if res and res.ok:
+            confirm_store.mark(key, "published")
+            if publish_state:
+                publish_state.mark(key, res.message_id)
+            return f"✅ опубликовано: {key}"
+        return f"❌ не удалось опубликовать {key}: {getattr(res, 'error', None)}"
+    if cmd.startswith("/reject"):
+        if not confirm_store or len(parts) < 2:
+            return "❌ укажите ключ: /reject <key>"
+        confirm_store.mark(parts[1], "rejected")
+        return f"Отклонено: {parts[1]}"
+    if cmd.startswith("/pending"):
+        items = confirm_store.list_pending() if confirm_store else []
+        if not items:
+            return "На подтверждении ничего нет."
+        return "На подтверждении:\n" + "\n".join(f"— {a.key} → /approve {a.key}" for a in items)
 
     if cmd.startswith("/plan"):
         try:

@@ -2,6 +2,8 @@ from datetime import date
 import pytest
 from content_factory.bot.commands import parse_plan, handle_command
 from content_factory.orchestrator.queue import TaskQueue
+from content_factory.orchestrator.confirm_store import ConfirmStore
+from content_factory.publish.telegram import PublishState, PublishResult
 
 TODAY = date(2026, 6, 25)
 
@@ -83,3 +85,59 @@ def test_handle_invalid_plan_returns_error(tmp_path):
     reply = handle_command("/plan завтра 10:00", q, today=TODAY)   # нет count
     assert "❌" in reply or "ошибк" in reply.lower()
     assert q.all_slots() == []
+
+
+def test_handle_approve_publishes(tmp_path):
+    q = TaskQueue(tmp_path / "q.db")
+    cs = ConfirmStore(tmp_path / "c.db")
+    ps = PublishState(tmp_path / "p.db")
+    cs.add("breeze|ballu|olympio", "@chan", "/c/x.jpg", "подпись")
+    sent = {}
+
+    def publish_fn(a):
+        sent["key"] = a.key
+        return PublishResult(ok=True, message_id=11)
+
+    reply = handle_command("/approve breeze|ballu|olympio", q,
+                           confirm_store=cs, publish_fn=publish_fn, publish_state=ps)
+    assert "✅" in reply
+    assert sent["key"] == "breeze|ballu|olympio"
+    assert cs.get("breeze|ballu|olympio").status == "published"
+    assert ps.is_published("breeze|ballu|olympio")
+
+
+def test_handle_approve_unknown_key(tmp_path):
+    q = TaskQueue(tmp_path / "q.db")
+    cs = ConfirmStore(tmp_path / "c.db")
+    reply = handle_command("/approve nope", q, confirm_store=cs, publish_fn=lambda a: None)
+    assert "❌" in reply
+
+
+def test_handle_approve_publish_failure_keeps_pending(tmp_path):
+    q = TaskQueue(tmp_path / "q.db")
+    cs = ConfirmStore(tmp_path / "c.db")
+    cs.add("k1", "@chan", "/c/x.jpg", "cap")
+
+    def publish_fn(a):
+        return PublishResult(ok=False, error="chat not found")
+
+    reply = handle_command("/approve k1", q, confirm_store=cs, publish_fn=publish_fn)
+    assert "❌" in reply and "chat not found" in reply
+    assert cs.get("k1").status == "pending"          # не публикуем — остаётся ждать
+
+
+def test_handle_reject(tmp_path):
+    q = TaskQueue(tmp_path / "q.db")
+    cs = ConfirmStore(tmp_path / "c.db")
+    cs.add("k1", "@chan", "/c/x.jpg", "cap")
+    reply = handle_command("/reject k1", q, confirm_store=cs)
+    assert "k1" in reply
+    assert cs.get("k1").status == "rejected"
+
+
+def test_handle_pending_lists(tmp_path):
+    q = TaskQueue(tmp_path / "q.db")
+    cs = ConfirmStore(tmp_path / "c.db")
+    cs.add("k1", "@chan", "/c/x.jpg", "cap")
+    reply = handle_command("/pending", q, confirm_store=cs)
+    assert "k1" in reply

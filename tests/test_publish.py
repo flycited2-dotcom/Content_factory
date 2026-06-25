@@ -1,6 +1,6 @@
 from urllib.parse import parse_qs
 import httpx
-from content_factory.publish.telegram import publish_post, PublishState
+from content_factory.publish.telegram import publish_post, PublishState, send_message
 
 
 def _client(handler):
@@ -85,6 +85,28 @@ def test_tg_error_returns_held_and_not_marked(tmp_path):
                        http=_client(handler), key="breeze:NC1", state=state)
     assert not res.ok and "chat not found" in (res.error or "")
     assert not state.is_published("breeze:NC1")   # ошибку не считаем опубликованной
+
+
+def test_send_message_ok():
+    captured = {}
+
+    def handler(req):
+        captured["path"] = req.url.path
+        captured["form"] = _form(req)
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 3}})
+
+    ok = send_message("TOK", "123", "алерт", http=_client(handler))
+    assert ok is True
+    assert captured["path"] == "/botTOK/sendMessage"
+    assert captured["form"]["chat_id"] == "123"
+    assert captured["form"]["text"] == "алерт"
+
+
+def test_published_keys_returns_all(tmp_path):
+    st = PublishState(tmp_path / "p.db")
+    st.mark("k1", 1)
+    st.mark("k2", 2)
+    assert st.published_keys() == {"k1", "k2"}
 
 
 def test_retry_then_success():

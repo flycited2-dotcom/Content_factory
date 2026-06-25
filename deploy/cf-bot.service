@@ -1,0 +1,13 @@
+[Unit]
+Description=Content Factory — Telegram bot (long-poll: команды владельца, /approve)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/content-factory
+ExecStart=/opt/content-factory/.venv/bin/python -m content_factory.bot.run
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

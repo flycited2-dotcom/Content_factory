@@ -1,0 +1,8 @@
+[Unit]
+Description=Content Factory — scheduler (исполнение дозревших слотов задач)
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/content-factory
+ExecStart=/opt/content-factory/.venv/bin/python -m content_factory.orchestrator.scheduler_run
