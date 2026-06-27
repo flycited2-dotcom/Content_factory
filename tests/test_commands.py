@@ -106,6 +106,33 @@ def test_handle_approve_publishes(tmp_path):
     assert ps.is_published("breeze|ballu|olympio")
 
 
+def test_handle_approve_key_with_spaces(tmp_path):
+    q = TaskQueue(tmp_path / "q.db")
+    cs = ConfirmStore(tmp_path / "c.db")
+    ps = PublishState(tmp_path / "p.db")
+    key = "breeze|expertair by zilon|progress"        # ключ серии с пробелами
+    cs.add(key, "@chan", "/c/x.jpg", "cap")
+    got = {}
+
+    def publish_fn(a):
+        got["key"] = a.key
+        return PublishResult(ok=True, message_id=5)
+
+    reply = handle_command(f"/approve {key}", q, confirm_store=cs,
+                           publish_fn=publish_fn, publish_state=ps)
+    assert "✅" in reply and got["key"] == key
+    assert cs.get(key).status == "published"
+
+
+def test_handle_reject_key_with_spaces(tmp_path):
+    q = TaskQueue(tmp_path / "q.db")
+    cs = ConfirmStore(tmp_path / "c.db")
+    key = "breeze|expertair by zilon|progress"
+    cs.add(key, "@chan", "/c/x.jpg", "cap")
+    handle_command(f"/reject {key}", q, confirm_store=cs)
+    assert cs.get(key).status == "rejected"
+
+
 def test_handle_approve_unknown_key(tmp_path):
     q = TaskQueue(tmp_path / "q.db")
     cs = ConfirmStore(tmp_path / "c.db")

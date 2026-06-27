@@ -121,7 +121,7 @@ def handle_command(text: str, queue, today: date | None = None, held_provider=No
             return "❌ подтверждение недоступно"
         if len(parts) < 2:
             return "❌ укажите ключ: /approve <key>"
-        key = parts[1]
+        key = text.split(maxsplit=1)[1].strip()    # ключ может содержать пробелы (серия)
         a = confirm_store.get(key)
         if not a or a.status != "pending":
             return f"❌ нет поста на подтверждении: {key}"
@@ -135,8 +135,9 @@ def handle_command(text: str, queue, today: date | None = None, held_provider=No
     if cmd.startswith("/reject"):
         if not confirm_store or len(parts) < 2:
             return "❌ укажите ключ: /reject <key>"
-        confirm_store.mark(parts[1], "rejected")
-        return f"Отклонено: {parts[1]}"
+        key = text.split(maxsplit=1)[1].strip()    # ключ может содержать пробелы (серия)
+        confirm_store.mark(key, "rejected")
+        return f"Отклонено: {key}"
     if cmd.startswith("/pending"):
         items = confirm_store.list_pending() if confirm_store else []
         if not items:
