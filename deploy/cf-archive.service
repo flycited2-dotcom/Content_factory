@@ -1,0 +1,9 @@
+[Unit]
+Description=Content Factory — архив сгенерированных карточек по датам
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/content-factory
+Environment=PYTHONPATH=/opt/content-factory/src
+ExecStart=/opt/content-factory/.venv/bin/python -m content_factory.archive_run

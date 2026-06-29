@@ -1,0 +1,9 @@
+[Unit]
+Description=Архивировать сгенерированные карточки каждый час
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
