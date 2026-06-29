@@ -76,11 +76,13 @@ def _is_url(s: str) -> bool:
     return isinstance(s, str) and s.lower().startswith(("http://", "https://"))
 
 
-def _send_once(bot_token, channel_id, image, caption, parse_mode, http):
+def _send_once(bot_token, channel_id, image, caption, parse_mode, http, reply_markup=None):
     url = f"{TG_API}/bot{bot_token}/sendPhoto"
     data = {"chat_id": str(channel_id), "caption": caption}
     if parse_mode:
         data["parse_mode"] = parse_mode
+    if reply_markup:                       # inline-кнопки (JSON-строка): ✅/❌ под превью
+        data["reply_markup"] = reply_markup
     if _is_url(image):
         data["photo"] = image
         return http.post(url, data=data)
@@ -93,9 +95,10 @@ def publish_post(bot_token: str, channel_id: str, image: str, caption: str,
                  http: httpx.Client | None = None, *, parse_mode: str | None = None,
                  key: str | None = None, state: PublishState | None = None,
                  caption_max: int = CAPTION_MAX, retries: int = 1,
-                 backoff: float = 1.0) -> PublishResult:
+                 backoff: float = 1.0, reply_markup: str | None = None) -> PublishResult:
     """Опубликовать пост (sendPhoto). `image` — путь к файлу карточки или URL.
-    `key`+`state` включают идемпотентность (повтор не публикуется)."""
+    `key`+`state` включают идемпотентность (повтор не публикуется).
+    `reply_markup` — JSON inline-клавиатуры (кнопки ✅/❌ под превью на подтверждение)."""
     if state is not None and key and state.is_published(key):
         return PublishResult(ok=True, skipped=True)
 
@@ -105,7 +108,8 @@ def publish_post(bot_token: str, channel_id: str, image: str, caption: str,
     last_err = None
     for attempt in range(max(1, retries) + 1):
         try:
-            r = _send_once(bot_token, channel_id, image, caption, parse_mode, client)
+            r = _send_once(bot_token, channel_id, image, caption, parse_mode, client,
+                           reply_markup=reply_markup)
         except httpx.HTTPError as e:                       # сетевой сбой → ретрай
             last_err = f"network: {e}"
             if attempt < retries:

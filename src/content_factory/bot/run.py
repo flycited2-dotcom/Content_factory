@@ -14,7 +14,7 @@ from content_factory.config import load_config
 from content_factory.publish.telegram import publish_post, PublishState, TG_API
 from content_factory.orchestrator.queue import TaskQueue
 from content_factory.orchestrator.confirm_store import ConfirmStore
-from content_factory.bot.commands import handle_command
+from content_factory.bot.commands import handle_command, handle_callback
 
 
 def make_publish_fn(token: str, parse_mode: str, pub_state: PublishState, http=None):
@@ -51,6 +51,25 @@ def main():
             continue
         for u in updates:
             offset = u["update_id"] + 1
+
+            # --- Нажатие inline-кнопки (✅/❌ под превью) ---
+            cq = u.get("callback_query")
+            if cq:
+                frm = str((cq.get("from") or {}).get("id", ""))
+                if owner and frm != owner:
+                    continue
+                reply = handle_callback(cq.get("data", ""), q, confirm_store=cs,
+                                        publish_fn=publish_fn, publish_state=ps)
+                chat = str(((cq.get("message") or {}).get("chat") or {}).get("id", "") or frm)
+                try:
+                    http.post(f"{TG_API}/bot{token}/answerCallbackQuery",
+                              data={"callback_query_id": cq.get("id"), "text": reply[:180]})
+                    http.post(f"{TG_API}/bot{token}/sendMessage",
+                              data={"chat_id": chat, "text": reply})
+                except httpx.HTTPError:
+                    pass
+                continue
+
             msg = u.get("message") or {}
             chat = str((msg.get("chat") or {}).get("id", ""))
             text = msg.get("text", "")

@@ -168,3 +168,18 @@ def handle_command(text: str, queue, today: date | None = None, held_provider=No
         return "Отложенные (held):\n" + "\n".join(
             f"— {k}: {', '.join(r)}" for k, r in items)
     return HELP
+
+
+def handle_callback(data: str, queue, today: date | None = None,
+                    confirm_store=None, publish_fn=None, publish_state=None) -> str:
+    """Тап inline-кнопки под превью. callback_data = 'approve:<key>' | 'reject:<key>'.
+    Переиспользует логику /approve | /reject (ключ может содержать пробелы)."""
+    if not data or ":" not in data:
+        return "❌ неизвестная кнопка"
+    action, key = data.split(":", 1)
+    action = action.strip().lower()
+    if action not in ("approve", "reject"):
+        return "❌ неизвестное действие"
+    return handle_command(f"/{action} {key}", queue, today=today,
+                          confirm_store=confirm_store, publish_fn=publish_fn,
+                          publish_state=publish_state)

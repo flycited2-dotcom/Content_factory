@@ -1,6 +1,6 @@
 from datetime import date
 import pytest
-from content_factory.bot.commands import parse_plan, handle_command
+from content_factory.bot.commands import parse_plan, handle_command, handle_callback
 from content_factory.orchestrator.queue import TaskQueue
 from content_factory.orchestrator.confirm_store import ConfirmStore
 from content_factory.publish.telegram import PublishState, PublishResult
@@ -168,3 +168,34 @@ def test_handle_pending_lists(tmp_path):
     cs.add("k1", "@chan", "/c/x.jpg", "cap")
     reply = handle_command("/pending", q, confirm_store=cs)
     assert "k1" in reply
+
+
+def test_handle_callback_approve_publishes(tmp_path):
+    q = TaskQueue(tmp_path / "q.db")
+    cs = ConfirmStore(tmp_path / "c.db")
+    ps = PublishState(tmp_path / "p.db")
+    key = "breeze|funai|daijin inverter"          # ключ с пробелом — кнопка несёт его целиком
+    cs.add(key, "@chan", "/c/x.jpg", "cap")
+    got = {}
+
+    def publish_fn(a):
+        got["key"] = a.key
+        return PublishResult(ok=True, message_id=1)
+
+    reply = handle_callback(f"approve:{key}", q, confirm_store=cs,
+                            publish_fn=publish_fn, publish_state=ps)
+    assert "✅" in reply and got["key"] == key
+    assert cs.get(key).status == "published"
+
+
+def test_handle_callback_reject(tmp_path):
+    q = TaskQueue(tmp_path / "q.db")
+    cs = ConfirmStore(tmp_path / "c.db")
+    cs.add("k1", "@chan", "/c/x.jpg", "cap")
+    reply = handle_callback("reject:k1", q, confirm_store=cs)
+    assert "k1" in reply and cs.get("k1").status == "rejected"
+
+
+def test_handle_callback_bad_data(tmp_path):
+    q = TaskQueue(tmp_path / "q.db")
+    assert "❌" in handle_callback("garbage", q)

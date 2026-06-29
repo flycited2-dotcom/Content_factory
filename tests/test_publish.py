@@ -87,6 +87,20 @@ def test_tg_error_returns_held_and_not_marked(tmp_path):
     assert not state.is_published("breeze:NC1")   # ошибку не считаем опубликованной
 
 
+def test_sendphoto_with_reply_markup():
+    captured = {}
+
+    def handler(req):
+        captured["form"] = _form(req)
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 9}})
+
+    rm = '{"inline_keyboard":[[{"text":"OK","callback_data":"approve:k1"}]]}'
+    res = publish_post("TOK", "@chan", "https://x/c.jpg", "txt", http=_client(handler),
+                       reply_markup=rm)
+    assert res.ok
+    assert captured["form"]["reply_markup"] == rm
+
+
 def test_send_message_ok():
     captured = {}
 
