@@ -6,8 +6,15 @@
 ручной override на серию из manifest (как в avito-bridge), к нему дописывается живая цена."""
 from __future__ import annotations
 import hashlib
+import re
 from content_factory.content.sizing import size_from_btu
 from content_factory.catalog.series import series_key
+
+# Ключи ТТХ в каталоге oasis — точная мощность/площадь (точнее, чем btu_calc).
+_SPEC_KBTU = "Холодопроизводительность (kBTU)"
+_SPEC_KW = "Холодопроизводительность (кВт)"
+_SPEC_AREA = "Эффективен для помещений площадью до"
+_NUM_RE = re.compile(r"[-+]?\d+(?:[.,]\d+)?")
 
 # Тип по категории каталога (как в avito render).
 _TYPE_LABEL = {2: "Настенная сплит-система", 6: "Полупромышленный кондиционер",
@@ -59,14 +66,50 @@ def _is_inverter(text: str) -> bool:
     return "инвертор" in (text or "").lower()
 
 
+def _num(s):
+    """Первое число из строки ('2.20 (0.30 - 2.85)' → 2.2; '61.6' → 61.6) или None."""
+    m = _NUM_RE.search(str(s if s is not None else ""))
+    return float(m.group(0).replace(",", ".")) if m else None
+
+
+def _trim(x: float) -> str:
+    """6.16 → '6.16', 2.2 → '2.2', 22.0 → '22'."""
+    return f"{x:g}"
+
+
 def _extract(item) -> dict:
     """Нормализуем Offer | SeriesGroup в общий набор полей для подписи."""
     if hasattr(item, "representative"):                  # SeriesGroup
         rep = item.representative
         return dict(brand=item.brand, name=item.series, category_id=item.category_id,
-                    btu=rep.btu_calc, sku=item.supplier_sku, key=getattr(item, "key", None))
+                    btu=rep.btu_calc, sku=item.supplier_sku, key=getattr(item, "key", None),
+                    attrs=rep.attrs or {})
     return dict(brand=item.brand, name=item.model, category_id=item.category_id,    # Offer
-                btu=item.btu_calc, sku=item.supplier_sku, key=series_key(item))
+                btu=item.btu_calc, sku=item.supplier_sku, key=series_key(item),
+                attrs=item.attrs or {})
+
+
+def _power_line(f: dict) -> str:
+    """Мощность/площадь из РЕАЛЬНЫХ ТТХ (BTU + кВт + площадь). btu_calc/таблица площадей —
+    только fallback, если ТТХ нет. Так подпись совпадает с карточкой и точна."""
+    a = f.get("attrs") or {}
+    kbtu = _num(a.get(_SPEC_KBTU))
+    kw = _num(a.get(_SPEC_KW))
+    area = _num(a.get(_SPEC_AREA))
+    parts: list[str] = []
+    if kbtu:
+        parts.append(f"{int(round(kbtu * 1000))} BTU")
+    if kw:
+        parts.append(f"{_trim(kw)} кВт")
+    if not parts:                                        # ТТХ нет → старый путь по btu_calc
+        size = size_from_btu(f["btu"], f["category_id"])
+        if size:
+            parts.append(f"{size}000 BTU")
+            if area is None and _AREA_BY_SIZE.get(size):
+                area = _AREA_BY_SIZE[size]
+    if area:
+        parts.append(f"до {_trim(area)} м²")
+    return " · ".join(parts)
 
 
 def _headline(f: dict) -> str:
@@ -78,12 +121,8 @@ def _headline(f: dict) -> str:
     else:
         conveys = "сплит" in nl or "кондиционер" in nl
     lead = name if conveys else f"{type_label} {name}"   # не задваиваем тип, если он уже в названии
-    size = size_from_btu(f["btu"], f["category_id"])
-    if size:
-        area = _AREA_BY_SIZE.get(size)
-        tail = f"{size}000 BTU" + (f" · до {area} м²" if area else "")
-        return f"{lead} — {tail}"
-    return lead
+    tail = _power_line(f)
+    return f"{lead} — {tail}" if tail else lead
 
 
 def _benefit(f: dict, seed: int) -> str:

@@ -64,3 +64,11 @@ def test_select_respects_count_cap():
     g = _groups()
     sel = select_items(g, {}, published_keys=set(), count=2)
     assert len(sel) == 2
+
+
+def test_select_skips_out_of_stock():
+    o = _o("breeze:NS1", source="breeze", series="Zero", cat=2)
+    o.stock = 0                                   # нет в наличии
+    groups = group_by_series([o])
+    sel = select_items(groups, {}, published_keys=set(), count=10)
+    assert sel == []                              # серия без остатка не выбирается

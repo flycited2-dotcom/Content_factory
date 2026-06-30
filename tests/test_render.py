@@ -31,6 +31,32 @@ def test_caption_shows_power():
     assert "BTU" in cap                       # мощность/площадь показаны
 
 
+def test_caption_uses_real_specs_btu_kw_area():
+    # btu_calc=7 (битый), но реальные ТТХ kBTU=8 / 2.2 кВт / 22 м² должны победить
+    o = Offer(supplier_sku="breeze:DA25", source="breeze", brand="FUNAI",
+              model="DAIJIN Inverter", category_id=2, btu_calc=7,
+              attrs={"Холодопроизводительность (kBTU)": "8",
+                     "Холодопроизводительность (кВт)": "2.20 (0.30 - 2.85)",
+                     "Эффективен для помещений площадью до": "22"},
+              cost=Decimal("37290"), stock=38, photos=[], series="DAIJIN Inverter")
+    cap = render_caption(o, 49990, CFG)
+    assert "8000 BTU" in cap
+    assert "2.2 кВт" in cap
+    assert "до 22 м²" in cap
+    assert "7000 BTU" not in cap              # btu_calc не используется при наличии ТТХ
+
+
+def test_caption_real_specs_decimal_area():
+    o = Offer(supplier_sku="breeze:DA65", source="breeze", brand="FUNAI", model="DAIJIN",
+              category_id=2, btu_calc=20,
+              attrs={"Холодопроизводительность (kBTU)": "21",
+                     "Холодопроизводительность (кВт)": "6.16 ( - )",
+                     "Эффективен для помещений площадью до": "61.6"},
+              cost=Decimal("64490"), stock=7, photos=[], series="DAIJIN")
+    cap = render_caption(o, 84990, CFG)
+    assert "21000 BTU" in cap and "6.16 кВт" in cap and "до 61.6 м²" in cap
+
+
 def test_caption_deterministic():
     o = _offer(sku="breeze:NC9")
     assert render_caption(o, 25990, CFG) == render_caption(o, 25990, CFG)

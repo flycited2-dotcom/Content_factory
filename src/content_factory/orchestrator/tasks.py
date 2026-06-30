@@ -41,6 +41,8 @@ def select_items(groups, filter: dict, published_keys: set, count: int) -> list:
             continue
         if not matches(g, filter):
             continue
+        if not any((m.stock or 0) > 0 for m in g.members):   # только в наличии
+            continue
         out.append(g)
         if len(out) >= count:
             break
