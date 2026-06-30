@@ -148,8 +148,11 @@ def _http_get(url: str) -> bytes:
 
 
 def run_once(groups, cfg: FotogenConfig, store: CardJobStore,
-             http: httpx.Client | None = None, fetch_photo=None) -> tuple[int, int]:
-    """Один проход. Возвращает (submitted, published)."""
+             http: httpx.Client | None = None, fetch_photo=None,
+             specs_fn=None) -> tuple[int, int]:
+    """Один проход. Возвращает (submitted, published).
+    specs_fn(group) -> текст ТТХ для агента (если задан) — иначе specs_text(rep.attrs).
+    Через specs_fn отдаём агенту те же «ключевые особенности», что и в подписи."""
     cards = Path(cfg.cards_dir)
     cards.mkdir(parents=True, exist_ok=True)
     out_dir = Path(cfg.output_dir)
@@ -197,9 +200,10 @@ def run_once(groups, cfg: FotogenConfig, store: CardJobStore,
         if not photo_url:
             continue
         mode = (cfg.modes or {}).get(getattr(g, "key", None)) or cfg.mode
+        specs = specs_fn(g) if specs_fn else specs_text(rep.attrs)
         try:
             in_fn = submit_card_job(cfg, fetch_photo(photo_url), g.brand, g.series,
-                                    specs_text(rep.attrs), http=http, mode=mode)
+                                    specs, http=http, mode=mode)
         except Exception:
             continue
         if in_fn:

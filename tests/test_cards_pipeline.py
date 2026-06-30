@@ -113,6 +113,22 @@ def test_run_once_uses_per_series_mode(tmp_path):
     assert seen.get("mcp") is True
 
 
+def test_run_once_uses_specs_fn(tmp_path):
+    out = tmp_path / "out"; out.mkdir()
+    cfg = _cfg(tmp_path, queue_db=_make_queue_db(tmp_path, []), output_dir=str(out))
+    store = CardJobStore(tmp_path / "s.db")
+    groups = group_by_series([_o("breeze:NC2", 9, "http://p/2.jpg", series="Gloria")])
+    seen = {}
+
+    def handler(req):
+        seen["has"] = b"RICHSPECS" in req.content       # specs из specs_fn ушли агенту
+        return httpx.Response(200, json={"queued": "ext.jpg"})
+    http = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://x")
+    run_once(groups, cfg, store, http=http, fetch_photo=lambda u: b"img",
+             specs_fn=lambda g: "RICHSPECS\nКлюч: значение")
+    assert seen.get("has") is True
+
+
 def test_run_once_retries_failed_until_cap(tmp_path):
     from content_factory.content.cards import card_key
     out = tmp_path / "out"; out.mkdir()

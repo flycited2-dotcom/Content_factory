@@ -15,6 +15,8 @@ from content_factory.ingest import collect_offers
 from content_factory.ingest.oasis_db import fetch_raw_products
 from content_factory.catalog.series import group_by_series
 from content_factory.cards_pipeline import FotogenConfig, CardJobStore, run_once
+from content_factory.content.specs import build_specs_for_card
+from content_factory.ingest.breez import fetch_breez_utp_by_nc
 
 
 def main():
@@ -38,7 +40,18 @@ def main():
         max_pending=int(config("FOTOGEN_MAX_PENDING", str(cfg.fotogen.max_pending))),
         max_total=int(config("FOTOGEN_MAX_TOTAL", str(cfg.fotogen.max_total))))
     store = CardJobStore(Path(cfg.state.card_jobs_db))
-    submitted, published = run_once(groups, fcfg, store)
+
+    # Те же «ключевые особенности», что и в подписи → отдаём агенту на генерацию карточки.
+    utp_map = fetch_breez_utp_by_nc()
+
+    def specs_fn(g):
+        rows = [{"title": t, "value": v} for m in g.members for t, v in (m.attrs or {}).items()]
+        utp = utp_map.get(g.representative.supplier_sku.split(":", 1)[-1]) if g.source == "breeze" else None
+        lines = build_specs_for_card(rows, g.brand, g.series, g.source, utp_raw=utp,
+                                     titles=[m.model for m in g.members])
+        return "\n".join(lines)
+
+    submitted, published = run_once(groups, fcfg, store, specs_fn=specs_fn)
     print(f"cards: series={len(groups)} submitted={submitted} published={published}")
 
 
