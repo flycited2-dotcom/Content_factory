@@ -23,7 +23,8 @@ from content_factory.orchestrator.scheduler import PipelineContext, run_due
 
 
 def build_context(cfg, token: str, owner_chat: str, pub_state: PublishState,
-                  confirm_store: ConfirmStore, http=None, channel_id: str = "") -> PipelineContext:
+                  confirm_store: ConfirmStore, http=None, channel_id: str = "",
+                  utp_lookup=None) -> PipelineContext:
     """Собрать PipelineContext с реальными действиями (Telegram/state).
     channel_id — боевой канал из .env (секрет, не из yaml); fallback — cfg.telegram.channel_id."""
     chan = channel_id or cfg.telegram.channel_id
@@ -65,7 +66,7 @@ def build_context(cfg, token: str, owner_chat: str, pub_state: PublishState,
         review_cfg=cfg.review, stop_words=cfg.content.stop_words,
         require_card=cfg.cards.require_for_publish, default_mode=cfg.default_card_mode,
         published_keys=pub_state.published_keys, publish=publish,
-        submit_cards=submit_cards, alert=alert, confirm=confirm)
+        submit_cards=submit_cards, alert=alert, confirm=confirm, utp_lookup=utp_lookup)
 
 
 def main():
@@ -89,11 +90,21 @@ def main():
                             lambda nc: None)
     groups = group_by_series(offers)
 
+    # УТП Бриза (✓-фичи): тянем один раз; для не-breeze вернёт None (берётся из ТТХ/«Описание»)
+    from content_factory.ingest.breez import fetch_breez_utp_by_nc
+    utp_map = fetch_breez_utp_by_nc()
+
+    def utp_lookup(g):
+        if g.source != "breeze":
+            return None
+        nc = g.representative.supplier_sku.split(":", 1)[-1]
+        return utp_map.get(nc)
+
     ctx = build_context(cfg, token=config("TELEGRAM_BOT_TOKEN", ""),
                         owner_chat=config("TELEGRAM_OWNER_CHAT_ID", config("FOTOGEN_CHAT_ID", "")),
                         pub_state=PublishState(cfg.state.db),
                         confirm_store=ConfirmStore(cfg.state.db),
-                        channel_id=config("TELEGRAM_CHANNEL_ID", ""))
+                        channel_id=config("TELEGRAM_CHANNEL_ID", ""), utp_lookup=utp_lookup)
     outcomes = run_due(now, q, groups, ctx)
     pub = sum(len(o.published) for _, o in outcomes)
     awe = sum(len(o.awaiting) for _, o in outcomes)

@@ -165,27 +165,57 @@ _FEATURES = [
     lambda t: _flag(t, r"авторестарт|перезапуск.*питан", "🔄 Авторестарт после отключения"),
 ]
 
-_UTP_SKIP_RE = re.compile(
-    r"wi[\s-]?fi|вай|инвертор|ионизац|плазм|ультрафиолет|\bуф\b|самоочист|автоочист|"
-    r"sleep|ночн|авторестарт|класс\s|энергоэфф|гаранти|компрессор|шум|голос|алис",
+# Концепты, которые показываются структурными буллетами. Пункт из УТП с таким
+# концептом берём, ТОЛЬКО если соответствующий буллет НЕ сформирован (иначе дубль).
+# Так wifi/инвертор/… из УТП покажутся, когда отдельного tech-поля нет (грабля владельца).
+_CONCEPTS = ("wi-fi", "wifi", "вай", "инвертор", "ионизац", "плазм", "ультрафиолет",
+             "уф-", "самоочист", "автоочист", "sleep", "ночн", "авторестарт",
+             "перезапуск", "энергоэфф", "класс энерг", "гаранти", "компрессор", "шум", "голос")
+
+# Ключевые слова «фич» — чтобы из прозы «Описание» вытащить только пункты-преимущества,
+# а не маркетинговую воду.
+_DESC_FEATURE_RE = re.compile(
+    r"режим|функц|технолог|защит|фильтр|управл|таймер|очистк|тих|эконом|класс|"
+    r"компрессор|гаранти|инвертор|wi[\s-]?fi|вай|обогрев|охлажд|осушен|ионизац|самоочист|пульт",
     re.I,
 )
 
 
-def _utp_extras(t, source, utp_raw):
-    """Доп. ✓-фишки из УТП (Бриз — utp_raw из API; прочие — tech-поле «УТП»). До 5 шт."""
-    if source == BREEZE_SOURCE:
+def _dup_of_produced(item_low, produced_low):
+    for c in _CONCEPTS:
+        if c in item_low and c in produced_low:
+            return True
+    return False
+
+
+def _desc_features(desc):
+    """Из прозы «Описание» вытащить пункты-преимущества (предложения с фич-словами)."""
+    s = html.unescape(html.unescape(desc or ""))
+    s = re.sub(r"<[^>]+>", " ", s)
+    out = []
+    for part in re.split(r"[;\n.!]+", s):
+        p = part.strip().strip("•●·*-–—").strip()
+        if 8 <= len(p) <= 90 and _DESC_FEATURE_RE.search(p):
+            out.append(p)
+    return out
+
+
+def _utp_extras(t, source, utp_raw, produced):
+    """Доп. ✓-фишки: Бриз — utp_raw из API; иначе tech-поле «УТП»; иначе проза «Описание».
+    Пропускаем пункт, если он уже показан структурным буллетом (дедуп). До 5 шт."""
+    if source == BREEZE_SOURCE and utp_raw:
         items = _clean_utp(utp_raw)
-    else:
+    elif t.value(r"^\s*утп\b"):
         items = _clean_utp(t.value(r"^\s*утп\b"))
+    else:
+        items = _desc_features(t.value(r"^\s*описание\b"))
+    produced_low = " ".join(produced).lower()
     out, seen = [], set()
     for it in items:
-        if _UTP_SKIP_RE.search(it):
+        low = it.lower()
+        if _dup_of_produced(low, produced_low) or low in seen:
             continue
-        key = it.lower()
-        if key in seen:
-            continue
-        seen.add(key)
+        seen.add(low)
         out.append(f"✓ {it}")
         if len(out) >= 5:
             break
@@ -196,5 +226,5 @@ def build_specs_for_card(tech_rows, brand, series, source, utp_raw=None, titles=
     """Список строк-преимуществ серии (plain text). Пусто → []."""
     t = _Tech(tech_rows, titles)
     lines = [ln for extract in _FEATURES if (ln := extract(t))]
-    lines += _utp_extras(t, source, utp_raw)
+    lines += _utp_extras(t, source, utp_raw, lines)
     return lines

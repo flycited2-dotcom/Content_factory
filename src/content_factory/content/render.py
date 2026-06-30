@@ -98,9 +98,10 @@ def _header(f: dict, price) -> str:
     return head + (" — " + " · ".join(tail) if tail else "")
 
 
-def render_caption(item, price, cfg) -> str:
+def render_caption(item, price, cfg, utp_raw=None) -> str:
     """B2B-подпись (≤ cfg.caption_max). `item` — Offer | SeriesGroup, `price` — int|None.
-    cfg — ContentConfig (caption_max, stop_words, descriptions {series_key: ручной текст})."""
+    cfg — ContentConfig (caption_max, stop_words, descriptions {series_key: ручной текст}).
+    utp_raw — список преимуществ Бриза из API (для breeze; иначе берётся из ТТХ/«Описание»)."""
     f = _extract(item)
     cap_max = getattr(cfg, "caption_max", 1024)
     header = _header(f, price)
@@ -113,7 +114,8 @@ def render_caption(item, price, cfg) -> str:
         power = _power_line(f)
         if power:
             bullets.append(f"❄️ {power}")
-        bullets += build_specs_for_card(f["tech_rows"], f["brand"], f["series"], f["source"])
+        bullets += build_specs_for_card(f["tech_rows"], f["brand"], f["series"], f["source"],
+                                        utp_raw=utp_raw)
         lines = [header, _DIVIDER]
         if bullets:
             lines.append("Ключевые особенности:")

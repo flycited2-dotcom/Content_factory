@@ -30,6 +30,7 @@ class PipelineContext:
     submit_cards: object = None       # (groups, mode) -> None
     alert: object = None              # (group, reasons) -> None
     confirm: object = None            # (slot, group, card_path, caption) -> None
+    utp_lookup: object = None         # (group) -> utp_raw|None (УТП Бриза для подписи)
 
 
 @dataclass
@@ -69,7 +70,8 @@ def run_slot(slot, groups, ctx: PipelineContext) -> SlotOutcome:
             continue
 
         price = _price_of(g, ctx.pricing_cfg)
-        caption = render_caption(g, price, ctx.content_cfg)
+        utp_raw = ctx.utp_lookup(g) if ctx.utp_lookup else None
+        caption = render_caption(g, price, ctx.content_cfg, utp_raw=utp_raw)
         item = ReviewItem(price=price, caption=caption, attrs=g.representative.attrs,
                           card_path=str(card) if card_ready(card) else None,
                           brand=g.brand, category_id=g.category_id)

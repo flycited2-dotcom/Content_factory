@@ -46,6 +46,15 @@ def test_caption_uses_real_specs_btu_kw_area():
     assert "7000 BTU" not in cap              # btu_calc не используется при наличии ТТХ
 
 
+def test_caption_uses_breeze_utp_raw():
+    o = Offer(supplier_sku="breeze:NCX", source="breeze", brand="FUNAI", model="X",
+              category_id=2, btu_calc=9, attrs={}, cost=Decimal("1"), stock=5,
+              photos=[], series="X")
+    cap = render_caption(o, 30000, CFG, utp_raw="5 скоростей вентилятора;Eco-режим энергосбережения")
+    assert "✓ 5 скоростей вентилятора" in cap
+    assert "✓ Eco-режим энергосбережения" in cap
+
+
 def test_caption_real_specs_decimal_area():
     o = Offer(supplier_sku="breeze:DA65", source="breeze", brand="FUNAI", model="DAIJIN",
               category_id=2, btu_calc=20,

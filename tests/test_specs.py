@@ -50,3 +50,29 @@ def test_order_class_first():
                  ("Класс энергоэффективности", "A"))
     lines = build_specs_for_card(rows, "X", "S", "breeze")
     assert lines[0].startswith("⚡") and any(s.startswith("⚙️") for s in lines)
+
+
+def test_utp_wifi_shown_when_no_bullet():
+    # wifi только в списке «УТП», отдельного tech-поля нет → должен попасть в ✓
+    rows = _rows(("УТП", "Wi-Fi управление;Тихий ночной режим"))
+    lines = build_specs_for_card(rows, "X", "S", "rusklimat")
+    assert "✓ Wi-Fi управление" in lines
+
+
+def test_utp_wifi_skipped_when_bullet_exists():
+    # есть tech-поле wifi (→ 📶 буллет) И тот же пункт в УТП → не дублируем
+    rows = _rows(("Wi-Fi модуль", "есть"), ("УТП", "Wi-Fi управление;Тихий режим"))
+    lines = build_specs_for_card(rows, "X", "S", "rusklimat")
+    assert any(s.startswith("📶") for s in lines)
+    assert "✓ Wi-Fi управление" not in lines
+    assert "✓ Тихий режим" in lines
+
+
+def test_description_fallback_extracts_features():
+    desc = ("Кондиционеры AKAI — это современное решение. Тихий ночной режим работы. "
+            "Wi-Fi управление со смартфона. Гарантия от производителя.")
+    rows = _rows(("Описание", desc))
+    lines = build_specs_for_card(rows, "AKAI", "Asita", "daichi")
+    assert "✓ Тихий ночной режим работы" in lines
+    assert "✓ Wi-Fi управление со смартфона" in lines
+    assert not any("современное решение" in s for s in lines)   # вода отброшена
