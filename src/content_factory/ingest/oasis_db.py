@@ -34,7 +34,7 @@ def build_query_params(crimea: str, cats: list[int], deny: list[str]) -> dict:
     return {"crimea": crimea, "cats": cats, "deny": deny}
 
 
-def group_tech_rows(rows, max_specs: int = 12) -> dict[str, dict]:
+def group_tech_rows(rows, max_specs: int = 60) -> dict[str, dict]:
     """Сгруппировать строки ТТХ по nc_code → {nc: {title: value}} (пустые/дубли пропускаем)."""
     out: dict[str, dict] = {}
     for r in rows:
