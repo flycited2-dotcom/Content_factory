@@ -25,7 +25,8 @@ HELP = ("Команды:\n"
         "[mode=] [source=] [cat=] [confirm] [channel=] [id=]\n"
         "/status — что в очереди   /cancel <id> — отменить\n"
         "/pending — посты на подтверждении   /approve <key> — опубликовать   "
-        "/reject <key> — отклонить   /held — отложенные")
+        "/reject <key> — отклонить   /regen <key> — перегенерировать карточку   "
+        "/held — отложенные")
 
 
 def _norm_time(t: str) -> str:
@@ -108,13 +109,29 @@ def _status(queue) -> str:
 
 
 def handle_command(text: str, queue, today: date | None = None, held_provider=None,
-                   confirm_store=None, publish_fn=None, publish_state=None) -> str:
+                   confirm_store=None, publish_fn=None, publish_state=None,
+                   regen_fn=None) -> str:
     """Маршрутизация команды → действие → текст ответа владельцу.
     confirm_store/publish_fn/publish_state нужны для confirm-пилота (/approve, /reject, /pending).
-    publish_fn(awaiting) -> PublishResult публикует подтверждённый пост в канал."""
+    publish_fn(awaiting) -> PublishResult публикует подтверждённый пост в канал.
+    regen_fn(awaiting) -> bool убирает карточку (файл + запись store) для перегенерации."""
     text = (text or "").strip()
     parts = text.split()
     cmd = (parts[0].lower() if parts else "")
+
+    if cmd.startswith("/regen"):
+        if not (confirm_store and regen_fn):
+            return "❌ перегенерация недоступна"
+        if len(parts) < 2:
+            return "❌ укажите ключ: /regen <key>"
+        key = text.split(maxsplit=1)[1].strip()    # ключ может содержать пробелы (серия)
+        a = confirm_store.get(key)
+        if not a:
+            return f"❌ нет такого превью: {key}"
+        regen_fn(a)
+        confirm_store.mark(key, "regen")
+        return (f"🔄 на перегенерации: {key} — карточка будет сгенерирована заново "
+                f"и придёт новым превью")
 
     if cmd.startswith("/approve"):
         if not (confirm_store and publish_fn):
@@ -171,15 +188,16 @@ def handle_command(text: str, queue, today: date | None = None, held_provider=No
 
 
 def handle_callback(data: str, queue, today: date | None = None,
-                    confirm_store=None, publish_fn=None, publish_state=None) -> str:
-    """Тап inline-кнопки под превью. callback_data = 'approve:<key>' | 'reject:<key>'.
-    Переиспользует логику /approve | /reject (ключ может содержать пробелы)."""
+                    confirm_store=None, publish_fn=None, publish_state=None,
+                    regen_fn=None) -> str:
+    """Тап inline-кнопки под превью. callback_data = 'approve:<key>' | 'reject:<key>'
+    | 'regen:<key>'. Переиспользует логику команд (ключ может содержать пробелы)."""
     if not data or ":" not in data:
         return "❌ неизвестная кнопка"
     action, key = data.split(":", 1)
     action = action.strip().lower()
-    if action not in ("approve", "reject"):
+    if action not in ("approve", "reject", "regen"):
         return "❌ неизвестное действие"
     return handle_command(f"/{action} {key}", queue, today=today,
                           confirm_store=confirm_store, publish_fn=publish_fn,
-                          publish_state=publish_state)
+                          publish_state=publish_state, regen_fn=regen_fn)

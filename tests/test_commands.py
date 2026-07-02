@@ -199,3 +199,35 @@ def test_handle_callback_reject(tmp_path):
 def test_handle_callback_bad_data(tmp_path):
     q = TaskQueue(tmp_path / "q.db")
     assert "❌" in handle_callback("garbage", q)
+
+
+# ── /regen и кнопка 🔄 (перегенерация карточки по запросу владельца) ──────────
+def test_handle_regen_marks_and_calls_fn(tmp_path):
+    q = TaskQueue(tmp_path / "q.db")
+    cs = ConfirmStore(tmp_path / "c.db")
+    key = "breeze|xigma|sky inverter"
+    cs.add(key, "@chan", "/c/x.jpg", "cap")
+    got = {}
+
+    def regen_fn(a):
+        got["key"] = a.key
+        return True
+
+    reply = handle_command(f"/regen {key}", q, confirm_store=cs, regen_fn=regen_fn)
+    assert "🔄" in reply and got["key"] == key
+    assert cs.get(key).status == "regen"
+
+
+def test_handle_regen_unknown_key(tmp_path):
+    q = TaskQueue(tmp_path / "q.db")
+    cs = ConfirmStore(tmp_path / "c.db")
+    reply = handle_command("/regen nope", q, confirm_store=cs, regen_fn=lambda a: True)
+    assert "❌" in reply
+
+
+def test_handle_callback_regen(tmp_path):
+    q = TaskQueue(tmp_path / "q.db")
+    cs = ConfirmStore(tmp_path / "c.db")
+    cs.add("k1", "@chan", "/c/x.jpg", "cap")
+    reply = handle_callback("regen:k1", q, confirm_store=cs, regen_fn=lambda a: True)
+    assert "🔄" in reply and cs.get("k1").status == "regen"

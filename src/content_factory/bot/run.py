@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 import json
+import sqlite3
 import time
 from pathlib import Path
 import httpx
@@ -24,6 +25,25 @@ def make_publish_fn(token: str, parse_mode: str, pub_state: PublishState, http=N
         return publish_post(token, a.channel, a.card_path, a.caption, http=http,
                             parse_mode=parse_mode, key=a.key, state=pub_state, retries=2)
     return publish_fn
+
+
+def make_regen_fn(card_jobs_db):
+    """regen_fn(awaiting) → убрать карточку для перегенерации: удалить файл и запись
+    CardJobStore (ключ store = имя файла карточки без расширения). После этого серия
+    снова «без карточки» — cf-cards пересабмитит её агенту на ближайшем тике."""
+    def regen_fn(a) -> bool:
+        p = Path(a.card_path or "")
+        try:
+            p.unlink(missing_ok=True)
+        except OSError:
+            pass
+        try:
+            with sqlite3.connect(card_jobs_db) as c:
+                c.execute("DELETE FROM card_jobs WHERE key=?", (p.stem,))
+        except sqlite3.OperationalError:
+            pass                                   # store ещё не создан — нечего чистить
+        return True
+    return regen_fn
 
 
 def finalize_preview(http, token: str, cq: dict, verdict: str) -> None:
@@ -58,6 +78,7 @@ def main():
     cs = ConfirmStore(cfg.state.db)
     ps = PublishState(cfg.state.db)
     publish_fn = make_publish_fn(token, cfg.telegram.parse_mode, ps)
+    regen_fn = make_regen_fn(cfg.state.card_jobs_db)
     http = httpx.Client(timeout=40)
     offset = 0
     print("bot: long-poll запущен")
@@ -84,7 +105,8 @@ def main():
                         pass
                     continue
                 reply = handle_callback(cq.get("data", ""), q, confirm_store=cs,
-                                        publish_fn=publish_fn, publish_state=ps)
+                                        publish_fn=publish_fn, publish_state=ps,
+                                        regen_fn=regen_fn)
                 try:
                     http.post(f"{TG_API}/bot{token}/answerCallbackQuery",
                               data={"callback_query_id": cq.get("id"), "text": reply[:180]})
@@ -100,7 +122,7 @@ def main():
             if not text or (owner and chat != owner):     # только владелец управляет ботом
                 continue
             reply = handle_command(text, q, confirm_store=cs, publish_fn=publish_fn,
-                                   publish_state=ps)
+                                   publish_state=ps, regen_fn=regen_fn)
             try:
                 http.post(f"{TG_API}/bot{token}/sendMessage",
                           data={"chat_id": chat, "text": reply})

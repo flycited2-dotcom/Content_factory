@@ -51,12 +51,15 @@ def build_context(cfg, token: str, owner_chat: str, pub_state: PublishState,
         confirm_store.add(group.key, channel, card, caption)
         if not (token and review_to):
             return
-        # Превью в ревью-канал (или личку) с inline-кнопками ✅/❌ (тап вместо печати ключа).
+        # Превью в ревью-канал (или личку) с inline-кнопками ✅/❌/🔄 (тап вместо печати ключа).
         ad, rd = f"approve:{group.key}", f"reject:{group.key}"
-        if len(ad.encode()) <= 64 and len(rd.encode()) <= 64:   # лимит callback_data Telegram
-            kb = json.dumps({"inline_keyboard": [[
-                {"text": "✅ Опубликовать", "callback_data": ad},
-                {"text": "❌ Отклонить", "callback_data": rd}]]}, ensure_ascii=False)
+        rg = f"regen:{group.key}"
+        if all(len(x.encode()) <= 64 for x in (ad, rd, rg)):    # лимит callback_data Telegram
+            kb = json.dumps({"inline_keyboard": [
+                [{"text": "✅ Опубликовать", "callback_data": ad},
+                 {"text": "❌ Отклонить", "callback_data": rd}],
+                [{"text": "🔄 Перегенерировать карточку", "callback_data": rg}]]},
+                ensure_ascii=False)
             publish_post(token, review_to, card, f"{caption}\n\n— на подтверждение —",
                          http=http, parse_mode=cfg.telegram.parse_mode, reply_markup=kb)
         else:                                                   # длинный ключ → текстовый фолбэк
