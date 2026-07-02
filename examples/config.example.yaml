@@ -36,8 +36,17 @@ fotogen:                     # очередь фотоагента (значен
 telegram:
   channel_id: "@your_channel"   # боевой канал (бот — админ); токен в .env
   test_channel_id: ""           # тестовый канал/личка для прогона
+  review_channel_id: ""         # закрытый ревью-канал (превью с ✅/❌); пусто = в личку владельцу
   min_seconds_between_posts: 180
   parse_mode: "HTML"
+
+auto_tasks:                     # постоянные авто-задачи: планировщик сам создаёт слоты на сегодня
+  - id: "ac"                    # → task_id = auto-ac-<дата> (каждый день свежие слоты)
+    filter: {categories: [2, 6, 7]}
+    count: 2                    # серий за слот
+    times: ["10:00", "14:00"]   # локальное время сервера
+    # mode: "mcp"               # опц.; по умолчанию — авто по категории (cards.modes_by_category)
+    # confirm: false            # опц.; по умолчанию true — через ревью-канал
 
 review:                      # детерминированные правила (без LLM)
   price_min: 1000

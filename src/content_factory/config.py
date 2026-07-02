@@ -40,6 +40,7 @@ class FotogenConfigYaml:
 class TelegramConfig:
     channel_id: str = ""              # боевой канал (бот — админ); токен в .env
     test_channel_id: str = ""         # тестовый канал/личка для прогона
+    review_channel_id: str = ""       # закрытый ревью-канал (превью ✅/❌); пусто = личка владельца
     min_seconds_between_posts: int = 180
     parse_mode: str = "HTML"
 
@@ -72,6 +73,8 @@ class AppConfig:
     telegram: TelegramConfig
     review: ReviewConfig
     state: StateConfig
+    auto_tasks: list = field(default_factory=list)   # постоянные авто-задачи (сырые dict из yaml;
+                                                     # разбор — orchestrator/auto.py)
 
 
 def load_config(path: str | Path) -> AppConfig:
@@ -117,6 +120,7 @@ def load_config(path: str | Path) -> AppConfig:
     tg = d.get("telegram", {})
     telegram = TelegramConfig(channel_id=tg.get("channel_id", "") or "",
                               test_channel_id=tg.get("test_channel_id", "") or "",
+                              review_channel_id=str(tg.get("review_channel_id", "") or ""),
                               min_seconds_between_posts=tg.get("min_seconds_between_posts", 180),
                               parse_mode=tg.get("parse_mode", "HTML"))
 
@@ -134,4 +138,5 @@ def load_config(path: str | Path) -> AppConfig:
     return AppConfig(source=source, pricing=pricing, content=content, cards=cards,
                      default_card_mode=default_card_mode,
                      cards_modes_by_category=modes_by_category, fotogen=fotogen,
-                     telegram=telegram, review=review, state=state)
+                     telegram=telegram, review=review, state=state,
+                     auto_tasks=d.get("auto_tasks", []) or [])

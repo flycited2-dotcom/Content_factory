@@ -56,6 +56,25 @@ def test_load_config_defaults_on_empty(tmp_path):
     assert cfg.review.require_card is True
 
 
+def test_auto_tasks_and_review_channel(tmp_path):
+    cfg = load_config(_write_cfg(tmp_path,
+        "telegram: {channel_id: '@chan', review_channel_id: '-100500'}\n"
+        "auto_tasks:\n"
+        "  - id: ac\n"
+        "    filter: {categories: [2, 6, 7]}\n"
+        "    count: 2\n"
+        "    times: ['10:00', '14:00']\n"))
+    assert cfg.telegram.review_channel_id == "-100500"
+    assert cfg.auto_tasks == [{"id": "ac", "filter": {"categories": [2, 6, 7]},
+                               "count": 2, "times": ["10:00", "14:00"]}]
+
+
+def test_auto_tasks_default_empty(tmp_path):
+    cfg = load_config(_write_cfg(tmp_path, "telegram: {channel_id: '@chan'}\n"))
+    assert cfg.auto_tasks == []
+    assert cfg.telegram.review_channel_id == ""
+
+
 def test_example_config_loads(tmp_path):
     # реальный пример из репозитория должен парситься без ошибок
     from pathlib import Path
