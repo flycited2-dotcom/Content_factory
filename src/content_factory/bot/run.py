@@ -5,6 +5,7 @@
   python -m content_factory.bot.run
 """
 from __future__ import annotations
+import json
 import time
 from pathlib import Path
 import httpx
@@ -23,6 +24,23 @@ def make_publish_fn(token: str, parse_mode: str, pub_state: PublishState, http=N
         return publish_post(token, a.channel, a.card_path, a.caption, http=http,
                             parse_mode=parse_mode, key=a.key, state=pub_state, retries=2)
     return publish_fn
+
+
+def finalize_preview(http, token: str, cq: dict, verdict: str) -> None:
+    """После ✅/❌ в ревью-канале: заменить кнопки превью одной «вердикт»-кнопкой
+    (подпись/форматирование не трогаем — канал остаётся журналом ревью)."""
+    msg = cq.get("message") or {}
+    chat_id = (msg.get("chat") or {}).get("id")
+    message_id = msg.get("message_id")
+    if not (chat_id and message_id):
+        return
+    kb = json.dumps({"inline_keyboard": [[{"text": verdict[:60], "callback_data": "noop"}]]},
+                    ensure_ascii=False)
+    try:
+        http.post(f"{TG_API}/bot{token}/editMessageReplyMarkup",
+                  data={"chat_id": chat_id, "message_id": message_id, "reply_markup": kb})
+    except httpx.HTTPError:
+        pass
 
 
 def get_updates(token: str, offset: int, timeout: int = 30, http=None) -> list:
@@ -58,16 +76,22 @@ def main():
                 frm = str((cq.get("from") or {}).get("id", ""))
                 if owner and frm != owner:
                     continue
+                if cq.get("data") == "noop":          # «вердикт»-кнопка уже нажатого превью
+                    try:
+                        http.post(f"{TG_API}/bot{token}/answerCallbackQuery",
+                                  data={"callback_query_id": cq.get("id")})
+                    except httpx.HTTPError:
+                        pass
+                    continue
                 reply = handle_callback(cq.get("data", ""), q, confirm_store=cs,
                                         publish_fn=publish_fn, publish_state=ps)
-                chat = str(((cq.get("message") or {}).get("chat") or {}).get("id", "") or frm)
                 try:
                     http.post(f"{TG_API}/bot{token}/answerCallbackQuery",
                               data={"callback_query_id": cq.get("id"), "text": reply[:180]})
-                    http.post(f"{TG_API}/bot{token}/sendMessage",
-                              data={"chat_id": chat, "text": reply})
                 except httpx.HTTPError:
                     pass
+                # вместо эха в чат — приписываем вердикт к самому превью (журнал ревью)
+                finalize_preview(http, token, cq, reply)
                 continue
 
             msg = u.get("message") or {}
