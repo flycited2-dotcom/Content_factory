@@ -60,6 +60,27 @@ def test_wiring_auto_publishes_to_channel(tmp_path):
     assert ps.is_published(groups[0].key)
 
 
+def _http2(calls, bodies):
+    def handler(req):
+        calls.append(req.url.path)
+        bodies.append(req.read())
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
+    return httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.telegram.org")
+
+
+def test_wiring_confirm_preview_goes_to_review_channel(tmp_path):
+    cfg, groups = _setup(tmp_path)
+    calls, bodies = [], []
+    ps, cs = PublishState(cfg.state.db), ConfirmStore(cfg.state.db)
+    ctx = build_context(cfg, "TOK", "999", ps, cs, http=_http2(calls, bodies),
+                        review_chat="-100777")
+    q = TaskQueue(tmp_path / "q.db")
+    q.add(Task(id="t", filter={}, count=5, confirm=True))
+    run_slot(q.due("2999-01-01 00:00")[0], groups, ctx)
+    photo_bodies = [b for p, b in zip(calls, bodies) if "sendPhoto" in p]
+    assert photo_bodies and b"-100777" in photo_bodies[0]   # превью ушло в ревью-канал
+
+
 def test_wiring_confirm_sends_preview_and_holds(tmp_path):
     cfg, groups = _setup(tmp_path)
     calls = []
