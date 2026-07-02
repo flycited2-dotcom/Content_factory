@@ -21,6 +21,10 @@ cards:                           # карточки-картинки (через
   base_url: "https://splithome.ru/static/cf-cards"
   default_mode: "mcp"
   require_for_publish: true      # публиковать только товар с готовой карточкой
+  modes_by_category:             # авто-выбор стиля по category_id (неизвестная → default_mode)
+    2: "mcp"                     # бытовые сплит-системы
+    6: "mcp"                     # полупромышленные
+    7: "mcp"                     # мобильные
 
 fotogen:                         # очередь фотоагента (токен/пути — в .env)
   api_url: "http://127.0.0.1:8765"
@@ -33,6 +37,21 @@ telegram:                        # channel_id и токен — из .env (TELEG
   test_channel_id: ""
   min_seconds_between_posts: 180
   parse_mode: "HTML"
+
+auto_tasks:                      # полный автомат: превью в ревью-канал по окнам владельца
+  - id: "am"                     # 10 постов с 9 до 10
+    filter: {categories: [2, 6, 7]}
+    count: 2
+    times: ["09:00", "09:12", "09:24", "09:36", "09:48"]
+  - id: "day"                    # 12 постов с 13 до 14
+    filter: {categories: [2, 6, 7]}
+    count: 2
+    times: ["13:00", "13:10", "13:20", "13:30", "13:40", "13:50"]
+  - id: "eve"                    # 10 постов с 17 до 17:30
+    filter: {categories: [2, 6, 7]}
+    count: 2
+    times: ["17:00", "17:06", "17:12", "17:18", "17:24"]
+  # confirm по умолчанию ВКЛ: всё идёт через ревью-канал (TELEGRAM_REVIEW_CHANNEL_ID в .env)
 
 review:                          # детерминированные правила (без LLM)
   price_min: 1000
