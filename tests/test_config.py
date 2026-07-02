@@ -39,11 +39,20 @@ def test_load_config_parses_all_sections(tmp_path):
     assert cfg.state.card_jobs_db == "state/cards.db"
 
 
+def test_load_config_parses_modes_by_category(tmp_path):
+    cfg = load_config(_write_cfg(tmp_path,
+        "source: {}\n"
+        "cards: {default_mode: mcp, modes_by_category: {2: mcp, 7: kbt}}\n"))
+    # ключи приводятся к int (как category_id из каталога oasis)
+    assert cfg.cards_modes_by_category == {2: "mcp", 7: "kbt"}
+
+
 def test_load_config_defaults_on_empty(tmp_path):
     cfg = load_config(_write_cfg(tmp_path, "source: {}\n"))
     assert cfg.source.warehouse == "Симферополь"
     assert cfg.source.catalog.report_category_ids == [2, 6, 7]
     assert cfg.default_card_mode == "mcp"
+    assert cfg.cards_modes_by_category == {}            # по умолчанию — пустая карта
     assert cfg.review.require_card is True
 
 

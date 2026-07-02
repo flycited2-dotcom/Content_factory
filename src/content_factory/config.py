@@ -67,6 +67,7 @@ class AppConfig:
     content: ContentConfig
     cards: CardConfig                 # переиспользуем тип движка (resolve_photos/has_card)
     default_card_mode: str            # стиль карточки по умолчанию (cards.default_mode)
+    cards_modes_by_category: dict     # {category_id(int): mode} — авто-выбор стиля по категории
     fotogen: FotogenConfigYaml
     telegram: TelegramConfig
     review: ReviewConfig
@@ -104,6 +105,8 @@ def load_config(path: str | Path) -> AppConfig:
                        exts=cd.get("exts", [".jpg", ".jpeg", ".png"]),
                        require_for_publish=bool(cd.get("require_for_publish", True)))
     default_card_mode = cd.get("default_mode", "mcp")
+    # карта category_id→mode: ключи приводим к int (category_id из oasis — целые)
+    modes_by_category = {int(k): str(v) for k, v in (cd.get("modes_by_category") or {}).items()}
 
     fg = d.get("fotogen", {})
     fotogen = FotogenConfigYaml(api_url=fg.get("api_url", "http://127.0.0.1:8765"),
@@ -129,5 +132,6 @@ def load_config(path: str | Path) -> AppConfig:
                         card_jobs_db=st.get("card_jobs_db", "state/card_jobs.db"))
 
     return AppConfig(source=source, pricing=pricing, content=content, cards=cards,
-                     default_card_mode=default_card_mode, fotogen=fotogen,
+                     default_card_mode=default_card_mode,
+                     cards_modes_by_category=modes_by_category, fotogen=fotogen,
                      telegram=telegram, review=review, state=state)
