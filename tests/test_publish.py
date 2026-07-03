@@ -1,6 +1,7 @@
 from urllib.parse import parse_qs
 import httpx
-from content_factory.publish.telegram import publish_post, PublishState, send_message
+from content_factory.publish.telegram import (
+    publish_post, PublishState, send_message, edit_caption)
 
 
 def _client(handler):
@@ -160,3 +161,42 @@ def test_publish_state_mark_backcompat(tmp_path):
     ps.mark("k0", 5)                       # старый вызов без channel/caption
     (r,) = ps.records()
     assert (r.channel, r.caption, r.status) == ("", None, "active")
+
+
+# ── edit_caption («живой канал» правит посты) ─────────────────────────────────
+def test_edit_caption_ok():
+    reqs = []
+
+    def handler(req):
+        reqs.append((req.url.path, req.read()))
+        return httpx.Response(200, json={"ok": True})
+    http = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.telegram.org")
+    ok, err, gone = edit_caption("TOK", "@chan", 42, "новая подпись", http=http)
+    assert (ok, err, gone) == (True, None, False)
+    path, body = reqs[0]
+    assert path == "/botTOK/editMessageCaption"
+    from urllib.parse import unquote_plus
+    decoded = unquote_plus(body.decode())
+    assert "message_id=42" in decoded and "новая подпись" in decoded
+
+
+def test_edit_caption_message_gone():
+    def handler(req):
+        return httpx.Response(400, json={"ok": False,
+                                         "description": "Bad Request: message to edit not found"})
+    http = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.telegram.org")
+    ok, err, gone = edit_caption("TOK", "@chan", 42, "cap", http=http)
+    assert not ok and gone                        # пост удалён руками → больше не трогаем
+
+
+def test_edit_caption_transient_retries():
+    calls = []
+
+    def handler(req):
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(500)
+        return httpx.Response(200, json={"ok": True})
+    http = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.telegram.org")
+    ok, err, gone = edit_caption("TOK", "@chan", 42, "cap", http=http, retries=1, backoff=0)
+    assert ok and len(calls) == 2

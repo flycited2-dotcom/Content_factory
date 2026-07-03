@@ -118,6 +118,43 @@ def send_message(bot_token: str, chat_id: str, text: str,
         return False
 
 
+def edit_caption(bot_token: str, chat_id, message_id: int, caption: str, *,
+                 parse_mode: str | None = None, http: httpx.Client | None = None,
+                 retries: int = 1, backoff: float = 1.0):
+    """editMessageCaption («живой канал»). → (ok, error, gone): gone=True — пост
+    удалён/недоступен (больше не трогать: пометить sold). Транзиенты ретраим."""
+    client = http or httpx.Client(timeout=30)
+    data = {"chat_id": str(chat_id), "message_id": message_id,
+            "caption": (caption or "")[:CAPTION_MAX]}
+    if parse_mode:
+        data["parse_mode"] = parse_mode
+    for attempt in range(max(1, retries) + 1):
+        try:
+            r = client.post(f"{TG_API}/bot{bot_token}/editMessageCaption", data=data)
+        except httpx.HTTPError as e:
+            if attempt < retries:
+                time.sleep(backoff)
+                continue
+            return False, f"network: {e}", False
+        if r.status_code == 429 or r.status_code >= 500:
+            if attempt < retries:
+                time.sleep(backoff)
+                continue
+            return False, f"http {r.status_code}", False
+        body = {}
+        try:
+            body = r.json() or {}
+        except Exception:
+            pass
+        if body.get("ok"):
+            return True, None, False
+        desc = (body.get("description") or f"http {r.status_code}").lower()
+        gone = ("not found" in desc or "message_id_invalid" in desc
+                or "can't be edited" in desc)
+        return False, desc, gone
+    return False, "unknown", False
+
+
 def _is_url(s: str) -> bool:
     return isinstance(s, str) and s.lower().startswith(("http://", "https://"))
 
