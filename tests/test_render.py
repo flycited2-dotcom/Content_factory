@@ -93,3 +93,49 @@ def test_caption_long_override_truncated_keeps_price():
     cap = render_caption(group, 25990, cfg)
     assert len(cap) <= 1024
     assert "25 990" in cap                     # цена сохранена даже при длинном override
+
+
+# ── серийный формат (выбор владельца 2026-07-03): пост продаёт всю линейку ────
+def _series_group():
+    """Серия из трёх мощностей (07/09/12), одна не в наличии."""
+    mk = lambda sku, model, btu, stock: Offer(
+        supplier_sku=sku, source="breeze", brand="FUNAI",
+        model=f"Инверторная сплит-система серии KADZOKU Inverter {model} (комплект)",
+        category_id=2, btu_calc=btu, attrs={}, cost=Decimal("30000"),
+        stock=stock, photos=[], series="KADZOKU Inverter")
+    return group_by_series([mk("breeze:K07", "RAC-07", 7, 17),
+                            mk("breeze:K09", "RAC-09", 9, 4),
+                            mk("breeze:K12", "RAC-12", 12, 0)])[0]
+
+
+def test_serial_caption_header_without_article_and_from_price():
+    g = _series_group()
+    mp = [(m, 22390 if m.btu_calc == 7 else 25990) for m in g.members if m.stock]
+    cap = render_caption(g, 22390, CFG, member_prices=mp)
+    head = cap.splitlines()[0]
+    assert "RAC-07" not in head and "RAC-09" not in head   # без артикула конкретной модели
+    assert "KADZOKU Inverter" in head
+    assert "от 22 390 ₽" in head
+
+
+def test_serial_caption_lists_sizes_prices_stock():
+    g = _series_group()
+    mp = [(m, 22390 if m.btu_calc == 7 else 25990) for m in g.members if m.stock]
+    cap = render_caption(g, 22390, CFG, member_prices=mp)
+    assert "07 · 22 390 ₽ · 17 шт." in cap
+    assert "09 · 25 990 ₽ · 4 шт." in cap
+    assert "12" not in cap.split("Ключевые")[0].split("═")[1]   # не в наличии → нет в списке
+
+
+def test_serial_caption_falls_back_when_single_model():
+    g = _series_group()
+    only = [(m, 22390) for m in g.members if m.btu_calc == 7]
+    cap = render_caption(g, 22390, CFG, member_prices=only)
+    assert "22 390 ₽" in cap.splitlines()[0]               # одна модель → обычный формат
+    assert "от 22 390" not in cap
+
+
+def test_serial_caption_none_member_prices_keeps_old_format():
+    g = _series_group()
+    cap = render_caption(g, 22390, CFG)
+    assert "от 22 390" not in cap

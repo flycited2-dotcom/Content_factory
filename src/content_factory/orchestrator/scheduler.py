@@ -71,7 +71,14 @@ def run_slot(slot, groups, ctx: PipelineContext) -> SlotOutcome:
 
         price = _price_of(g, ctx.pricing_cfg)
         utp_raw = ctx.utp_lookup(g) if ctx.utp_lookup else None
-        caption = render_caption(g, price, ctx.content_cfg, utp_raw=utp_raw)
+        # цены всех членов серии в наличии → серийная подпись («от X ₽» + линейка)
+        member_prices = []
+        for m in getattr(g, "members", []) or []:
+            if (m.stock or 0) > 0:
+                pr = compute_price(m, ctx.pricing_cfg)
+                member_prices.append((m, pr.price if pr.ok else None))
+        caption = render_caption(g, price, ctx.content_cfg, utp_raw=utp_raw,
+                                 member_prices=member_prices)
         item = ReviewItem(price=price, caption=caption, attrs=g.representative.attrs,
                           card_path=str(card) if card_ready(card) else None,
                           brand=g.brand, category_id=g.category_id)

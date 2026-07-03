@@ -98,13 +98,46 @@ def _header(f: dict, price) -> str:
     return head + (" — " + " · ".join(tail) if tail else "")
 
 
-def render_caption(item, price, cfg, utp_raw=None) -> str:
+# ── серийный формат (выбор владельца 2026-07-03): пост продаёт линейку целиком ─
+def _series_header(f: dict, in_stock) -> str:
+    """Заголовок без артикула конкретной модели: «Бренд Тип серии Серия — от X ₽».
+    Тип берём из наименования до слова «серии» («Инверторная сплит-система…»)."""
+    mt = f.get("model_title") or ""
+    if " серии " in mt:
+        head = f"{f['brand']} {mt.split(' серии ')[0].strip()} серии {f['series']}".strip()
+    else:
+        head = f"{f['brand']} {f['series']}".strip()
+    prices = [p for _, p in in_stock if p]
+    if prices:
+        head += f" — от {_money(min(prices))}"
+    return head
+
+
+def _series_lines(in_stock) -> list[str]:
+    """Строки линейки: «▫️ 07 · 22 390 ₽ · 17 шт.» (мощность · цена · остаток)."""
+    out = []
+    for m, p in sorted(in_stock, key=lambda t: t[0].btu_calc or 0):
+        size = size_from_btu(m.btu_calc, m.category_id)
+        bits = [f"{size:02d}" if size else (m.model or "?")[:24]]
+        if p:
+            bits.append(_money(p))
+        if m.stock:
+            bits.append(f"{m.stock} шт.")
+        out.append("▫️ " + " · ".join(bits))
+    return out
+
+
+def render_caption(item, price, cfg, utp_raw=None, member_prices=None) -> str:
     """B2B-подпись (≤ cfg.caption_max). `item` — Offer | SeriesGroup, `price` — int|None.
     cfg — ContentConfig (caption_max, stop_words, descriptions {series_key: ручной текст}).
-    utp_raw — список преимуществ Бриза из API (для breeze; иначе берётся из ТТХ/«Описание»)."""
+    utp_raw — список преимуществ Бриза из API (для breeze; иначе берётся из ТТХ/«Описание»).
+    member_prices — [(offer, цена|None)] членов серии: при ≥2 в наличии подпись становится
+    серийной (заголовок «от X ₽» без артикула + строки мощность/цена/остаток)."""
     f = _extract(item)
     cap_max = getattr(cfg, "caption_max", 1024)
-    header = _header(f, price)
+    in_stock = [(m, p) for m, p in (member_prices or []) if (m.stock or 0) > 0]
+    serial = len(in_stock) >= 2
+    header = _series_header(f, in_stock) if serial else _header(f, price)
 
     override = (getattr(cfg, "descriptions", None) or {}).get(f["key"])
     if override:
@@ -117,6 +150,10 @@ def render_caption(item, price, cfg, utp_raw=None) -> str:
         bullets += build_specs_for_card(f["tech_rows"], f["brand"], f["series"], f["source"],
                                         utp_raw=utp_raw)
         lines = [header, _DIVIDER]
+        if serial:
+            lines.append("Модели и цены:")
+            lines += _series_lines(in_stock)
+            lines.append("")
         if bullets:
             lines.append("Ключевые особенности:")
             lines += bullets
