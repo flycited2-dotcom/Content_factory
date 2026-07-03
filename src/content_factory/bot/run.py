@@ -183,7 +183,8 @@ def main():
                 finalize_preview(http, token, cq, reply)
                 continue
 
-            msg = u.get("message") or {}
+            # отредактированное сообщение — тоже команда (владелец часто правит опечатку)
+            msg = u.get("message") or u.get("edited_message") or {}
             chat = str((msg.get("chat") or {}).get("id", ""))
             text = msg.get("text", "")
             # Заказ по кнопке из канала: /start ord_<code> разрешён ЛЮБОМУ пользователю
