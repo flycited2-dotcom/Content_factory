@@ -24,14 +24,35 @@ class PublishResult:
     error: str | None = None
 
 
+@dataclass
+class PublishedRec:
+    """Запись опубликованного поста («живой канал» правит его по остаткам/ценам)."""
+    key: str
+    message_id: int | None
+    channel: str
+    price: int | None
+    status: str                    # active | sold
+    caption: str | None
+    ts: float
+
+
 class PublishState:
-    """Анти-дубль: какие товары уже опубликованы (+ время последней публикации)."""
+    """Анти-дубль: какие товары уже опубликованы (+ время последней публикации).
+    Для «живого канала» хранит также канал/цену/статус/подпись поста."""
     def __init__(self, path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._c() as c:
             c.execute("CREATE TABLE IF NOT EXISTS published "
                       "(key TEXT PRIMARY KEY, message_id INTEGER, ts REAL)")
+            for ddl in ("ALTER TABLE published ADD COLUMN channel TEXT DEFAULT ''",
+                        "ALTER TABLE published ADD COLUMN price INTEGER",
+                        "ALTER TABLE published ADD COLUMN status TEXT DEFAULT 'active'",
+                        "ALTER TABLE published ADD COLUMN caption TEXT"):
+                try:
+                    c.execute(ddl)
+                except sqlite3.OperationalError:
+                    pass                              # колонка уже есть
 
     def _c(self):
         return sqlite3.connect(self.path)
@@ -45,10 +66,35 @@ class PublishState:
         with self._c() as c:
             return {r[0] for r in c.execute("SELECT key FROM published").fetchall()}
 
-    def mark(self, key: str, message_id: int | None) -> None:
+    def mark(self, key: str, message_id: int | None, channel: str = "",
+             caption: str | None = None) -> None:
         with self._c() as c:
-            c.execute("INSERT OR REPLACE INTO published(key, message_id, ts) VALUES(?,?,?)",
-                      (key, message_id, time.time()))
+            c.execute("INSERT OR REPLACE INTO published"
+                      "(key, message_id, ts, channel, price, status, caption) "
+                      "VALUES(?,?,?,?,NULL,'active',?)",
+                      (key, message_id, time.time(), str(channel or ""), caption))
+
+    def records(self) -> list[PublishedRec]:
+        """Все посты для сверки «живого канала»."""
+        with self._c() as c:
+            rows = c.execute("SELECT key, message_id, channel, price, status, caption, ts "
+                             "FROM published ORDER BY ts").fetchall()
+        return [PublishedRec(key=r[0], message_id=r[1], channel=r[2] or "", price=r[3],
+                             status=r[4] or "active", caption=r[5], ts=r[6] or 0.0)
+                for r in rows]
+
+    def update_sync(self, key: str, status: str | None = None, price: int | None = None,
+                    caption: str | None = None) -> None:
+        """Обновить только переданные поля записи (после правки поста в канале)."""
+        sets, args = [], []
+        for col, val in (("status", status), ("price", price), ("caption", caption)):
+            if val is not None:
+                sets.append(f"{col}=?")
+                args.append(val)
+        if not sets:
+            return
+        with self._c() as c:
+            c.execute(f"UPDATE published SET {', '.join(sets)} WHERE key=?", (*args, key))
 
     def last_ts(self) -> float | None:
         with self._c() as c:
@@ -134,7 +180,7 @@ def publish_post(bot_token: str, channel_id: str, image: str, caption: str,
 
         mid = (body.get("result") or {}).get("message_id")
         if state is not None and key:
-            state.mark(key, mid)
+            state.mark(key, mid, channel=str(channel_id), caption=caption)
         return PublishResult(ok=True, message_id=mid)
 
     return PublishResult(ok=False, error=last_err or "unknown")

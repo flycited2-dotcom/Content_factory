@@ -135,3 +135,28 @@ def test_retry_then_success():
     res = publish_post("TOK", "@chan", "https://x/c.jpg", "txt",
                        http=_client(handler), retries=2, backoff=0)
     assert res.ok and res.message_id == 9 and state_calls["n"] == 2
+
+
+# ── «живой канал»: расширение PublishState (channel/price/status/caption) ─────
+def test_publish_state_migration_and_records(tmp_path):
+    ps = PublishState(tmp_path / "s.db")
+    ps.mark("k1", 10, channel="@chan", caption="cap1")
+    recs = ps.records()
+    assert [(r.key, r.message_id, r.channel, r.caption, r.status, r.price)
+            for r in recs] == [("k1", 10, "@chan", "cap1", "active", None)]
+
+
+def test_publish_state_update_sync(tmp_path):
+    ps = PublishState(tmp_path / "s.db")
+    ps.mark("k1", 10, channel="@chan", caption="cap1")
+    ps.update_sync("k1", status="sold")
+    ps.update_sync("k1", price=19990, caption="cap2")
+    (r,) = ps.records()
+    assert (r.status, r.price, r.caption) == ("sold", 19990, "cap2")
+
+
+def test_publish_state_mark_backcompat(tmp_path):
+    ps = PublishState(tmp_path / "s.db")
+    ps.mark("k0", 5)                       # старый вызов без channel/caption
+    (r,) = ps.records()
+    assert (r.channel, r.caption, r.status) == ("", None, "active")
