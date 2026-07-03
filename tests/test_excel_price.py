@@ -165,3 +165,48 @@ def test_search_items_numbered(tmp_path):
     items = parse_price_xlsx(_xlsx_1c(tmp_path))
     found = search_items(items, "генераторы", taken=set(), limit=10)
     assert len(found) == 2 and found[0].price
+
+
+# ── формат «1С-иерархия» (прайс из почты 1С): шапка Номенклатура/Цена, разделы 1.1.х ──
+def _xlsx_1c_hier(tmp_path):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["Прайс-лист на 3 июля 2026 г."] + [""] * 16)
+    ws.append([""] * 17)
+    r = [""] * 17
+    r[0], r[4], r[14] = "Артикул", "Номенклатура", "от 100 т.руб/мес"
+    ws.append(r)
+    r = [""] * 17
+    r[14], r[15] = "Цена", "Остаток"
+    ws.append(r)
+    def row(art, name, price=None):
+        r = [""] * 17
+        r[0], r[4] = art, name
+        if price:
+            r[14] = price
+        ws.append(r)
+    row("Ту-00000002", "1. Бытовая техника")
+    row("Ту-00000008", "1.1.1 Холодильники капельные")
+    row("Ту-00000406", "Холодильник HOMELINE RDF-260", "17\xa0950,00")
+    row("Ту-00002685", "1.1.2.3 Stinol")
+    row("Ту-00002062", "Холодильник Stinol STS 185", "22\xa0010,00")
+    p = tmp_path / "1c_hier.xlsx"
+    wb.save(p)
+    return p
+
+
+def test_parse_1c_hierarchy(tmp_path):
+    items = parse_price_xlsx(_xlsx_1c_hier(tmp_path))
+    assert len(items) == 2
+    assert items[0].name == "Холодильник HOMELINE RDF-260"
+    assert items[0].price == 17950
+    assert items[0].section == "Холодильники капельные"     # без «1.1.1»
+    assert items[1].section == "Stinol"
+    assert items[1].price == 22010
+    assert items[1].article == "Ту-00002062"
+
+
+def test_1c_hierarchy_search(tmp_path):
+    items = parse_price_xlsx(_xlsx_1c_hier(tmp_path))
+    got = select_from_price(items, "холодильники", {}, 5, taken=set())
+    assert len(got) == 2

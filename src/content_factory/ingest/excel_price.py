@@ -50,6 +50,50 @@ def _parse_table(ws) -> list[PriceItem]:
     return items
 
 
+_SECTION_NUM_RE = re.compile(r"^\d+(\.\d+)*\.?\s+")
+
+
+def _parse_generic(ws) -> list[PriceItem]:
+    """Формат «1С-иерархия» (выгрузка прайса из 1С письмом): автопоиск шапки
+    («Номенклатура/Наименование» + «Цена» в той же или следующей строке),
+    разделы — строки с номенклатурой без цены (нумерация «1.1.2.3 …» срезается)."""
+    rows = list(ws.iter_rows(values_only=True))
+    name_col = price_col = art_col = None
+    start = 0
+    for i, row in enumerate(rows[:12]):
+        for j, c in enumerate(row):
+            t = str(c or "").strip().lower()
+            if t in ("номенклатура", "наименование", "товар"):
+                name_col = j
+            elif "артикул" in t:
+                art_col = j
+        if name_col is None:
+            continue
+        for k in (i, i + 1):                       # «Цена» бывает строкой ниже шапки
+            if k < len(rows):
+                for j, c in enumerate(rows[k]):
+                    if str(c or "").strip().lower() == "цена" or \
+                            "цена" in str(c or "").strip().lower()[:5]:
+                        price_col = j
+        start = i + 2
+        break
+    if name_col is None or price_col is None:
+        return []
+    items, section = [], ""
+    for row in rows[start:]:
+        name = str(row[name_col] or "").strip() if len(row) > name_col else ""
+        if not name:
+            continue
+        price = _price_int(row[price_col]) if len(row) > price_col else None
+        if price:
+            art = str(row[art_col] or "").strip() if art_col is not None else ""
+            items.append(PriceItem(section=section, article=art, brand="",
+                                   name=re.sub(r"\s+", " ", name), price=price))
+        else:
+            section = _SECTION_NUM_RE.sub("", name).strip()   # раздел без «1.1.2.3»
+    return items
+
+
 _1C_CODE_RE = re.compile(r"^(УТ-|00-)\S+")
 
 
@@ -96,9 +140,7 @@ def parse_price_xlsx(path) -> list[PriceItem]:
     items: list[PriceItem] = []
     for sheet in wb.sheetnames:
         ws = wb[sheet]
-        got = _parse_table(ws)
-        if not got:
-            got = _parse_1c_blocks(ws)
+        got = _parse_table(ws) or _parse_generic(ws) or _parse_1c_blocks(ws)
         items.extend(got)
     wb.close()
     return items
