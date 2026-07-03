@@ -134,6 +134,8 @@ def select_from_price(items: list[PriceItem], category_kw: str, quotas: dict,
     kw = (category_kw or "").strip().lower()
     pool = [i for i in items
             if (kw in i.section.lower() or kw in i.name.lower()) and item_key(i) not in taken]
+    # слово в НАЗВАНИИ товара важнее, чем в разделе («генератор» ≠ АВР из того же раздела)
+    pool.sort(key=lambda i: 0 if kw in i.name.lower() else 1)
     out: list[PriceItem] = []
 
     explicit = {b: n for b, n in (quotas or {}).items() if b != "*" and n}

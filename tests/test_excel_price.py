@@ -134,3 +134,13 @@ def test_select_1c_by_word_in_name(tmp_path):
     assert len(got) == 2
     got1 = select_from_price(items, "генератор", {"huter": 1}, 1, taken=set())
     assert "Huter" in got1[0].name                          # квота по слову в имени
+
+
+def test_select_prefers_name_match_over_section(tmp_path):
+    items = parse_price_xlsx(_xlsx_1c(tmp_path))
+    # добавим в тот же раздел «Генераторы» товар БЕЗ слова в имени
+    from content_factory.ingest.excel_price import PriceItem
+    items.insert(0, PriceItem(section="Генераторы", article="1", brand="",
+                              name="Автомат ввода резерва CARVER", price=10000))
+    got = select_from_price(items, "генератор", {}, 2, taken=set())
+    assert all("Генератор" in i.name for i in got)          # сами генераторы — первыми
