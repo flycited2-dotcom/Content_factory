@@ -1,0 +1,9 @@
+[Unit]
+Description=Content Factory — прайс из почты (IMAP, письма от 1С)
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/content-factory
+Environment=PYTHONPATH=/opt/content-factory/src
+ExecStart=/opt/content-factory/.venv/bin/python -m content_factory.ingest.mail_ingest
