@@ -75,3 +75,62 @@ def test_select_category_filters_sections(tmp_path):
     items = parse_price_xlsx(_xlsx(tmp_path, ROWS))
     got = select_from_price(items, "стиральные", {}, 10, taken=set())
     assert {i.brand for i in got} == {"Beko", "Candy"}
+
+
+# ── формат «1С-карточки» (прайс ИП Аксёнов): блоки строк, без колонки бренда ──
+def _xlsx_1c(tmp_path):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append([""] * 14)
+    row = [""] * 14
+    row[1] = "1. ИНСТРУМЕНТ ДЛЯ СТРОЙКИ"
+    ws.append(row)
+    row = [""] * 14
+    row[1] = "Генераторы"
+    ws.append(row)
+    def block(name, desc, code, art, price):
+        r = [""] * 14
+        r[1], r[5] = "НЕТ\nФОТОГРАФИИ", name
+        ws.append(r)
+        if desc:
+            r = [""] * 14
+            r[5] = desc
+            ws.append(r)
+        r = [""] * 14
+        r[5], r[9], r[13] = "Код", "Артикул", "Цена"
+        ws.append(r)
+        r = [""] * 14
+        r[5], r[9], r[13] = code, art, price
+        ws.append(r)
+        ws.append([""] * 14)
+    block("Генератор бензиновый ВИТЯЗЬ БГ-8700", "Мощность 8.7 кВт\nБак 25 л",
+          "УТ-00007786", "18037001", "37 520,00 RUB")
+    block("Генератор инверторный Huter DN2700i", None,
+          "УТ-00009354", "18037004", "28 140,00 RUB")
+    p = tmp_path / "akse.xlsx"
+    wb.save(p)
+    return p
+
+
+def test_parse_1c_blocks(tmp_path):
+    items = parse_price_xlsx(_xlsx_1c(tmp_path))
+    assert len(items) == 2
+    assert items[0].name == "Генератор бензиновый ВИТЯЗЬ БГ-8700"
+    assert items[0].price == 37520
+    assert items[0].section == "Генераторы"
+    assert items[0].article == "18037001"
+    assert items[1].price == 28140
+
+
+def test_1c_key_without_brand_column(tmp_path):
+    items = parse_price_xlsx(_xlsx_1c(tmp_path))
+    assert item_key(items[0]).startswith("excel|")
+    assert "витязь" in item_key(items[0])
+
+
+def test_select_1c_by_word_in_name(tmp_path):
+    items = parse_price_xlsx(_xlsx_1c(tmp_path))
+    got = select_from_price(items, "генератор", {"huter": 1, "*": None}, 2, taken=set())
+    assert len(got) == 2
+    got1 = select_from_price(items, "генератор", {"huter": 1}, 1, taken=set())
+    assert "Huter" in got1[0].name                          # квота по слову в имени
