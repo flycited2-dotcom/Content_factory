@@ -266,3 +266,23 @@ def test_handle_make_calls_fn(tmp_path):
     reply = handle_command("/make 3 холодильники beko=1", q, make_fn=make_fn)
     assert reply == "✅ выбрано 3" and got["count"] == 3
     assert handle_command("/make 3 холодильники", q) == "❌ excel-источник недоступен"
+
+
+# ── /find, /pick, /excel: выбор конкретных моделей и статус конвейера ─────────
+def test_handle_find_and_pick(tmp_path):
+    q = TaskQueue(tmp_path / "q.db")
+    got = {}
+    reply = handle_command("/find генераторы carver", q,
+                           find_fn=lambda ph: got.update(ph=ph) or "1. CARVER …")
+    assert reply == "1. CARVER …" and got["ph"] == "генераторы carver"
+    reply = handle_command("/pick 1, 3 5", q,
+                           pick_fn=lambda nums: got.update(nums=nums) or "✅ взято 3")
+    assert reply == "✅ взято 3" and got["nums"] == [1, 3, 5]
+    assert "❌" in handle_command("/pick abc", q, pick_fn=lambda n: "x")
+    assert "❌" in handle_command("/find", q, find_fn=lambda ph: "x")
+
+
+def test_handle_excel_status(tmp_path):
+    q = TaskQueue(tmp_path / "q.db")
+    reply = handle_command("/excel", q, excel_fn=lambda: "research 2 | card 1")
+    assert "research 2" in reply

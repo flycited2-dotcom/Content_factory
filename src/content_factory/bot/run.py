@@ -74,11 +74,81 @@ def make_make_fn(state_db, prices_dir):
         rows = [(item_key(i), i.brand, extract_model(i.name, i.brand), i.name, i.price)
                 for i in got]
         n = store.add_items(rows)
-        listing = "\n".join(f"— {i.brand} {extract_model(i.name, i.brand)} · {i.price} ₽"
-                            for i in got)
-        return (f"✅ выбрано {len(got)} (новых в работу: {n}):\n{listing}\n\n"
-                f"Конвейер: УТП+фото из интернета → карточка → превью сюда (тик ~10 мин)")
+        listing = "\n".join(
+            f"— {(i.brand + ' ') if i.brand else ''}{extract_model(i.name, i.brand)}"
+            f" · {i.price:,} ₽".replace(",", " ") for i in got)
+        short = f" (запрошено {count}, нашлось только {len(got)})" if len(got) < count else ""
+        return (f"✅ выбрано {len(got)}{short} (новых в работу: {n}):\n{listing}\n\n"
+                f"Конвейер: УТП+фото → карточка → превью сюда (тик ~10 мин). Статус: /excel")
     return make_fn
+
+
+def make_find_pick_fns(state_db, prices_dir):
+    """/find <фраза> — нумерованный список кандидатов из прайса;
+    /pick 1 3 5 — поставить выбранные в конвейер; /excel — статус конвейера."""
+    from content_factory.ingest.excel_price import (
+        parse_price_xlsx, search_items, item_key, extract_model)
+    from content_factory.orchestrator.excel_pipeline import ExcelStore
+    from content_factory.orchestrator.confirm_store import ConfirmStore
+
+    def _taken(store):
+        return (PublishState(state_db).published_keys()
+                | ConfirmStore(state_db).blocked_keys() | store.all_keys())
+
+    def _pick_table(c):
+        c.execute("CREATE TABLE IF NOT EXISTS pick_list (idx INTEGER PRIMARY KEY, "
+                  "key TEXT, brand TEXT, model TEXT, name TEXT, price INTEGER)")
+
+    def find_fn(phrase):
+        latest = Path(prices_dir) / "latest.xlsx"
+        if not latest.exists():
+            return "❌ прайс не загружен — пришлите .xlsx файлом"
+        store = ExcelStore(state_db)
+        found = search_items(parse_price_xlsx(latest), phrase, _taken(store), limit=15)
+        if not found:
+            return (f"❌ по «{phrase}» ничего не нашлось (или всё уже в работе).\n"
+                    f"Подсказка: слова ищутся без окончаний, можно сужать: "
+                    f"/find генераторы инверторные carver")
+        with sqlite3.connect(state_db) as c:
+            _pick_table(c)
+            c.execute("DELETE FROM pick_list")
+            for n, i in enumerate(found, 1):
+                c.execute("INSERT INTO pick_list VALUES(?,?,?,?,?,?)",
+                          (n, item_key(i), i.brand, extract_model(i.name, i.brand),
+                           i.name, i.price))
+        listing = "\n".join(f"{n}. {i.name} — {i.price:,} ₽".replace(",", " ")
+                            for n, i in enumerate(found, 1))
+        return (f"🔎 Найдено {len(found)} по «{phrase}»:\n{listing}\n\n"
+                f"Взять в работу: /pick 1 3 5 (номера)")
+
+    def pick_fn(nums):
+        with sqlite3.connect(state_db) as c:
+            _pick_table(c)
+            rows = c.execute(
+                f"SELECT key, brand, model, name, price FROM pick_list "
+                f"WHERE idx IN ({','.join('?' * len(nums))})", nums).fetchall()
+        if not rows:
+            return "❌ таких номеров нет — сначала /find <фраза>"
+        store = ExcelStore(state_db)
+        n = store.add_items(rows)
+        listing = "\n".join(f"— {r[3]} · {r[4]:,} ₽".replace(",", " ") for r in rows)
+        return (f"✅ взято в работу {n} из {len(rows)}:\n{listing}\n\n"
+                f"Конвейер: УТП+фото → карточка → превью сюда (тик ~10 мин). Статус: /excel")
+
+    def excel_fn():
+        store = ExcelStore(state_db)
+        counts = {s: len(store.by_status(s))
+                  for s in ("new", "research", "card", "preview", "failed")}
+        lines = [f"Конвейер прайса: 🆕 {counts['new']} · 🔎 research {counts['research']} · "
+                 f"🎨 card {counts['card']} · 👀 превью {counts['preview']} · "
+                 f"❌ failed {counts['failed']}"]
+        for s, mark in (("research", "🔎"), ("card", "🎨"), ("failed", "❌")):
+            for i in store.by_status(s)[:5]:
+                extra = f" ({i.error})" if s == "failed" and i.error else ""
+                lines.append(f"{mark} {i.brand} {i.model}{extra}".strip())
+        return "\n".join(lines)
+
+    return find_fn, pick_fn, excel_fn
 
 
 def receive_price(http, token: str, doc: dict, prices_dir) -> str:
@@ -146,6 +216,7 @@ def main():
     regen_fn = make_regen_fn(cfg.state.card_jobs_db)
     prices_dir = Path(cfg.state.db).parent / "prices"
     make_fn = make_make_fn(cfg.state.db, prices_dir)
+    find_fn, pick_fn, excel_fn = make_find_pick_fns(cfg.state.db, prices_dir)
     http = httpx.Client(timeout=40)
     offset = 0
     print("bot: long-poll запущен")
@@ -215,7 +286,8 @@ def main():
             if not text or (owner and chat != owner):     # только владелец управляет ботом
                 continue
             reply = handle_command(text, q, confirm_store=cs, publish_fn=publish_fn,
-                                   publish_state=ps, regen_fn=regen_fn, make_fn=make_fn)
+                                   publish_state=ps, regen_fn=regen_fn, make_fn=make_fn,
+                                   find_fn=find_fn, pick_fn=pick_fn, excel_fn=excel_fn)
             try:
                 http.post(f"{TG_API}/bot{token}/sendMessage",
                           data={"chat_id": chat, "text": reply})

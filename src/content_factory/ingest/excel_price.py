@@ -126,16 +126,48 @@ def item_key(item: PriceItem) -> str:
     return f"excel|{clean}"
 
 
+_ENDINGS_RE = re.compile(r"(иями|ями|ами|иях|ях|ах|ов|ев|ей|ий|ый|ая|яя|ое|ее|ые|ие"
+                         r"|и|ы|а|я|е|о|у|ю|ь)$")
+
+
+def stem(word: str) -> str:
+    """Грубая основа русского слова: «генераторы/генератора/генераторов» → «генератор».
+    Короткие слова (<4 после среза) не обрезаем."""
+    w = (word or "").strip().lower()
+    s = _ENDINGS_RE.sub("", w)
+    return s if len(s) >= 4 else w
+
+
+def match_phrase(item: PriceItem, phrase: str) -> int:
+    """0 — не подходит; 1 — все стемы фразы в разделе; 2 — все в наименовании
+    (приоритетнее: «генератор» в имени ≠ АВР из раздела «Генераторы»)."""
+    stems = [stem(w) for w in (phrase or "").split() if w.strip()]
+    if not stems:
+        return 0
+    name, sec = item.name.lower(), f"{item.section} {item.name}".lower()
+    if all(s in name for s in stems):
+        return 2
+    if all(s in sec for s in stems):
+        return 1
+    return 0
+
+
+def search_items(items: list[PriceItem], phrase: str, taken: set,
+                 limit: int = 20) -> list[PriceItem]:
+    """Поиск позиций по фразе (без падежей), имя-матчи первыми, дубли исключены."""
+    scored = [(match_phrase(i, phrase), i) for i in items]
+    pool = [i for score, i in sorted(
+        [(s, i) for s, i in scored if s and item_key(i) not in taken],
+        key=lambda t: -t[0])]
+    return pool[:limit]
+
+
 def select_from_price(items: list[PriceItem], category_kw: str, quotas: dict,
                       count: int, taken: set) -> list[PriceItem]:
-    """До `count` позиций категории (слово ищется в разделе И в наименовании).
+    """До `count` позиций категории (фраза ищется без падежей в разделе и наименовании).
     quotas: {'beko': 3, 'stinol': 2, '*': None} — сначала явные квоты брендов,
     затем добор любыми (если задан '*' или квот нет). Анти-дубль по taken-ключам."""
-    kw = (category_kw or "").strip().lower()
-    pool = [i for i in items
-            if (kw in i.section.lower() or kw in i.name.lower()) and item_key(i) not in taken]
-    # слово в НАЗВАНИИ товара важнее, чем в разделе («генератор» ≠ АВР из того же раздела)
-    pool.sort(key=lambda i: 0 if kw in i.name.lower() else 1)
+    pool = search_items(items, category_kw, taken, limit=10 ** 9)
     out: list[PriceItem] = []
 
     explicit = {b: n for b, n in (quotas or {}).items() if b != "*" and n}

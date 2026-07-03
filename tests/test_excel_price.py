@@ -144,3 +144,24 @@ def test_select_prefers_name_match_over_section(tmp_path):
                               name="Автомат ввода резерва CARVER", price=10000))
     got = select_from_price(items, "генератор", {}, 2, taken=set())
     assert all("Генератор" in i.name for i in got)          # сами генераторы — первыми
+
+
+# ── поиск без падежей/окончаний + фраза из нескольких слов ────────────────────
+def test_stem_matching_cases(tmp_path):
+    items = parse_price_xlsx(_xlsx_1c(tmp_path))
+    for phrase in ("генератора", "генераторы", "генераторов", "ГЕНЕРАТОР"):
+        got = select_from_price(items, phrase, {}, 5, taken=set())
+        assert len(got) == 2, phrase
+
+
+def test_multiword_phrase_narrows(tmp_path):
+    items = parse_price_xlsx(_xlsx_1c(tmp_path))
+    got = select_from_price(items, "генераторы инверторные", {}, 5, taken=set())
+    assert len(got) == 1 and "Huter" in got[0].name        # сузилось до инверторного
+
+
+def test_search_items_numbered(tmp_path):
+    from content_factory.ingest.excel_price import search_items
+    items = parse_price_xlsx(_xlsx_1c(tmp_path))
+    found = search_items(items, "генераторы", taken=set(), limit=10)
+    assert len(found) == 2 and found[0].price

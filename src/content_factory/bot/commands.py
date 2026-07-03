@@ -27,7 +27,10 @@ HELP = ("Команды:\n"
         "/pending — посты на подтверждении   /approve <key> — опубликовать   "
         "/reject <key> — отклонить   /regen <key> — перегенерировать карточку   "
         "/held — отложенные\n"
-        "Excel: пришлите .xlsx прайс файлом, затем /make 10 холодильники beko=3 stinol=*")
+        "Excel: пришлите .xlsx прайс файлом, затем:\n"
+        "/make 10 холодильники beko=3 stinol=* — авто-выбор по категории и квотам\n"
+        "/find генераторы carver — найти и показать список   /pick 1 3 5 — взять номера\n"
+        "/excel — статус конвейера прайса")
 
 
 def _norm_time(t: str) -> str:
@@ -137,7 +140,8 @@ def parse_make(text: str):
 
 def handle_command(text: str, queue, today: date | None = None, held_provider=None,
                    confirm_store=None, publish_fn=None, publish_state=None,
-                   regen_fn=None, make_fn=None) -> str:
+                   regen_fn=None, make_fn=None, find_fn=None, pick_fn=None,
+                   excel_fn=None) -> str:
     """Маршрутизация команды → действие → текст ответа владельцу.
     confirm_store/publish_fn/publish_state нужны для confirm-пилота (/approve, /reject, /pending).
     publish_fn(awaiting) -> PublishResult публикует подтверждённый пост в канал.
@@ -145,6 +149,26 @@ def handle_command(text: str, queue, today: date | None = None, held_provider=No
     text = (text or "").strip()
     parts = text.split()
     cmd = (parts[0].lower() if parts else "")
+
+    if cmd.startswith("/find"):
+        if not find_fn:
+            return "❌ excel-источник недоступен"
+        phrase = text.split(maxsplit=1)[1].strip() if len(parts) > 1 else ""
+        if not phrase:
+            return "❌ что ищем? напр.: /find генераторы carver"
+        return find_fn(phrase)
+
+    if cmd.startswith("/pick"):
+        if not pick_fn:
+            return "❌ excel-источник недоступен"
+        nums = [int(t) for t in re.findall(r"\d+", text.split(maxsplit=1)[1])] \
+            if len(parts) > 1 else []
+        if not nums:
+            return "❌ укажите номера из /find, напр.: /pick 1 3 5"
+        return pick_fn(nums)
+
+    if cmd.startswith("/excel"):
+        return excel_fn() if excel_fn else "❌ excel-источник недоступен"
 
     if cmd.startswith("/make"):
         if not make_fn:
