@@ -19,7 +19,7 @@
 
 **Files:** Modify: `src/content_factory/publish/telegram.py` · Test: `tests/test_publish.py`
 
-- [ ] **Step 1: Падающие тесты** (в tests/test_publish.py)
+- [x] **Step 1: Падающие тесты** (в tests/test_publish.py)
 
 ```python
 def test_publish_state_migration_and_records(tmp_path):
@@ -46,8 +46,8 @@ def test_publish_state_mark_backcompat(tmp_path):
     assert (r.channel, r.caption, r.status) == ("", None, "active")
 ```
 
-- [ ] **Step 2: Убедиться, что падают** — `python -m pytest tests/test_publish.py -q` → FAIL
-- [ ] **Step 3: Реализация** в `publish/telegram.py`:
+- [x] **Step 2: Убедиться, что падают** — `python -m pytest tests/test_publish.py -q` → FAIL
+- [x] **Step 3: Реализация** в `publish/telegram.py`:
   - dataclass `PublishedRec(key, message_id, channel, price, status, caption, ts)`;
   - в `PublishState.__init__` миграции (по образцу CardJobStore.tries):
     `ALTER TABLE published ADD COLUMN channel TEXT DEFAULT ''`, `... price INTEGER`,
@@ -57,14 +57,14 @@ def test_publish_state_mark_backcompat(tmp_path):
   - `records(self) -> list[PublishedRec]`; `update_sync(self, key, status=None, price=None,
     caption=None)` — обновляет только переданные поля;
   - `publish_post`: вызов `state.mark(key, mid, channel=str(channel_id), caption=caption)`.
-- [ ] **Step 4: Всё зелёное** — `python -m pytest -q` → PASS
-- [ ] **Step 5: Commit** — `git commit -m "feat(publish): PublishState — channel/price/status/caption + records/update_sync"`
+- [x] **Step 4: Всё зелёное** — `python -m pytest -q` → PASS
+- [x] **Step 5: Commit** — `git commit -m "feat(publish): PublishState — channel/price/status/caption + records/update_sync"`
 
 ### Task 2: plan_sync — чистая логика решений
 
 **Files:** Create: `src/content_factory/publish/channel_sync.py` · Test: `tests/test_channel_sync.py`
 
-- [ ] **Step 1: Падающие тесты** (`tests/test_channel_sync.py`; группы — через
+- [x] **Step 1: Падающие тесты** (`tests/test_channel_sync.py`; группы — через
   `group_by_series([_offer(...)])`, как в tests/test_cards.py)
 
 ```python
@@ -89,8 +89,8 @@ def test_excel_keys_skipped(): ...          # excel|... → игнор
 def test_sold_stays_sold(): ...             # status sold + stock 0 → нет действий
 ```
 
-- [ ] **Step 2: FAIL** — модуля нет
-- [ ] **Step 3: Реализация** `publish/channel_sync.py`:
+- [x] **Step 2: FAIL** — модуля нет
+- [x] **Step 3: Реализация** `publish/channel_sync.py`:
 
 ```python
 """«Живой канал»: сверка опубликованных постов с каталогом. Чистая логика — сеть/state
@@ -143,13 +143,13 @@ def plan_sync(records, groups, price_fn, caption_fn, default_channel: str,
     return actions, baseline
 ```
 
-- [ ] **Step 4: PASS + Commit** — `git commit -m "feat(channel-sync): plan_sync — продано/цена/оживление (чистая логика)"`
+- [x] **Step 4: PASS + Commit** — `git commit -m "feat(channel-sync): plan_sync — продано/цена/оживление (чистая логика)"`
 
 ### Task 3: edit_caption — правка поста в канале
 
 **Files:** Modify: `src/content_factory/publish/telegram.py` · Test: `tests/test_publish.py`
 
-- [ ] **Step 1: Падающие тесты**
+- [x] **Step 1: Падающие тесты**
 
 ```python
 def test_edit_caption_ok(): ...        # MockTransport: путь /botTOK/editMessageCaption,
@@ -159,8 +159,8 @@ def test_edit_caption_message_gone(): ...  # ответ ok:false, description "m
 def test_edit_caption_transient_retries(): ...  # первый 500 → ретрай → 200 ok
 ```
 
-- [ ] **Step 2: FAIL**
-- [ ] **Step 3: Реализация** (рядом с publish_post, та же механика ретраев):
+- [x] **Step 2: FAIL**
+- [x] **Step 3: Реализация** (рядом с publish_post, та же механика ретраев):
 
 ```python
 def edit_caption(bot_token, chat_id, message_id, caption, *, parse_mode=None,
@@ -198,7 +198,7 @@ def edit_caption(bot_token, chat_id, message_id, caption, *, parse_mode=None,
     return False, "unknown", False
 ```
 
-- [ ] **Step 4: PASS + Commit** — `git commit -m "feat(publish): edit_caption с ретраями и признаком gone"`
+- [x] **Step 4: PASS + Commit** — `git commit -m "feat(publish): edit_caption с ретраями и признаком gone"`
 
 ### Task 4: конфиг + CLI + systemd
 
@@ -206,10 +206,10 @@ def edit_caption(bot_token, chat_id, message_id, caption, *, parse_mode=None,
 `config/config.yaml` · Create: `src/content_factory/publish/channel_sync_run.py`,
 `deploy/cf-channel-sync.service`, `deploy/cf-channel-sync.timer` · Test: `tests/test_config.py`
 
-- [ ] **Step 1: Конфиг (TDD)** — тест: `channel_sync: {enabled: true, min_price_delta: 200}` →
+- [x] **Step 1: Конфиг (TDD)** — тест: `channel_sync: {enabled: true, min_price_delta: 200}` →
   `cfg.channel_sync == {...}`; без секции → `{}`. Реализация: `AppConfig.channel_sync: dict =
   field(default_factory=dict)` + `d.get("channel_sync", {}) or {}` (как auto_tasks).
-- [ ] **Step 2: CLI** `publish/channel_sync_run.py` (по образцу scheduler_run.main):
+- [x] **Step 2: CLI** `publish/channel_sync_run.py` (по образцу scheduler_run.main):
   load_config → `if not cfg.channel_sync.get("enabled"): print(...); return` →
   records = PublishState(cfg.state.db).records() (пусто → выход) → каталог из oasis
   (fetch_raw_products/collect_offers/group_by_series + utp_lookup Бриза как в scheduler_run) →
@@ -221,24 +221,24 @@ def edit_caption(bot_token, chat_id, message_id, caption, *, parse_mode=None,
   (`sync: продано N | цены M | ожило K | baseline B | ошибок E`).
   `sold_action: delete` (опция) — вместо правки вызвать deleteMessage (маленький helper
   рядом с edit_caption; в MVP допустимо оставить только mark и отметить TODO).
-- [ ] **Step 3: Смоук** — `python -c "import content_factory.publish.channel_sync_run"` без ошибок.
-- [ ] **Step 4: Unit-файлы** (по образцу cf-scheduler.*): `cf-channel-sync.service`
+- [x] **Step 3: Смоук** — `python -c "import content_factory.publish.channel_sync_run"` без ошибок.
+- [x] **Step 4: Unit-файлы** (по образцу cf-scheduler.*): `cf-channel-sync.service`
   (oneshot, WorkingDirectory /opt/content-factory, PYTHONPATH=src,
   ExecStartPre=update_db_host.sh, ExecStart `.venv/bin/python -m
   content_factory.publish.channel_sync_run`), `cf-channel-sync.timer`
   (`OnCalendar=*-*-* 08:30`, Persistent=true).
-- [ ] **Step 5: config/config.yaml (прод)** — добавить `channel_sync: {enabled: true,
+- [x] **Step 5: config/config.yaml (прод)** — добавить `channel_sync: {enabled: true,
   sold_action: mark, min_price_delta: 100, edit_pause_sec: 4}`.
-- [ ] **Step 6: Все тесты + Commit** — `git commit -m "feat(channel-sync): CLI + конфиг + systemd (живой канал)"`
+- [x] **Step 6: Все тесты + Commit** — `git commit -m "feat(channel-sync): CLI + конфиг + systemd (живой канал)"`
 
 ### Task 5: Деплой + пилот (внешнее, по ОК владельца)
 
-- [ ] Выложить код+конфиг (tar+ssh), `cp deploy/cf-channel-sync.* /etc/systemd/system/`,
+- [x] Выложить код+конфиг (tar+ssh), `cp deploy/cf-channel-sync.* /etc/systemd/system/`,
   `systemctl daemon-reload && systemctl enable --now cf-channel-sync.timer`.
-- [ ] Первый прогон вручную: `systemctl start cf-channel-sync.service` → в журнале
+- [x] Первый прогон вручную: `systemctl start cf-channel-sync.service` → в журнале
   ожидаемо «baseline B» (запоминание цен) и, если что-то распродано за сутки, — пометки
   «⛔ ПРОДАНО» в канале. Показать владельцу.
-- [ ] Проверить лимиты: при >15 правок за прогон убедиться, что пауза держит (журнал без 429).
+- [x] Проверить лимиты: при >15 правок за прогон убедиться, что пауза держит (журнал без 429).
 
 ---
 
