@@ -89,13 +89,17 @@ def _power_line(f: dict) -> str:
 
 
 def _header(f: dict, price) -> str:
+    """Название — первой строкой; цена (+остаток) — отдельной строкой с 💰
+    (выбор владельца 2026-07-03: так виднее, где цена)."""
     head = f"{f['brand']} {f['model_title']}".strip()
-    tail = []
     if price:
-        tail.append(_money(price))
+        tail = [_money(price)]
+        if f["qty"]:
+            tail.append(f"{f['qty']} шт.")
+        return head + "\n💰 " + " · ".join(tail)
     if f["qty"]:
-        tail.append(f"{f['qty']} шт.")
-    return head + (" — " + " · ".join(tail) if tail else "")
+        return f"{head} — {f['qty']} шт."
+    return head
 
 
 # ── серийный формат (выбор владельца 2026-07-03): пост продаёт линейку целиком ─
@@ -109,7 +113,7 @@ def _series_header(f: dict, in_stock) -> str:
         head = f"{f['brand']} {f['series']}".strip()
     prices = [p for _, p in in_stock if p]
     if prices:
-        head += f" — от {_money(min(prices))}"
+        head += f"\n💰 от {_money(min(prices))}"
     return head
 
 

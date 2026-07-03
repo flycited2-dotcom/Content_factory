@@ -21,6 +21,14 @@ def test_caption_has_brand_type_and_price():
     assert "25 990" in cap and "₽" in cap
 
 
+def test_caption_price_on_own_line_with_emoji():
+    # выбор владельца 2026-07-03: цена — отдельной строкой, подсвечена 💰
+    cap = render_caption(_offer(), 25990, CFG)
+    lines = cap.splitlines()
+    assert "25 990" not in lines[0]                 # первая строка — только название
+    assert lines[1] == "💰 25 990 ₽ · 1 шт."
+
+
 def test_caption_within_limit():
     cap = render_caption(_offer(), 25990, CFG)
     assert 0 < len(cap) <= CFG.caption_max
@@ -112,10 +120,10 @@ def test_serial_caption_header_without_article_and_from_price():
     g = _series_group()
     mp = [(m, 22390 if m.btu_calc == 7 else 25990) for m in g.members if m.stock]
     cap = render_caption(g, 22390, CFG, member_prices=mp)
-    head = cap.splitlines()[0]
+    head, price_line = cap.splitlines()[0], cap.splitlines()[1]
     assert "RAC-07" not in head and "RAC-09" not in head   # без артикула конкретной модели
     assert "KADZOKU Inverter" in head
-    assert "от 22 390 ₽" in head
+    assert price_line == "💰 от 22 390 ₽"                  # цена — отдельной строкой
 
 
 def test_serial_caption_lists_sizes_prices_stock():
@@ -131,7 +139,7 @@ def test_serial_caption_falls_back_when_single_model():
     g = _series_group()
     only = [(m, 22390) for m in g.members if m.btu_calc == 7]
     cap = render_caption(g, 22390, CFG, member_prices=only)
-    assert "22 390 ₽" in cap.splitlines()[0]               # одна модель → обычный формат
+    assert cap.splitlines()[1].startswith("💰 22 390 ₽")    # одна модель → обычный формат
     assert "от 22 390" not in cap
 
 
