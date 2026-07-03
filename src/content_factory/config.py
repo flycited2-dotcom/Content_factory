@@ -41,6 +41,7 @@ class TelegramConfig:
     channel_id: str = ""              # боевой канал (бот — админ); токен в .env
     test_channel_id: str = ""         # тестовый канал/личка для прогона
     review_channel_id: str = ""       # закрытый ревью-канал (превью ✅/❌); пусто = личка владельца
+    order_bot: str = ""               # username бота для кнопки «📩 Заказать» (пусто = без кнопки)
     min_seconds_between_posts: int = 180
     parse_mode: str = "HTML"
 
@@ -122,6 +123,7 @@ def load_config(path: str | Path) -> AppConfig:
     telegram = TelegramConfig(channel_id=tg.get("channel_id", "") or "",
                               test_channel_id=tg.get("test_channel_id", "") or "",
                               review_channel_id=str(tg.get("review_channel_id", "") or ""),
+                              order_bot=str(tg.get("order_bot", "") or "").lstrip("@"),
                               min_seconds_between_posts=tg.get("min_seconds_between_posts", 180),
                               parse_mode=tg.get("parse_mode", "HTML"))
 

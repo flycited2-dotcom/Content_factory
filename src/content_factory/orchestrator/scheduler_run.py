@@ -16,6 +16,7 @@ from content_factory.ingest import collect_offers
 from content_factory.ingest.oasis_db import fetch_raw_products
 from content_factory.catalog.series import group_by_series
 from content_factory.publish.telegram import publish_post, send_message, PublishState
+from content_factory.publish.orders import OrderLinks, order_markup
 from content_factory.orchestrator.queue import TaskQueue
 from content_factory.orchestrator.confirm_store import ConfirmStore
 from content_factory.orchestrator.plans import load_plans_into_queue
@@ -31,11 +32,16 @@ def build_context(cfg, token: str, owner_chat: str, pub_state: PublishState,
     review_chat — ревью-канал для превью ✅/❌; пусто = личка владельца (owner_chat)."""
     chan = channel_id or cfg.telegram.channel_id
     review_to = review_chat or owner_chat
+    order_links = OrderLinks(cfg.state.db) if cfg.telegram.order_bot else None
 
     def publish(group, card, caption):
+        markup = None
+        if order_links is not None:                       # кнопка «📩 Заказать» в посте канала
+            markup = order_markup(cfg.telegram.order_bot, order_links.code_for(group.key))
         return publish_post(token, chan, card, caption,
                             http=http, parse_mode=cfg.telegram.parse_mode,
-                            key=group.key, state=pub_state, retries=2)
+                            key=group.key, state=pub_state, retries=2,
+                            reply_markup=markup)
 
     def submit_cards(groups, mode):
         # карточки добирает отдельный таймер cards_run; здесь только лог

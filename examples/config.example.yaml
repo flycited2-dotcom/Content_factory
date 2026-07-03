@@ -37,6 +37,7 @@ telegram:
   channel_id: "@your_channel"   # боевой канал (бот — админ); токен в .env
   test_channel_id: ""           # тестовый канал/личка для прогона
   review_channel_id: ""         # закрытый ревью-канал (превью с ✅/❌); пусто = в личку владельцу
+  order_bot: ""                 # username бота для кнопки «📩 Заказать» (пусто = без кнопки)
   min_seconds_between_posts: 180
   parse_mode: "HTML"
 

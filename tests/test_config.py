@@ -94,3 +94,13 @@ def test_channel_sync_config(tmp_path):
 def test_channel_sync_default_empty(tmp_path):
     cfg = load_config(_write_cfg(tmp_path, "source: {}\n"))
     assert cfg.channel_sync == {}
+
+
+def test_order_bot_config(tmp_path):
+    cfg = load_config(_write_cfg(tmp_path, "telegram: {order_bot: 'Sendpr1ce_bot'}\n"))
+    assert cfg.telegram.order_bot == "Sendpr1ce_bot"
+
+
+def test_order_bot_default_empty(tmp_path):
+    cfg = load_config(_write_cfg(tmp_path, "source: {}\n"))
+    assert cfg.telegram.order_bot == ""

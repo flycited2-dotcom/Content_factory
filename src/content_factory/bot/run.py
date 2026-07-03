@@ -14,16 +14,23 @@ from decouple import config
 
 from content_factory.config import load_config
 from content_factory.publish.telegram import publish_post, PublishState, TG_API
+from content_factory.publish.orders import OrderLinks, order_markup, handle_order_start
 from content_factory.orchestrator.queue import TaskQueue
 from content_factory.orchestrator.confirm_store import ConfirmStore
 from content_factory.bot.commands import handle_command, handle_callback
 
 
-def make_publish_fn(token: str, parse_mode: str, pub_state: PublishState, http=None):
-    """publish_fn(awaiting) → публикует подтверждённый пост в его канал."""
+def make_publish_fn(token: str, parse_mode: str, pub_state: PublishState, http=None,
+                    order_bot: str = "", links: OrderLinks | None = None):
+    """publish_fn(awaiting) → публикует подтверждённый пост в его канал
+    (+ url-кнопка «📩 Заказать», если настроен order_bot)."""
     def publish_fn(a):
+        markup = None
+        if order_bot and links is not None:
+            markup = order_markup(order_bot, links.code_for(a.key))
         return publish_post(token, a.channel, a.card_path, a.caption, http=http,
-                            parse_mode=parse_mode, key=a.key, state=pub_state, retries=2)
+                            parse_mode=parse_mode, key=a.key, state=pub_state, retries=2,
+                            reply_markup=markup)
     return publish_fn
 
 
@@ -77,7 +84,10 @@ def main():
     q = TaskQueue(cfg.state.db)
     cs = ConfirmStore(cfg.state.db)
     ps = PublishState(cfg.state.db)
-    publish_fn = make_publish_fn(token, cfg.telegram.parse_mode, ps)
+    links = OrderLinks(cfg.state.db)
+    lead_chat = config("TELEGRAM_LEAD_CHAT_ID", owner)   # куда слать лиды (дефолт — владелец)
+    publish_fn = make_publish_fn(token, cfg.telegram.parse_mode, ps,
+                                 order_bot=cfg.telegram.order_bot, links=links)
     regen_fn = make_regen_fn(cfg.state.card_jobs_db)
     http = httpx.Client(timeout=40)
     offset = 0
@@ -119,6 +129,20 @@ def main():
             msg = u.get("message") or {}
             chat = str((msg.get("chat") or {}).get("id", ""))
             text = msg.get("text", "")
+            # Заказ по кнопке из канала: /start ord_<code> разрешён ЛЮБОМУ пользователю
+            # (всё остальное от чужих игнорируется, как раньше).
+            if text.startswith("/start ord_"):
+                reply_c, lead = handle_order_start(text, msg.get("from") or {}, links, ps)
+                try:
+                    if reply_c:
+                        http.post(f"{TG_API}/bot{token}/sendMessage",
+                                  data={"chat_id": chat, "text": reply_c})
+                    if lead and lead_chat:
+                        http.post(f"{TG_API}/bot{token}/sendMessage",
+                                  data={"chat_id": lead_chat, "text": lead})
+                except httpx.HTTPError:
+                    pass
+                continue
             if not text or (owner and chat != owner):     # только владелец управляет ботом
                 continue
             reply = handle_command(text, q, confirm_store=cs, publish_fn=publish_fn,

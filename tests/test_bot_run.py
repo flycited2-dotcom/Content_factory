@@ -79,3 +79,22 @@ def test_make_regen_fn_survives_missing_file(tmp_path):
     a = Awaiting(key="k", channel="@c", card_path=str(tmp_path / "нет_файла.jpg"),
                  caption="cap", status="pending")
     assert fn(a) is True                           # отсутствие файла/записи — не ошибка
+
+
+def test_publish_fn_adds_order_button(tmp_path):
+    from content_factory.publish.orders import OrderLinks
+    captured = {}
+
+    def handler(req):
+        captured["body"] = req.read()
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 7}})
+    http = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.telegram.org")
+    ps = PublishState(tmp_path / "p.db")
+    links = OrderLinks(tmp_path / "p.db")
+    fn = botrun.make_publish_fn("TOK", "HTML", ps, http=http,
+                                order_bot="Sendpr1ce_bot", links=links)
+    res = fn(Awaiting(key="k1", channel="@chan", card_path="https://x/c.jpg",
+                      caption="cap", status="pending"))
+    assert res.ok
+    decoded = unquote_plus(captured["body"].decode())
+    assert "t.me/Sendpr1ce_bot?start=ord_" in decoded      # кнопка «Заказать» в посте

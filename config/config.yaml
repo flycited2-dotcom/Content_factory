@@ -35,6 +35,7 @@ fotogen:                         # очередь фотоагента (токе
 telegram:                        # channel_id и токен — из .env (TELEGRAM_CHANNEL_ID/TELEGRAM_BOT_TOKEN)
   channel_id: ""
   test_channel_id: ""
+  order_bot: "Sendpr1ce_bot"     # кнопка «📩 Заказать» в постах канала (лиды владельцу)
   min_seconds_between_posts: 180
   parse_mode: "HTML"
 
