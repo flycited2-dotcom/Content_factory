@@ -178,6 +178,20 @@ def receive_price(http, token: str, doc: dict, prices_dir) -> str:
             f"Дальше: /make 10 холодильники beko=3 stinol=* — и конвейер сделает превью.")
 
 
+def resolve_callback_data(data: str, confirm_store, links) -> str:
+    """Кнопки превью несут короткий код вместо ключа, если ключ длиннее лимита
+    Telegram (64 байта callback_data; excel-ключи из прайсов — длинные).
+    Разворачиваем код обратно в ключ через OrderLinks."""
+    if ":" not in (data or ""):
+        return data
+    act, payload = data.split(":", 1)
+    if confirm_store.get(payload) is None:
+        full = links.key_for(payload)
+        if full:
+            return f"{act}:{full}"
+    return data
+
+
 def finalize_preview(http, token: str, cq: dict, verdict: str) -> None:
     """После ✅/❌ в ревью-канале: заменить кнопки превью одной «вердикт»-кнопкой
     (подпись/форматирование не трогаем — канал остаётся журналом ревью)."""
@@ -242,7 +256,8 @@ def main():
                     except httpx.HTTPError:
                         pass
                     continue
-                reply = handle_callback(cq.get("data", ""), q, confirm_store=cs,
+                reply = handle_callback(resolve_callback_data(cq.get("data", ""), cs, links),
+                                        q, confirm_store=cs,
                                         publish_fn=publish_fn, publish_state=ps,
                                         regen_fn=regen_fn)
                 try:

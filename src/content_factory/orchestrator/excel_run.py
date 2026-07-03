@@ -18,6 +18,7 @@ from decouple import config
 from content_factory.config import load_config
 from content_factory.orchestrator.excel_pipeline import ExcelStore, tick
 from content_factory.orchestrator.confirm_store import ConfirmStore
+from content_factory.publish.orders import OrderLinks
 from content_factory.publish.telegram import publish_post
 
 DIVIDER = "═" * 26
@@ -45,6 +46,7 @@ def main():
     markup_pct = float(config("EXCEL_MARKUP_PCT", "0"))
     http = httpx.Client(timeout=60)
     cs = ConfirmStore(cfg.state.db)
+    links = OrderLinks(cfg.state.db)
 
     def _silence(input_filename: str) -> int:
         """Наши задачи не рассылает result_sender бота; вернуть id задачи."""
@@ -90,10 +92,12 @@ def main():
         caption = (f"{item.name}\n💰 {_money(price)}\n{DIVIDER}\n"
                    f"Ключевые особенности:\n{utp}")
         cs.add(item.key, channel, card, caption)
+        # excel-ключи длинные → в callback_data короткий код (бот развернёт обратно)
+        code = links.code_for(item.key)
         kb = json.dumps({"inline_keyboard": [
-            [{"text": "✅ Опубликовать", "callback_data": f"approve:{item.key}"},
-             {"text": "❌ Отклонить", "callback_data": f"reject:{item.key}"}],
-            [{"text": "🔄 Перегенерировать карточку", "callback_data": f"regen:{item.key}"}]]},
+            [{"text": "✅ Опубликовать", "callback_data": f"approve:{code}"},
+             {"text": "❌ Отклонить", "callback_data": f"reject:{code}"}],
+            [{"text": "🔄 Перегенерировать карточку", "callback_data": f"regen:{code}"}]]},
             ensure_ascii=False)
         res = publish_post(token, review, card, f"{caption}\n\n— на подтверждение —",
                            http=http, parse_mode=cfg.telegram.parse_mode, reply_markup=kb)

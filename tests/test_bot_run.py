@@ -119,3 +119,19 @@ def test_make_fn_selects_and_stores(tmp_path):
     assert {i.key for i in items} == {"excel|beko|x100", "excel|candy|y200"}
     reply2 = fn(2, "холодильники", {})                    # повтор — всё уже в работе
     assert "❌" in reply2
+
+
+def test_resolve_callback_data_expands_code(tmp_path):
+    from content_factory.publish.orders import OrderLinks
+    from content_factory.orchestrator.confirm_store import ConfirmStore
+    cs = ConfirmStore(tmp_path / "s.db")
+    links = OrderLinks(tmp_path / "s.db")
+    long_key = "excel|генератор бензиновый carver ppg - 1200i cube инверторный"
+    cs.add(long_key, "@chan", "/c/x.jpg", "cap")
+    code = links.code_for(long_key)
+    assert botrun.resolve_callback_data(f"approve:{code}", cs, links) == f"approve:{long_key}"
+    # обычные короткие ключи проходят как есть
+    cs.add("breeze|funai|daijin", "@chan", "/c/y.jpg", "cap")
+    assert botrun.resolve_callback_data("approve:breeze|funai|daijin", cs, links) == \
+        "approve:breeze|funai|daijin"
+    assert botrun.resolve_callback_data("noop", cs, links) == "noop"
