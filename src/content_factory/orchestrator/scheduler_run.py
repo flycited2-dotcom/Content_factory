@@ -67,11 +67,15 @@ def build_context(cfg, token: str, owner_chat: str, pub_state: PublishState,
             publish_post(token, review_to, card, preview, http=http,
                          parse_mode=cfg.telegram.parse_mode)
 
+    def taken_keys():
+        # анти-дубль: опубликованные + висящие на ревью/отклонённые (regen не блокируется)
+        return pub_state.published_keys() | confirm_store.blocked_keys()
+
     return PipelineContext(
         cards_dir=cfg.cards.dir, pricing_cfg=cfg.pricing, content_cfg=cfg.content,
         review_cfg=cfg.review, stop_words=cfg.content.stop_words,
         require_card=cfg.cards.require_for_publish, default_mode=cfg.default_card_mode,
-        published_keys=pub_state.published_keys, publish=publish,
+        published_keys=taken_keys, publish=publish,
         submit_cards=submit_cards, alert=alert, confirm=confirm, utp_lookup=utp_lookup)
 
 

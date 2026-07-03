@@ -28,8 +28,8 @@ cards:                           # карточки-картинки (через
 
 fotogen:                         # очередь фотоагента (токен/пути — в .env)
   api_url: "http://127.0.0.1:8765"
-  per_run: 10
-  max_pending: 12
+  per_run: 4                     # бережно к лимитам ChatGPT (жалоба 2026-07-02): ~8 карточек/час
+  max_pending: 6
   max_total: 100000
 
 telegram:                        # channel_id и токен — из .env (TELEGRAM_CHANNEL_ID/TELEGRAM_BOT_TOKEN)
@@ -38,22 +38,20 @@ telegram:                        # channel_id и токен — из .env (TELEG
   min_seconds_between_posts: 180
   parse_mode: "HTML"
 
-# ВРЕМЕННО ВЫКЛЮЧЕНО (2026-07-02, отладка): старый бэклог карточек — conditioner-стиль,
-# владелец хочет mcp; включить обратно после перегенерации (раскомментировать + деплой).
-# auto_tasks:                    # полный автомат: превью в ревью-канал по окнам владельца
-#   - id: "am"                   # 10 постов с 9 до 10
-#     filter: {categories: [2, 6, 7]}
-#     count: 2
-#     times: ["09:00", "09:12", "09:24", "09:36", "09:48"]
-#   - id: "day"                  # 12 постов с 13 до 14
-#     filter: {categories: [2, 6, 7]}
-#     count: 2
-#     times: ["13:00", "13:10", "13:20", "13:30", "13:40", "13:50"]
-#   - id: "eve"                  # 10 постов с 17 до 17:30
-#     filter: {categories: [2, 6, 7]}
-#     count: 2
-#     times: ["17:00", "17:06", "17:12", "17:18", "17:24"]
-#   # confirm по умолчанию ВКЛ: всё идёт через ревью-канал (TELEGRAM_REVIEW_CHANNEL_ID в .env)
+auto_tasks:                      # полный автомат: превью в ревью-канал по окнам владельца
+  - id: "am"                     # 10 постов с 9 до 10
+    filter: {categories: [2, 6, 7]}
+    count: 2
+    times: ["09:00", "09:12", "09:24", "09:36", "09:48"]
+  - id: "day"                    # 12 постов с 13 до 14
+    filter: {categories: [2, 6, 7]}
+    count: 2
+    times: ["13:00", "13:10", "13:20", "13:30", "13:40", "13:50"]
+  - id: "eve"                    # 10 постов с 17 до 17:30
+    filter: {categories: [2, 6, 7]}
+    count: 2
+    times: ["17:00", "17:06", "17:12", "17:18", "17:24"]
+  # confirm по умолчанию ВКЛ: всё идёт через ревью-канал (TELEGRAM_REVIEW_CHANNEL_ID в .env)
 
 review:                          # детерминированные правила (без LLM)
   price_min: 1000

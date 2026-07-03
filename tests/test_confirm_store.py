@@ -36,3 +36,15 @@ def test_add_is_upsert_resets_pending(tmp_path):
     s.add("k1", "@c2", "p2", "c2")          # повторная отправка на подтверждение
     a = s.get("k1")
     assert a.channel == "@c2" and a.caption == "c2" and a.status == "pending"
+
+
+def test_blocked_keys_excludes_regen(tmp_path):
+    """Анти-дубль превью: pending/rejected/published не выбираются планировщиком снова;
+    regen — наоборот, должен вернуться в конвейер (карточка пересобирается)."""
+    cs = ConfirmStore(tmp_path / "c.db")
+    for key, status in (("k-pend", "pending"), ("k-rej", "rejected"),
+                        ("k-pub", "published"), ("k-regen", "regen")):
+        cs.add(key, "@c", "/x.jpg", "cap")
+        if status != "pending":
+            cs.mark(key, status)
+    assert cs.blocked_keys() == {"k-pend", "k-rej", "k-pub"}

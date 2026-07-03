@@ -56,3 +56,12 @@ class ConfirmStore:
     def mark(self, key: str, status: str) -> None:
         with self._c() as c:
             c.execute("UPDATE awaiting SET status=? WHERE key=?", (status, key))
+
+    def blocked_keys(self) -> set:
+        """Ключи, которые планировщику НЕ надо выбирать снова: ждут решения (pending),
+        отклонены (rejected) или уже опубликованы. Статус 'regen' сюда не входит —
+        такая серия должна заново пройти конвейер с новой карточкой."""
+        with self._c() as c:
+            rows = c.execute("SELECT key FROM awaiting "
+                             "WHERE status IN ('pending','rejected','published')").fetchall()
+        return {r[0] for r in rows}
