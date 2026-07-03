@@ -6,6 +6,7 @@
   python -m content_factory.orchestrator.excel_run
 """
 from __future__ import annotations
+import html
 import json
 import re
 import shutil
@@ -19,7 +20,7 @@ from content_factory.config import load_config
 from content_factory.orchestrator.excel_pipeline import ExcelStore, tick
 from content_factory.orchestrator.confirm_store import ConfirmStore
 from content_factory.publish.orders import OrderLinks
-from content_factory.publish.telegram import publish_post
+from content_factory.publish.telegram import publish_post, send_message
 
 DIVIDER = "═" * 26
 
@@ -30,6 +31,14 @@ def _money(p) -> str:
 
 def _slug(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")[:60]
+
+
+def build_preview_caption(name: str, price: int, utp: str) -> str:
+    """Подпись превью. Названия из прайсов содержат <артикулы в скобках> —
+    при parse_mode=HTML Telegram считает их битым тегом и отклоняет пост,
+    поэтому экранируем (грабля чайников Vitek 2026-07-03)."""
+    return (f"{html.escape(name)}\n💰 {_money(price)}\n{DIVIDER}\n"
+            f"Ключевые особенности:\n{html.escape(utp or '')}")
 
 
 def main():
@@ -83,14 +92,17 @@ def main():
         r.raise_for_status()
         return _silence(r.json()["queued"])
 
+    def _alert(text):
+        if token and owner_chat:
+            send_message(token, owner_chat, text, http=http)
+
     def preview(item, card_output):
         card = f"{cfg.cards.dir}/excel_{_slug(item.brand)}-{_slug(item.model)}.jpg"
         shutil.copyfile(output_dir / card_output, card)
         utp = (store.cache_get(f"{item.brand.strip().lower()}|{item.model.strip().lower()}")
                or ("", None))[0]
         price = int(round(item.price * (1 + markup_pct / 100)))
-        caption = (f"{item.name}\n💰 {_money(price)}\n{DIVIDER}\n"
-                   f"Ключевые особенности:\n{utp}")
+        caption = build_preview_caption(item.name, price, utp or "")
         cs.add(item.key, channel, card, caption)
         # excel-ключи длинные → в callback_data короткий код (бот развернёт обратно)
         code = links.code_for(item.key)
@@ -101,9 +113,20 @@ def main():
             ensure_ascii=False)
         res = publish_post(token, review, card, f"{caption}\n\n— на подтверждение —",
                            http=http, parse_mode=cfg.telegram.parse_mode, reply_markup=kb)
+        if not res.ok:                    # не молчим: владелец должен видеть сбой
+            _alert(f"⚠️ Превью «{item.name[:60]}» не отправилось: {res.error}")
         return bool(res.ok)
 
     stats = tick(store, submit_research, read_job, submit_card, preview)
+    if stats["failed"]:
+        fails = "\n".join(f"— {i.name[:60]}: {i.error}" for i in store.by_status("failed")[-5:])
+        _alert(f"❌ Выпали из конвейера прайса ({stats['failed']}):\n{fails}")
+    in_flight = sum(len(store.by_status(s)) for s in ("new", "research", "card"))
+    if stats["preview"] and in_flight == 0:      # партия доехала до конца
+        done = len(store.by_status("preview"))
+        failed = len(store.by_status("failed"))
+        _alert(f"🏁 Партия прайса обработана: превью {done}"
+               + (f", не дошло {failed} (см. /excel)" if failed else "") + ".")
     print(f"excel: research {stats['research']} | card {stats['card']} | "
           f"preview {stats['preview']} | failed {stats['failed']}")
 
