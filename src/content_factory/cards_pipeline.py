@@ -86,6 +86,10 @@ def failed_inputs(queue_db: str, input_filenames: list[str]) -> set[str]:
     return set(_query_jobs(queue_db, input_filenames, "failed").keys())
 
 
+def cancelled_inputs(queue_db: str, input_filenames: list[str]) -> set[str]:
+    return set(_query_jobs(queue_db, input_filenames, "cancelled").keys())
+
+
 # ── состояние (маппинг серия→задача) ────────────────────────────────────────
 MAX_TRIES = 3   # сколько раз пробуем сгенерировать карточку серии при failed (потом сдаёмся)
 
@@ -175,6 +179,12 @@ def run_once(groups, cfg: FotogenConfig, store: CardJobStore,
             key = in2key[in_fn]
             prev = store.get(key)
             store.record(key, in_fn, "failed", tries=(prev[2] if prev else 1))   # сохраняем счётчик попыток
+        # снятые в очереди задачи (cancelled) не должны вечно висеть pending и съедать
+        # бюджет max_pending → считаем их failed (переотправятся, пока есть попытки)
+        for in_fn in cancelled_inputs(cfg.queue_db, list(in2key)):
+            key = in2key[in_fn]
+            prev = store.get(key)
+            store.record(key, in_fn, "failed", tries=(prev[2] if prev else 1))
 
     # 2) поставить новые (серии без карточки), с потолком «в работе» И общим лимитом max_total
     outstanding = len(store.pending())

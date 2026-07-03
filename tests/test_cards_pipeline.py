@@ -146,6 +146,27 @@ def test_run_once_retries_failed_until_cap(tmp_path):
     assert store.get(k)[2] == 2                            # счётчик попыток вырос
 
 
+def test_run_once_requeues_cancelled(tmp_path):
+    # задачу сняли в очереди агента (cancelled) → store не держит её pending вечно,
+    # серия переотправляется в том же прогоне (грабля 2026-07-03: снятые сплиты
+    # съедали весь бюджет max_pending)
+    from content_factory.content.cards import card_key
+    out = tmp_path / "out"; out.mkdir()
+    db = _make_queue_db(tmp_path, [("cancelled", "ext_old.jpg", None)])
+    cfg = _cfg(tmp_path, queue_db=db, output_dir=str(out))
+    store = CardJobStore(tmp_path / "s.db")
+    k = card_key("breeze:NC2")
+    store.record(k, "ext_old.jpg", "pending", tries=1)
+    groups = group_by_series([_o("breeze:NC2", 9, "http://p/2.jpg", series="Gloria")])
+
+    def handler(req):
+        return httpx.Response(200, json={"queued": "ext_new.jpg"})
+    http = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://x")
+    submitted, _ = run_once(groups, cfg, store, http=http, fetch_photo=lambda u: b"img")
+    assert submitted == 1                                  # снятая задача переотправлена
+    assert store.get(k) == ("ext_new.jpg", "pending", 2)   # новая попытка учтена
+
+
 def test_run_once_gives_up_after_max_tries(tmp_path):
     from content_factory.content.cards import card_key
     from content_factory.cards_pipeline import MAX_TRIES
