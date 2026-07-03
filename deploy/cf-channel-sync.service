@@ -1,0 +1,10 @@
+[Unit]
+Description=Content Factory — живой канал (сверка постов с остатками/ценами)
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/content-factory
+Environment=PYTHONPATH=/opt/content-factory/src
+ExecStartPre=/opt/content-factory/deploy/update_db_host.sh
+ExecStart=/opt/content-factory/.venv/bin/python -m content_factory.publish.channel_sync_run

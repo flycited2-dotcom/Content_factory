@@ -1,0 +1,9 @@
+[Unit]
+Description=Content Factory — живой канал: ежедневная сверка в 08:30 (до утреннего окна)
+
+[Timer]
+OnCalendar=*-*-* 08:30
+Persistent=true
+
+[Install]
+WantedBy=timers.target

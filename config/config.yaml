@@ -53,6 +53,11 @@ auto_tasks:                      # полный автомат: превью в 
     times: ["17:00", "17:06", "17:12", "17:18", "17:24"]
   # confirm по умолчанию ВКЛ: всё идёт через ревью-канал (TELEGRAM_REVIEW_CHANNEL_ID в .env)
 
+channel_sync:                    # «живой канал»: посты следят за остатками и ценами
+  enabled: true
+  min_price_delta: 100           # править пост при изменении цены от N ₽
+  edit_pause_sec: 4              # пауза между правками (анти-flood Telegram)
+
 review:                          # детерминированные правила (без LLM)
   price_min: 1000
   price_max: 1000000

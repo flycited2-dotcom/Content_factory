@@ -75,6 +75,7 @@ class AppConfig:
     state: StateConfig
     auto_tasks: list = field(default_factory=list)   # постоянные авто-задачи (сырые dict из yaml;
                                                      # разбор — orchestrator/auto.py)
+    channel_sync: dict = field(default_factory=dict) # «живой канал» (publish/channel_sync_run)
 
 
 def load_config(path: str | Path) -> AppConfig:
@@ -139,4 +140,5 @@ def load_config(path: str | Path) -> AppConfig:
                      default_card_mode=default_card_mode,
                      cards_modes_by_category=modes_by_category, fotogen=fotogen,
                      telegram=telegram, review=review, state=state,
-                     auto_tasks=d.get("auto_tasks", []) or [])
+                     auto_tasks=d.get("auto_tasks", []) or [],
+                     channel_sync=d.get("channel_sync", {}) or {})

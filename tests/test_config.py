@@ -83,3 +83,14 @@ def test_example_config_loads(tmp_path):
     assert cfg.content.caption_max == 1024
     assert cfg.cards.require_for_publish is True
     assert cfg.default_card_mode == "mcp"
+
+
+def test_channel_sync_config(tmp_path):
+    cfg = load_config(_write_cfg(tmp_path,
+        "channel_sync: {enabled: true, min_price_delta: 200}\n"))
+    assert cfg.channel_sync == {"enabled": True, "min_price_delta": 200}
+
+
+def test_channel_sync_default_empty(tmp_path):
+    cfg = load_config(_write_cfg(tmp_path, "source: {}\n"))
+    assert cfg.channel_sync == {}

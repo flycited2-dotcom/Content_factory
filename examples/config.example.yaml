@@ -48,6 +48,11 @@ auto_tasks:                     # постоянные авто-задачи: п
     # mode: "mcp"               # опц.; по умолчанию — авто по категории (cards.modes_by_category)
     # confirm: false            # опц.; по умолчанию true — через ревью-канал
 
+channel_sync:                # «живой канал»: посты сами следят за остатками и ценами
+  enabled: false             # вкл. + systemd cf-channel-sync.timer (08:30, до окна постинга)
+  min_price_delta: 100       # править пост при изменении цены от N ₽
+  edit_pause_sec: 4          # пауза между правками (анти-flood Telegram ~20 правок/мин)
+
 review:                      # детерминированные правила (без LLM)
   price_min: 1000
   price_max: 1000000
