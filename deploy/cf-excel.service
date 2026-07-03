@@ -1,0 +1,9 @@
+[Unit]
+Description=Content Factory — excel-конвейер (research → карточка → превью)
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/content-factory
+Environment=PYTHONPATH=/opt/content-factory/src
+ExecStart=/opt/content-factory/.venv/bin/python -m content_factory.orchestrator.excel_run

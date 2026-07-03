@@ -98,3 +98,24 @@ def test_publish_fn_adds_order_button(tmp_path):
     assert res.ok
     decoded = unquote_plus(captured["body"].decode())
     assert "t.me/Sendpr1ce_bot?start=ord_" in decoded      # кнопка «Заказать» в посте
+
+
+def test_make_fn_selects_and_stores(tmp_path):
+    import openpyxl
+    from content_factory.orchestrator.excel_pipeline import ExcelStore
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["№", "Артикул", "Бренд", "Наименование", "Цена (руб.)", "Заказ (шт.)"])
+    ws.append(["Холодильники", "", "", "", "", ""])
+    ws.append(["1", "10", "Beko", "Холодильник Beko X100", "30000", ""])
+    ws.append(["2", "11", "Candy", "Холодильник Candy Y200", "25000", ""])
+    prices = tmp_path / "prices"
+    prices.mkdir()
+    wb.save(prices / "latest.xlsx")
+    fn = botrun.make_make_fn(tmp_path / "state.db", prices)
+    reply = fn(2, "холодильники", {})
+    assert "✅ выбрано 2" in reply and "Beko X100" in reply
+    items = ExcelStore(tmp_path / "state.db").by_status("new")
+    assert {i.key for i in items} == {"excel|beko|x100", "excel|candy|y200"}
+    reply2 = fn(2, "холодильники", {})                    # повтор — всё уже в работе
+    assert "❌" in reply2

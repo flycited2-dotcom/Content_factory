@@ -231,3 +231,38 @@ def test_handle_callback_regen(tmp_path):
     cs.add("k1", "@chan", "/c/x.jpg", "cap")
     reply = handle_callback("regen:k1", q, confirm_store=cs, regen_fn=lambda a: True)
     assert "🔄" in reply and cs.get("k1").status == "regen"
+
+
+# ── /make: выбор товаров из Excel-прайса (подпроект 3) ────────────────────────
+def test_parse_make_full():
+    from content_factory.bot.commands import parse_make
+    count, cat, quotas = parse_make("/make 10 холодильники beko=3 indesit=3 stinol=*")
+    assert (count, cat) == (10, "холодильники")
+    assert quotas == {"beko": 3, "indesit": 3, "stinol": None, "*": None}
+
+
+def test_parse_make_rest_word():
+    from content_factory.bot.commands import parse_make
+    _, _, quotas = parse_make("/make 5 стиральные beko=2 candy=остальные")
+    assert quotas == {"beko": 2, "candy": None, "*": None}
+
+
+def test_parse_make_errors():
+    from content_factory.bot.commands import parse_make
+    import pytest
+    with pytest.raises(ValueError):
+        parse_make("/make холодильники")           # нет количества
+    with pytest.raises(ValueError):
+        parse_make("/make 5")                      # нет категории
+
+
+def test_handle_make_calls_fn(tmp_path):
+    q = TaskQueue(tmp_path / "q.db")
+    got = {}
+
+    def make_fn(count, category, quotas):
+        got.update(count=count, category=category, quotas=quotas)
+        return "✅ выбрано 3"
+    reply = handle_command("/make 3 холодильники beko=1", q, make_fn=make_fn)
+    assert reply == "✅ выбрано 3" and got["count"] == 3
+    assert handle_command("/make 3 холодильники", q) == "❌ excel-источник недоступен"

@@ -26,7 +26,8 @@ HELP = ("Команды:\n"
         "/status — что в очереди   /cancel <id> — отменить\n"
         "/pending — посты на подтверждении   /approve <key> — опубликовать   "
         "/reject <key> — отклонить   /regen <key> — перегенерировать карточку   "
-        "/held — отложенные")
+        "/held — отложенные\n"
+        "Excel: пришлите .xlsx прайс файлом, затем /make 10 холодильники beko=3 stinol=*")
 
 
 def _norm_time(t: str) -> str:
@@ -108,9 +109,35 @@ def _status(queue) -> str:
     return "\n".join(lines)
 
 
+def parse_make(text: str):
+    """`/make 10 холодильники beko=3 indesit=3 stinol=*` → (count, категория, quotas).
+    Квота `*`/«остальные» = добор до count любыми брендами категории."""
+    parts = (text or "").strip().split()
+    if parts and parts[0].lower().startswith("/make"):
+        parts = parts[1:]
+    count, category = None, ""
+    quotas: dict = {}
+    for tok in parts:
+        low = tok.lower()
+        if count is None and tok.isdigit():
+            count = int(tok)
+        elif "=" in low:
+            brand, n = low.split("=", 1)
+            quotas[brand] = None if n in ("*", "остальные", "остальное") else int(n)
+        elif not category:
+            category = low
+    if count is None:
+        raise ValueError("укажите количество, напр.: /make 10 холодильники beko=3")
+    if not category:
+        raise ValueError("укажите категорию, напр.: /make 10 холодильники")
+    if any(n is None for n in quotas.values()):
+        quotas["*"] = None                        # «остальные» = общий добор
+    return count, category, quotas
+
+
 def handle_command(text: str, queue, today: date | None = None, held_provider=None,
                    confirm_store=None, publish_fn=None, publish_state=None,
-                   regen_fn=None) -> str:
+                   regen_fn=None, make_fn=None) -> str:
     """Маршрутизация команды → действие → текст ответа владельцу.
     confirm_store/publish_fn/publish_state нужны для confirm-пилота (/approve, /reject, /pending).
     publish_fn(awaiting) -> PublishResult публикует подтверждённый пост в канал.
@@ -118,6 +145,15 @@ def handle_command(text: str, queue, today: date | None = None, held_provider=No
     text = (text or "").strip()
     parts = text.split()
     cmd = (parts[0].lower() if parts else "")
+
+    if cmd.startswith("/make"):
+        if not make_fn:
+            return "❌ excel-источник недоступен"
+        try:
+            count, category, quotas = parse_make(text)
+        except ValueError as e:
+            return f"❌ {e}"
+        return make_fn(count, category, quotas)
 
     if cmd.startswith("/regen"):
         if not (confirm_store and regen_fn):

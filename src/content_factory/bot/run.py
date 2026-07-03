@@ -53,6 +53,61 @@ def make_regen_fn(card_jobs_db):
     return regen_fn
 
 
+def make_make_fn(state_db, prices_dir):
+    """make_fn(count, category, quotas) для /make: выбрать позиции из последнего
+    прайса и поставить в excel-конвейер (research → карточка → превью)."""
+    def make_fn(count, category, quotas):
+        from content_factory.ingest.excel_price import (
+            parse_price_xlsx, select_from_price, item_key, extract_model)
+        from content_factory.orchestrator.excel_pipeline import ExcelStore
+        from content_factory.orchestrator.confirm_store import ConfirmStore
+        latest = Path(prices_dir) / "latest.xlsx"
+        if not latest.exists():
+            return "❌ прайс не загружен — пришлите .xlsx файлом в этот чат"
+        items = parse_price_xlsx(latest)
+        store = ExcelStore(state_db)
+        taken = (PublishState(state_db).published_keys()
+                 | ConfirmStore(state_db).blocked_keys() | store.all_keys())
+        got = select_from_price(items, category, quotas, count, taken)
+        if not got:
+            return f"❌ по запросу «{category}» ничего не нашлось (или всё уже в работе)"
+        rows = [(item_key(i), i.brand, extract_model(i.name, i.brand), i.name, i.price)
+                for i in got]
+        n = store.add_items(rows)
+        listing = "\n".join(f"— {i.brand} {extract_model(i.name, i.brand)} · {i.price} ₽"
+                            for i in got)
+        return (f"✅ выбрано {len(got)} (новых в работу: {n}):\n{listing}\n\n"
+                f"Конвейер: УТП+фото из интернета → карточка → превью сюда (тик ~10 мин)")
+    return make_fn
+
+
+def receive_price(http, token: str, doc: dict, prices_dir) -> str:
+    """Скачать присланный владельцем .xlsx и сделать его текущим прайсом."""
+    from content_factory.ingest.excel_price import parse_price_xlsx
+    r = http.get(f"{TG_API}/bot{token}/getFile", params={"file_id": doc.get("file_id")})
+    file_path = ((r.json() or {}).get("result") or {}).get("file_path")
+    if not file_path:
+        return "❌ не удалось скачать файл из Telegram"
+    data = http.get(f"{TG_API}/file/bot{token}/{file_path}").content
+    pdir = Path(prices_dir)
+    pdir.mkdir(parents=True, exist_ok=True)
+    name = doc.get("file_name") or "price.xlsx"
+    (pdir / name).write_bytes(data)
+    (pdir / "latest.xlsx").write_bytes(data)
+    try:
+        items = parse_price_xlsx(pdir / "latest.xlsx")
+    except Exception as e:
+        return f"❌ файл сохранён, но не парсится: {e}"
+    sections = {}
+    for i in items:
+        sections[i.section] = sections.get(i.section, 0) + 1
+    top = "\n".join(f"— {s}: {n}" for s, n in
+                    sorted(sections.items(), key=lambda x: -x[1])[:8])
+    return (f"📎 Прайс «{name}» принят: {len(items)} позиций, {len(sections)} разделов.\n"
+            f"Крупнейшие разделы:\n{top}\n\n"
+            f"Дальше: /make 10 холодильники beko=3 stinol=* — и конвейер сделает превью.")
+
+
 def finalize_preview(http, token: str, cq: dict, verdict: str) -> None:
     """После ✅/❌ в ревью-канале: заменить кнопки превью одной «вердикт»-кнопкой
     (подпись/форматирование не трогаем — канал остаётся журналом ревью)."""
@@ -89,6 +144,8 @@ def main():
     publish_fn = make_publish_fn(token, cfg.telegram.parse_mode, ps,
                                  order_bot=cfg.telegram.order_bot, links=links)
     regen_fn = make_regen_fn(cfg.state.card_jobs_db)
+    prices_dir = Path(cfg.state.db).parent / "prices"
+    make_fn = make_make_fn(cfg.state.db, prices_dir)
     http = httpx.Client(timeout=40)
     offset = 0
     print("bot: long-poll запущен")
@@ -143,10 +200,21 @@ def main():
                 except httpx.HTTPError:
                     pass
                 continue
+            # Excel-прайс файлом (только от владельца)
+            doc = msg.get("document") or {}
+            if (doc and (not owner or chat == owner)
+                    and (doc.get("file_name") or "").lower().endswith(".xlsx")):
+                reply = receive_price(http, token, doc, prices_dir)
+                try:
+                    http.post(f"{TG_API}/bot{token}/sendMessage",
+                              data={"chat_id": chat, "text": reply})
+                except httpx.HTTPError:
+                    pass
+                continue
             if not text or (owner and chat != owner):     # только владелец управляет ботом
                 continue
             reply = handle_command(text, q, confirm_store=cs, publish_fn=publish_fn,
-                                   publish_state=ps, regen_fn=regen_fn)
+                                   publish_state=ps, regen_fn=regen_fn, make_fn=make_fn)
             try:
                 http.post(f"{TG_API}/bot{token}/sendMessage",
                           data={"chat_id": chat, "text": reply})
