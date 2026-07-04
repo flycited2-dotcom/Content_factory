@@ -212,6 +212,54 @@ def test_1c_hierarchy_search(tmp_path):
     assert len(got) == 2
 
 
+# ── построчное сопоставление списка конкретных моделей (визард /task) ─────────
+def test_match_model_lines_confident_exact_copy(tmp_path):
+    from content_factory.ingest.excel_price import match_model_lines
+    items = parse_price_xlsx(_xlsx(tmp_path, ROWS))
+    got = match_model_lines(items, ["Стиральная машина Beko WSRE6512"], taken=set())
+    assert len(got) == 1
+    assert got[0].item is not None
+    assert got[0].item.name == "Стиральная машина Beko WSRE6512"
+    assert got[0].candidates == []
+
+
+def test_match_model_lines_partial_goes_to_candidates(tmp_path):
+    from content_factory.ingest.excel_price import match_model_lines
+    items = parse_price_xlsx(_xlsx(tmp_path, ROWS))
+    # лишнее слово «инвертор» отсутствует в наименовании — не хватает для уверенного матча
+    got = match_model_lines(items, ["Стиральная машина Beko WSRE6512 инвертор"], taken=set())
+    assert got[0].item is None
+    assert len(got[0].candidates) >= 1
+    assert got[0].candidates[0].name == "Стиральная машина Beko WSRE6512"
+
+
+def test_match_model_lines_no_overlap_no_candidates(tmp_path):
+    from content_factory.ingest.excel_price import match_model_lines
+    items = parse_price_xlsx(_xlsx(tmp_path, ROWS))
+    got = match_model_lines(items, ["Совершенно другой несуществующий товар xyz"], taken=set())
+    assert got[0].item is None
+    assert got[0].candidates == []
+
+
+def test_match_model_lines_respects_taken(tmp_path):
+    from content_factory.ingest.excel_price import match_model_lines, item_key
+    items = parse_price_xlsx(_xlsx(tmp_path, ROWS))
+    beko = next(i for i in items if "WSRE6512" in i.name)
+    got = match_model_lines(items, ["Стиральная машина Beko WSRE6512"],
+                            taken={item_key(beko)})
+    assert got[0].item is None                    # уже занят — не предлагаем повторно
+
+
+def test_match_model_lines_preserves_order_and_skips_blank_lines(tmp_path):
+    from content_factory.ingest.excel_price import match_model_lines
+    items = parse_price_xlsx(_xlsx(tmp_path, ROWS))
+    lines = ["Стиральная машина Candy CS4", "", "   ", "Холодильник Beko B1RCSK362S"]
+    got = match_model_lines(items, lines, taken=set())
+    assert len(got) == 2                           # пустые строки пропущены
+    assert got[0].item.name == "Стиральная машина Candy CS4"
+    assert got[1].item.name == "Холодильник Beko B1RCSK362S"
+
+
 # ── два слота прайсов: свой (manual, приоритет) + почтовый (mail) ─────────────
 # Грабля 2026-07-03: почта (cf-mail каждые 30 мин) молча перезаписывала
 # единственный latest.xlsx поверх прайса, загруженного владельцем вручную —

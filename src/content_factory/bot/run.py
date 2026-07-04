@@ -152,16 +152,25 @@ def make_find_pick_fns(state_db, prices_dir):
     return find_fn, pick_fn, excel_fn
 
 
+def download_telegram_file(http, token: str, file_id: str) -> bytes | None:
+    """Скачать файл из Telegram по file_id (getFile → скачивание по file_path).
+    None, если Telegram не отдал file_path (файл недоступен/устарел). Общий хелпер
+    для .xlsx-прайса (receive_price) и фото/УТП в визарде /task."""
+    r = http.get(f"{TG_API}/bot{token}/getFile", params={"file_id": file_id})
+    file_path = ((r.json() or {}).get("result") or {}).get("file_path")
+    if not file_path:
+        return None
+    return http.get(f"{TG_API}/file/bot{token}/{file_path}").content
+
+
 def receive_price(http, token: str, doc: dict, prices_dir) -> str:
     """Скачать присланный владельцем .xlsx и сделать его текущим «своим» прайсом
     (слот manual.xlsx — отдельно от почтового mail.xlsx, см. load_price_slots:
     иначе следующий тик почты молча перезаписывал бы этот файл)."""
     from content_factory.ingest.excel_price import parse_price_xlsx
-    r = http.get(f"{TG_API}/bot{token}/getFile", params={"file_id": doc.get("file_id")})
-    file_path = ((r.json() or {}).get("result") or {}).get("file_path")
-    if not file_path:
+    data = download_telegram_file(http, token, doc.get("file_id"))
+    if data is None:
         return "❌ не удалось скачать файл из Telegram"
-    data = http.get(f"{TG_API}/file/bot{token}/{file_path}").content
     pdir = Path(prices_dir)
     pdir.mkdir(parents=True, exist_ok=True)
     name = doc.get("file_name") or "price.xlsx"
@@ -219,6 +228,30 @@ def get_updates(token: str, offset: int, timeout: int = 30, http=None) -> list:
     return (r.json() or {}).get("result", [])
 
 
+def _make_wizard(cfg, owner, prices_dir, http, excel_fn):
+    """Собирает визард /task: своя очередь-стор + submit_card (в обход research,
+    если владелец дал фото — см. wizard_flow.py) + сохранение фото на диск."""
+    from content_factory.bot.wizard import WizardStore
+    from content_factory.bot.wizard_flow import make_wizard_flow
+    from content_factory.orchestrator.card_submit import make_card_submitter
+    api = config("FOTOGEN_API_URL", cfg.fotogen.api_url).rstrip("/")
+    headers = {"x-agent-token": config("FOTOGEN_API_TOKEN")}
+    output_dir = Path(config("FOTOGEN_OUTPUT_DIR"))
+    queue_db = config("FOTOGEN_QUEUE_DB")
+    submit_card = make_card_submitter(api, headers, output_dir, owner, queue_db, http=http)
+    photos_dir = Path(cfg.state.db).parent / "manual_photos"
+
+    def save_photo(chat_id, photo_bytes):
+        photos_dir.mkdir(parents=True, exist_ok=True)
+        p = photos_dir / f"wizard_{chat_id}_{int(time.time() * 1000)}.jpg"
+        p.write_bytes(photo_bytes)
+        return str(p)
+
+    store = WizardStore(cfg.state.db)
+    return make_wizard_flow(cfg.state.db, prices_dir, store, submit_card, save_photo,
+                            excel_fn)
+
+
 def main():
     cfg = load_config(Path("config/config.yaml"))
     token = config("TELEGRAM_BOT_TOKEN")
@@ -235,6 +268,18 @@ def main():
     make_fn = make_make_fn(cfg.state.db, prices_dir)
     find_fn, pick_fn, excel_fn = make_find_pick_fns(cfg.state.db, prices_dir)
     http = httpx.Client(timeout=40)
+    wizard_start, wizard_text, wizard_photo, wizard_callback = _make_wizard(
+        cfg, owner, prices_dir, http, excel_fn)
+
+    def _send_wizard_reply(chat_id, wr):
+        data = {"chat_id": chat_id, "text": wr.text}
+        if wr.markup:
+            data["reply_markup"] = json.dumps(wr.markup, ensure_ascii=False)
+        try:
+            http.post(f"{TG_API}/bot{token}/sendMessage", data=data)
+        except httpx.HTTPError:
+            pass
+
     offset = 0
     print("bot: long-poll запущен")
     while True:
@@ -258,6 +303,16 @@ def main():
                                   data={"callback_query_id": cq.get("id")})
                     except httpx.HTTPError:
                         pass
+                    continue
+                if (cq.get("data") or "").startswith("wizard:"):
+                    chat_w = str((cq.get("message") or {}).get("chat", {}).get("id", ""))
+                    wr = wizard_callback(chat_w, cq.get("data"))
+                    try:
+                        http.post(f"{TG_API}/bot{token}/answerCallbackQuery",
+                                  data={"callback_query_id": cq.get("id"), "text": wr.text[:180]})
+                    except httpx.HTTPError:
+                        pass
+                    _send_wizard_reply(chat_w, wr)
                     continue
                 reply = handle_callback(resolve_callback_data(cq.get("data", ""), cs, links),
                                         q, confirm_store=cs,
@@ -301,7 +356,27 @@ def main():
                 except httpx.HTTPError:
                     pass
                 continue
-            if not text or (owner and chat != owner):     # только владелец управляет ботом
+            if owner and chat != owner:                    # только владелец управляет ботом
+                continue
+            # /task — старт визарда постановки задачи кнопками
+            if text.strip() == "/task":
+                _send_wizard_reply(chat, wizard_start(chat))
+                continue
+            # фото в визарде (шаг «приложить фото» — последний элемент = крупнее всех)
+            photos = msg.get("photo") or []
+            if photos:
+                data = download_telegram_file(http, token, photos[-1].get("file_id"))
+                wr = wizard_photo(chat, data) if data is not None else None
+                if wr is not None:
+                    _send_wizard_reply(chat, wr)
+                    continue
+            # текстовый шаг визарда (категория/список/УТП) — если диалог активен
+            if text:
+                wr = wizard_text(chat, text)
+                if wr is not None:
+                    _send_wizard_reply(chat, wr)
+                    continue
+            if not text:
                 continue
             reply = handle_command(text, q, confirm_store=cs, publish_fn=publish_fn,
                                    publish_state=ps, regen_fn=regen_fn, make_fn=make_fn,

@@ -8,7 +8,6 @@
 from __future__ import annotations
 import html
 import json
-import re
 import shutil
 import sqlite3
 from pathlib import Path
@@ -19,6 +18,7 @@ from decouple import config
 from content_factory.config import load_config
 from content_factory.orchestrator.excel_pipeline import ExcelStore, tick
 from content_factory.orchestrator.confirm_store import ConfirmStore
+from content_factory.orchestrator.card_submit import make_card_submitter, slug as _slug
 from content_factory.publish.orders import OrderLinks
 from content_factory.publish.telegram import publish_post, send_message
 
@@ -27,10 +27,6 @@ DIVIDER = "═" * 26
 
 def _money(p) -> str:
     return f"{int(p):,}".replace(",", " ") + " ₽"
-
-
-def _slug(s: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")[:60]
 
 
 def build_preview_caption(name: str, price: int, utp: str) -> str:
@@ -57,16 +53,6 @@ def main():
     cs = ConfirmStore(cfg.state.db)
     links = OrderLinks(cfg.state.db)
 
-    def _silence(input_filename: str) -> int:
-        """Наши задачи не рассылает result_sender бота; вернуть id задачи."""
-        con = sqlite3.connect(queue_db)
-        row = con.execute("SELECT id FROM jobs WHERE input_filename=?",
-                          (input_filename,)).fetchone()
-        con.execute("UPDATE jobs SET result_sent=1 WHERE id=?", (row[0],))
-        con.commit()
-        con.close()
-        return int(row[0])
-
     def submit_research(brand, model, category):
         r = http.post(f"{api}/api/submit-research", headers=headers,
                       data={"brand": brand, "model": model, "category": category,
@@ -81,16 +67,8 @@ def main():
         con.close()
         return row if row else ("pending", None, None, None)
 
-    def submit_card(brand, model, utp, photo_path):
-        photo = output_dir / photo_path if not str(photo_path).startswith("/") \
-            else Path(photo_path)
-        r = http.post(f"{api}/api/submit-job", headers=headers,
-                      data={"mode": "kbt", "specs": utp, "brand": brand, "model": model,
-                            "chat_id": owner_chat or "0", "caption": ""},
-                      files={"photo": (f"{_slug(brand)}_{_slug(model)}.png",
-                                       photo.read_bytes(), "image/png")})
-        r.raise_for_status()
-        return _silence(r.json()["queued"])
+    submit_card = make_card_submitter(api, headers, output_dir, owner_chat,
+                                      queue_db, http=http)
 
     def _alert(text):
         if token and owner_chat:

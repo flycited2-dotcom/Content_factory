@@ -148,6 +148,63 @@ def test_make_fn_searches_both_manual_and_mail_slots(tmp_path):
     assert {i.key for i in items} == {"excel|beko|x100", "excel|candy|y200"}
 
 
+# ── download_telegram_file: общий хелпер getFile → байты (визард /task, шаг 4) ──
+def test_download_telegram_file_success():
+    def handler(req):
+        if req.url.path == "/botTOK/getFile":
+            return httpx.Response(200, json={"ok": True,
+                                             "result": {"file_path": "photos/file_1.jpg"}})
+        if req.url.path == "/file/botTOK/photos/file_1.jpg":
+            return httpx.Response(200, content=b"IMGBYTES")
+        raise AssertionError(f"неожиданный путь: {req.url.path}")
+    http = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.telegram.org")
+    data = botrun.download_telegram_file(http, "TOK", "fid123")
+    assert data == b"IMGBYTES"
+
+
+def test_download_telegram_file_missing_path_returns_none():
+    def handler(req):
+        return httpx.Response(200, json={"ok": True, "result": {}})
+    http = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.telegram.org")
+    assert botrun.download_telegram_file(http, "TOK", "fid123") is None
+
+
+def test_receive_price_saves_to_manual_slot(tmp_path):
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["№", "Артикул", "Бренд", "Наименование", "Цена (руб.)", "Заказ (шт.)"])
+    ws.append(["Холодильники", "", "", "", "", ""])
+    ws.append(["1", "10", "Beko", "Холодильник Beko X100", "30000", ""])
+    import io
+    buf = io.BytesIO()
+    wb.save(buf)
+    xlsx_bytes = buf.getvalue()
+
+    def handler(req):
+        if req.url.path == "/botTOK/getFile":
+            return httpx.Response(200, json={"ok": True,
+                                             "result": {"file_path": "documents/f.xlsx"}})
+        if req.url.path == "/file/botTOK/documents/f.xlsx":
+            return httpx.Response(200, content=xlsx_bytes)
+        raise AssertionError(f"неожиданный путь: {req.url.path}")
+    http = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.telegram.org")
+    reply = botrun.receive_price(http, "TOK", {"file_id": "fid", "file_name": "price.xlsx"},
+                                 tmp_path)
+
+    assert "1 позиций" in reply and "Холодильники" in reply
+    assert (tmp_path / "manual.xlsx").read_bytes() == xlsx_bytes
+    assert (tmp_path / "price.xlsx").read_bytes() == xlsx_bytes
+
+
+def test_receive_price_download_failure():
+    def handler(req):
+        return httpx.Response(200, json={"ok": True, "result": {}})
+    http = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.telegram.org")
+    reply = botrun.receive_price(http, "TOK", {"file_id": "fid"}, "unused")
+    assert "❌" in reply
+
+
 def test_resolve_callback_data_expands_code(tmp_path):
     from content_factory.publish.orders import OrderLinks
     from content_factory.orchestrator.confirm_store import ConfirmStore

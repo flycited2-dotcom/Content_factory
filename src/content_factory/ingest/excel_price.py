@@ -206,6 +206,45 @@ def match_phrase(item: PriceItem, phrase: str) -> int:
     return 0
 
 
+@dataclass
+class LineMatch:
+    line: str
+    item: PriceItem | None
+    candidates: list[PriceItem]
+
+
+def _line_score(item: PriceItem, line: str) -> float:
+    """Доля стемов строки, найденных в наименовании (0..1)."""
+    stems = [stem(w) for w in (line or "").split() if w.strip()]
+    if not stems:
+        return 0.0
+    name = item.name.lower()
+    return sum(1 for s in stems if s in name) / len(stems)
+
+
+def match_model_lines(items: list[PriceItem], lines: list[str],
+                      taken: set) -> list[LineMatch]:
+    """Построчное сопоставление КОНКРЕТНЫХ моделей (визард /task): в отличие от
+    select_from_price/search_items (одна фраза → категория/список кандидатов), тут
+    каждая строка — отдельный товар и ищется отдельно. Уверенный матч (в наименовании
+    найдены ВСЕ слова строки) — берём сразу; иначе не угадываем — топ-3 кандидата на
+    решение владельца. Пустые строки пропускаются, порядок непустых сохраняется."""
+    pool = [it for it in items if item_key(it) not in taken]
+    out: list[LineMatch] = []
+    for raw in lines:
+        line = (raw or "").strip()
+        if not line:
+            continue
+        scored = sorted(((s, it) for it in pool if (s := _line_score(it, line)) > 0),
+                        key=lambda t: -t[0])
+        if scored and scored[0][0] >= 1.0:
+            out.append(LineMatch(line=line, item=scored[0][1], candidates=[]))
+        else:
+            out.append(LineMatch(line=line, item=None,
+                                 candidates=[it for _, it in scored[:3]]))
+    return out
+
+
 def search_items(items: list[PriceItem], phrase: str, taken: set,
                  limit: int = 20) -> list[PriceItem]:
     """Поиск позиций по фразе (без падежей), имя-матчи первыми, дубли исключены."""
