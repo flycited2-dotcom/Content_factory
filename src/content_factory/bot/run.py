@@ -105,7 +105,7 @@ def make_find_pick_fns(state_db, prices_dir):
             return "❌ прайс не загружен — пришлите .xlsx файлом"
         items = [i for _, its in slots for i in its]      # свой прайс приоритетнее почтового
         store = ExcelStore(state_db)
-        found = search_items(items, phrase, _taken(store), limit=15)
+        found = search_items(items, phrase, _taken(store), limit=30)
         if not found:
             return (f"❌ по «{phrase}» ничего не нашлось (или всё уже в работе).\n"
                     f"Подсказка: слова ищутся без окончаний, можно сужать: "
