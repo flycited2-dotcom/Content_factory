@@ -111,7 +111,7 @@ def test_make_fn_selects_and_stores(tmp_path):
     ws.append(["2", "11", "Candy", "Холодильник Candy Y200", "25000", ""])
     prices = tmp_path / "prices"
     prices.mkdir()
-    wb.save(prices / "latest.xlsx")
+    wb.save(prices / "manual.xlsx")
     fn = botrun.make_make_fn(tmp_path / "state.db", prices)
     reply = fn(2, "холодильники", {})
     assert "✅ выбрано 2" in reply and "Beko X100" in reply
@@ -119,6 +119,33 @@ def test_make_fn_selects_and_stores(tmp_path):
     assert {i.key for i in items} == {"excel|beko|x100", "excel|candy|y200"}
     reply2 = fn(2, "холодильники", {})                    # повтор — всё уже в работе
     assert "❌" in reply2
+
+
+def test_make_fn_searches_both_manual_and_mail_slots(tmp_path):
+    # грабля 2026-07-03: почта (cf-mail) молча затирала единственный latest.xlsx —
+    # позиции владельца из его собственного прайса переставали находиться.
+    import openpyxl
+    from content_factory.orchestrator.excel_pipeline import ExcelStore
+    prices = tmp_path / "prices"
+    prices.mkdir()
+
+    wb1 = openpyxl.Workbook(); ws1 = wb1.active
+    ws1.append(["№", "Артикул", "Бренд", "Наименование", "Цена (руб.)", "Заказ (шт.)"])
+    ws1.append(["Холодильники", "", "", "", "", ""])
+    ws1.append(["1", "10", "Beko", "Холодильник Beko X100", "30000", ""])
+    wb1.save(prices / "manual.xlsx")
+
+    wb2 = openpyxl.Workbook(); ws2 = wb2.active
+    ws2.append(["№", "Артикул", "Бренд", "Наименование", "Цена (руб.)", "Заказ (шт.)"])
+    ws2.append(["Холодильники", "", "", "", "", ""])
+    ws2.append(["2", "11", "Candy", "Холодильник Candy Y200", "25000", ""])
+    wb2.save(prices / "mail.xlsx")
+
+    fn = botrun.make_make_fn(tmp_path / "state.db", prices)
+    reply = fn(2, "холодильники", {})
+    assert "Beko X100" in reply and "Candy Y200" in reply     # найдено в обоих слотах
+    items = ExcelStore(tmp_path / "state.db").by_status("new")
+    assert {i.key for i in items} == {"excel|beko|x100", "excel|candy|y200"}
 
 
 def test_resolve_callback_data_expands_code(tmp_path):

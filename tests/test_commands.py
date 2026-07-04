@@ -256,6 +256,16 @@ def test_parse_make_errors():
         parse_make("/make 5")                      # нет категории
 
 
+def test_parse_make_count_must_be_first_token():
+    # грабля 2026-07-03: владелец прислал список моделей («…Stinol WSTU 410 C…»)
+    # без /make N — число «410» из середины подхватилось как count (запрошено 410,
+    # категория молча стала «стиральная»). Теперь — явная ошибка вместо угадывания.
+    from content_factory.bot.commands import parse_make
+    import pytest
+    with pytest.raises(ValueError):
+        parse_make("/make Стиральная машина Stinol WSTU 410 C")
+
+
 def test_handle_make_calls_fn(tmp_path):
     q = TaskQueue(tmp_path / "q.db")
     got = {}

@@ -146,6 +146,18 @@ def parse_price_xlsx(path) -> list[PriceItem]:
     return items
 
 
+def load_price_slots(prices_dir) -> list[tuple[str, list[PriceItem]]]:
+    """Активные прайсы: свой «manual.xlsx» (приоритет) + почтовый «mail.xlsx».
+    Раздельные слоты — иначе почта (cf-mail каждые 30 мин) молча перезаписывала
+    единственный latest.xlsx поверх прайса, загруженного владельцем вручную."""
+    out = []
+    for label in ("manual", "mail"):
+        p = Path(prices_dir) / f"{label}.xlsx"
+        if p.exists():
+            out.append((label, parse_price_xlsx(p)))
+    return out
+
+
 def extract_model(name: str, brand: str) -> str:
     """Модель = часть наименования после бренда, без скобок:
     «Холодильник Stinol STS 167 (167*60*62)» → «STS 167»."""

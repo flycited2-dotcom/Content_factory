@@ -114,23 +114,25 @@ def _status(queue) -> str:
 
 def parse_make(text: str):
     """`/make 10 холодильники beko=3 indesit=3 stinol=*` → (count, категория, quotas).
-    Квота `*`/«остальные» = добор до count любыми брендами категории."""
+    Квота `*`/«остальные» = добор до count любыми брендами категории.
+    Количество — строго ПЕРВОЕ слово после /make (не любое число в тексте: иначе
+    «Stinol WSTU 410 C» из списка моделей подхватывает «410» как count — грабля
+    2026-07-03). Если первое слово не число — явная ошибка вместо угадывания."""
     parts = (text or "").strip().split()
     if parts and parts[0].lower().startswith("/make"):
         parts = parts[1:]
-    count, category = None, ""
+    if not parts or not parts[0].isdigit():
+        raise ValueError("укажите количество первым словом, напр.: /make 10 холодильники beko=3")
+    count = int(parts[0])
+    category = ""
     quotas: dict = {}
-    for tok in parts:
+    for tok in parts[1:]:
         low = tok.lower()
-        if count is None and tok.isdigit():
-            count = int(tok)
-        elif "=" in low:
+        if "=" in low:
             brand, n = low.split("=", 1)
             quotas[brand] = None if n in ("*", "остальные", "остальное") else int(n)
         elif not category:
             category = low
-    if count is None:
-        raise ValueError("укажите количество, напр.: /make 10 холодильники beko=3")
     if not category:
         raise ValueError("укажите категорию, напр.: /make 10 холодильники")
     if any(n is None for n in quotas.values()):

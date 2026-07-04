@@ -210,3 +210,28 @@ def test_1c_hierarchy_search(tmp_path):
     items = parse_price_xlsx(_xlsx_1c_hier(tmp_path))
     got = select_from_price(items, "холодильники", {}, 5, taken=set())
     assert len(got) == 2
+
+
+# ── два слота прайсов: свой (manual, приоритет) + почтовый (mail) ─────────────
+# Грабля 2026-07-03: почта (cf-mail каждые 30 мин) молча перезаписывала
+# единственный latest.xlsx поверх прайса, загруженного владельцем вручную —
+# его собственные позиции переставали находиться. Теперь — раздельные слоты.
+def test_load_price_slots_both_present(tmp_path):
+    from content_factory.ingest.excel_price import load_price_slots
+    _xlsx(tmp_path, ROWS[0:3]).rename(tmp_path / "manual.xlsx")   # раздел + 2 позиции
+    _xlsx(tmp_path, ROWS[3:6]).rename(tmp_path / "mail.xlsx")     # раздел + 2 позиции
+    slots = load_price_slots(tmp_path)
+    assert [label for label, _ in slots] == ["manual", "mail"]
+    assert len(slots[0][1]) == 2 and len(slots[1][1]) == 2
+
+
+def test_load_price_slots_missing_are_skipped(tmp_path):
+    from content_factory.ingest.excel_price import load_price_slots
+    _xlsx(tmp_path, ROWS[0:3]).rename(tmp_path / "mail.xlsx")   # только почтовый
+    slots = load_price_slots(tmp_path)
+    assert [label for label, _ in slots] == ["mail"]
+
+
+def test_load_price_slots_empty_dir(tmp_path):
+    from content_factory.ingest.excel_price import load_price_slots
+    assert load_price_slots(tmp_path) == []

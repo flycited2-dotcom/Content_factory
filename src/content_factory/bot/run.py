@@ -58,13 +58,13 @@ def make_make_fn(state_db, prices_dir):
     прайса и поставить в excel-конвейер (research → карточка → превью)."""
     def make_fn(count, category, quotas):
         from content_factory.ingest.excel_price import (
-            parse_price_xlsx, select_from_price, item_key, extract_model)
+            load_price_slots, select_from_price, item_key, extract_model)
         from content_factory.orchestrator.excel_pipeline import ExcelStore
         from content_factory.orchestrator.confirm_store import ConfirmStore
-        latest = Path(prices_dir) / "latest.xlsx"
-        if not latest.exists():
+        slots = load_price_slots(prices_dir)
+        if not slots:
             return "❌ прайс не загружен — пришлите .xlsx файлом в этот чат"
-        items = parse_price_xlsx(latest)
+        items = [i for _, its in slots for i in its]      # свой прайс приоритетнее почтового
         store = ExcelStore(state_db)
         taken = (PublishState(state_db).published_keys()
                  | ConfirmStore(state_db).blocked_keys() | store.all_keys())
@@ -87,7 +87,7 @@ def make_find_pick_fns(state_db, prices_dir):
     """/find <фраза> — нумерованный список кандидатов из прайса;
     /pick 1 3 5 — поставить выбранные в конвейер; /excel — статус конвейера."""
     from content_factory.ingest.excel_price import (
-        parse_price_xlsx, search_items, item_key, extract_model)
+        load_price_slots, search_items, item_key, extract_model)
     from content_factory.orchestrator.excel_pipeline import ExcelStore
     from content_factory.orchestrator.confirm_store import ConfirmStore
 
@@ -100,11 +100,12 @@ def make_find_pick_fns(state_db, prices_dir):
                   "key TEXT, brand TEXT, model TEXT, name TEXT, price INTEGER)")
 
     def find_fn(phrase):
-        latest = Path(prices_dir) / "latest.xlsx"
-        if not latest.exists():
+        slots = load_price_slots(prices_dir)
+        if not slots:
             return "❌ прайс не загружен — пришлите .xlsx файлом"
+        items = [i for _, its in slots for i in its]      # свой прайс приоритетнее почтового
         store = ExcelStore(state_db)
-        found = search_items(parse_price_xlsx(latest), phrase, _taken(store), limit=15)
+        found = search_items(items, phrase, _taken(store), limit=15)
         if not found:
             return (f"❌ по «{phrase}» ничего не нашлось (или всё уже в работе).\n"
                     f"Подсказка: слова ищутся без окончаний, можно сужать: "
@@ -152,7 +153,9 @@ def make_find_pick_fns(state_db, prices_dir):
 
 
 def receive_price(http, token: str, doc: dict, prices_dir) -> str:
-    """Скачать присланный владельцем .xlsx и сделать его текущим прайсом."""
+    """Скачать присланный владельцем .xlsx и сделать его текущим «своим» прайсом
+    (слот manual.xlsx — отдельно от почтового mail.xlsx, см. load_price_slots:
+    иначе следующий тик почты молча перезаписывал бы этот файл)."""
     from content_factory.ingest.excel_price import parse_price_xlsx
     r = http.get(f"{TG_API}/bot{token}/getFile", params={"file_id": doc.get("file_id")})
     file_path = ((r.json() or {}).get("result") or {}).get("file_path")
@@ -163,9 +166,9 @@ def receive_price(http, token: str, doc: dict, prices_dir) -> str:
     pdir.mkdir(parents=True, exist_ok=True)
     name = doc.get("file_name") or "price.xlsx"
     (pdir / name).write_bytes(data)
-    (pdir / "latest.xlsx").write_bytes(data)
+    (pdir / "manual.xlsx").write_bytes(data)
     try:
-        items = parse_price_xlsx(pdir / "latest.xlsx")
+        items = parse_price_xlsx(pdir / "manual.xlsx")
     except Exception as e:
         return f"❌ файл сохранён, но не парсится: {e}"
     sections = {}

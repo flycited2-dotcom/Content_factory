@@ -1,7 +1,8 @@
 """Источник «почта» (модуль): забирает прайс .xlsx из IMAP-ящика владельца —
-непрочитанные письма от MAIL_FROM_FILTER (1С шлёт с info@simfer.com.ru) — и делает
-его рабочим прайсом завода (state/prices/latest.xlsx), как будто владелец прислал
-файл боту. Сводка — владельцу в личку. Таймер cf-mail каждые 30 минут.
+непрочитанные письма от MAIL_FROM_FILTER (1С шлёт с info@simfer.com.ru) — и кладёт
+его в свой слот state/prices/mail.xlsx (отдельно от manual.xlsx — прайса,
+загруженного владельцем вручную; /make и /find ищут в обоих, см. load_price_slots).
+Сводка — владельцу в личку. Таймер cf-mail каждые 30 минут.
 
 .env: MAIL_IMAP_HOST (imap.gmail.com), MAIL_IMAP_USER, MAIL_IMAP_PASSWORD
 (app-password Gmail), MAIL_FROM_FILTER. Пустой пароль = модуль выключен.
@@ -72,9 +73,9 @@ def main():
     for fname, data in files:
         stamp = datetime.now().strftime("%Y%m%d_%H%M")
         (pdir / f"mail_{stamp}_{fname}").write_bytes(data)
-        (pdir / "latest.xlsx").write_bytes(data)
+        (pdir / "mail.xlsx").write_bytes(data)
         try:
-            n = len(parse_price_xlsx(pdir / "latest.xlsx"))
+            n = len(parse_price_xlsx(pdir / "mail.xlsx"))
             note = f"{n} позиций"
         except Exception as e:
             note = f"не парсится: {e}"
