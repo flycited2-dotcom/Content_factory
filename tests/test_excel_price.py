@@ -283,3 +283,21 @@ def test_load_price_slots_missing_are_skipped(tmp_path):
 def test_load_price_slots_empty_dir(tmp_path):
     from content_factory.ingest.excel_price import load_price_slots
     assert load_price_slots(tmp_path) == []
+
+
+# ── третий слот: канал-поставщик (авто-забор daily-прайса из Telegram-канала) ──
+def test_load_price_slots_includes_channel_between_manual_and_mail(tmp_path):
+    from content_factory.ingest.excel_price import load_price_slots
+    _xlsx(tmp_path, ROWS[0:3]).rename(tmp_path / "manual.xlsx")
+    _xlsx(tmp_path, ROWS[6:8]).rename(tmp_path / "channel.xlsx")
+    _xlsx(tmp_path, ROWS[3:6]).rename(tmp_path / "mail.xlsx")
+    slots = load_price_slots(tmp_path)
+    assert [label for label, _ in slots] == ["manual", "channel", "mail"]
+    assert len(slots[1][1]) == 1                    # раздел Stinol + 1 позиция
+
+
+def test_load_price_slots_only_channel(tmp_path):
+    from content_factory.ingest.excel_price import load_price_slots
+    _xlsx(tmp_path, ROWS[0:3]).rename(tmp_path / "channel.xlsx")
+    slots = load_price_slots(tmp_path)
+    assert [label for label, _ in slots] == ["channel"]

@@ -205,6 +205,36 @@ def test_receive_price_download_failure():
     assert "❌" in reply
 
 
+def test_receive_price_saves_to_named_slot(tmp_path):
+    # источник-канал (2026-07-04): та же логика, другой слот (не перезаписывает
+    # manual.xlsx владельца — load_price_slots ищет во всех трёх)
+    import io
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["№", "Артикул", "Бренд", "Наименование", "Цена (руб.)", "Заказ (шт.)"])
+    ws.append(["Телевизоры", "", "", "", "", ""])
+    ws.append(["1", "20", "MIU", "Телевизор MIU H40", "20000", ""])
+    buf = io.BytesIO()
+    wb.save(buf)
+    xlsx_bytes = buf.getvalue()
+
+    def handler(req):
+        if req.url.path == "/botTOK/getFile":
+            return httpx.Response(200, json={"ok": True,
+                                             "result": {"file_path": "documents/f.xlsx"}})
+        if req.url.path == "/file/botTOK/documents/f.xlsx":
+            return httpx.Response(200, content=xlsx_bytes)
+        raise AssertionError(f"неожиданный путь: {req.url.path}")
+    http = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.telegram.org")
+    reply = botrun.receive_price(http, "TOK", {"file_id": "fid", "file_name": "БытТехОпт.xlsx"},
+                                 tmp_path, slot="channel")
+
+    assert "1 позиций" in reply
+    assert (tmp_path / "channel.xlsx").read_bytes() == xlsx_bytes
+    assert not (tmp_path / "manual.xlsx").exists()   # свой прайс владельца не задет
+
+
 def test_resolve_callback_data_expands_code(tmp_path):
     from content_factory.publish.orders import OrderLinks
     from content_factory.orchestrator.confirm_store import ConfirmStore

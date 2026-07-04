@@ -163,10 +163,11 @@ def download_telegram_file(http, token: str, file_id: str) -> bytes | None:
     return http.get(f"{TG_API}/file/bot{token}/{file_path}").content
 
 
-def receive_price(http, token: str, doc: dict, prices_dir) -> str:
-    """Скачать присланный владельцем .xlsx и сделать его текущим «своим» прайсом
-    (слот manual.xlsx — отдельно от почтового mail.xlsx, см. load_price_slots:
-    иначе следующий тик почты молча перезаписывал бы этот файл)."""
+def receive_price(http, token: str, doc: dict, prices_dir, slot: str = "manual") -> str:
+    """Скачать .xlsx (от владельца файлом в чат — slot='manual', или из
+    канала-поставщика — slot='channel') и сделать его текущим прайсом в своём
+    слоте (см. load_price_slots: раздельные слоты — иначе слоты перезаписывали
+    бы друг друга)."""
     from content_factory.ingest.excel_price import parse_price_xlsx
     data = download_telegram_file(http, token, doc.get("file_id"))
     if data is None:
@@ -175,9 +176,9 @@ def receive_price(http, token: str, doc: dict, prices_dir) -> str:
     pdir.mkdir(parents=True, exist_ok=True)
     name = doc.get("file_name") or "price.xlsx"
     (pdir / name).write_bytes(data)
-    (pdir / "manual.xlsx").write_bytes(data)
+    (pdir / f"{slot}.xlsx").write_bytes(data)
     try:
-        items = parse_price_xlsx(pdir / "manual.xlsx")
+        items = parse_price_xlsx(pdir / f"{slot}.xlsx")
     except Exception as e:
         return f"❌ файл сохранён, но не парсится: {e}"
     sections = {}
@@ -261,6 +262,7 @@ def main():
     ps = PublishState(cfg.state.db)
     links = OrderLinks(cfg.state.db)
     lead_chat = config("TELEGRAM_LEAD_CHAT_ID", owner)   # куда слать лиды (дефолт — владелец)
+    price_channel = str(config("TELEGRAM_PRICE_CHANNEL_ID", ""))  # авто-забор daily-прайса
     publish_fn = make_publish_fn(token, cfg.telegram.parse_mode, ps,
                                  order_bot=cfg.telegram.order_bot, links=links)
     regen_fn = make_regen_fn(cfg.state.card_jobs_db)
@@ -325,6 +327,20 @@ def main():
                     pass
                 # вместо эха в чат — приписываем вердикт к самому превью (журнал ревью)
                 finalize_preview(http, token, cq, reply)
+                continue
+
+            # Прайс из канала-поставщика (бот там админ, .xlsx прилетает сам —
+            # без участия владельца): свой слот channel.xlsx, сводка владельцу в личку.
+            cpost = u.get("channel_post") or u.get("edited_channel_post")
+            if cpost and price_channel and str((cpost.get("chat") or {}).get("id", "")) == price_channel:
+                cdoc = cpost.get("document") or {}
+                if (cdoc.get("file_name") or "").lower().endswith(".xlsx"):
+                    reply = receive_price(http, token, cdoc, prices_dir, slot="channel")
+                    try:
+                        http.post(f"{TG_API}/bot{token}/sendMessage",
+                                 data={"chat_id": owner, "text": f"📡 Из канала: {reply}"})
+                    except httpx.HTTPError:
+                        pass
                 continue
 
             # отредактированное сообщение — тоже команда (владелец часто правит опечатку)

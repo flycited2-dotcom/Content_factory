@@ -147,11 +147,12 @@ def parse_price_xlsx(path) -> list[PriceItem]:
 
 
 def load_price_slots(prices_dir) -> list[tuple[str, list[PriceItem]]]:
-    """Активные прайсы: свой «manual.xlsx» (приоритет) + почтовый «mail.xlsx».
-    Раздельные слоты — иначе почта (cf-mail каждые 30 мин) молча перезаписывала
-    единственный latest.xlsx поверх прайса, загруженного владельцем вручную."""
+    """Активные прайсы: свой «manual.xlsx» (приоритет) → авто-забор из канала
+    поставщика «channel.xlsx» → почтовый «mail.xlsx». Раздельные слоты — иначе
+    почта (cf-mail каждые 30 мин) молча перезаписывала единственный latest.xlsx
+    поверх прайса, загруженного владельцем вручную."""
     out = []
-    for label in ("manual", "mail"):
+    for label in ("manual", "channel", "mail"):
         p = Path(prices_dir) / f"{label}.xlsx"
         if p.exists():
             out.append((label, parse_price_xlsx(p)))
