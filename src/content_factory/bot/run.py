@@ -18,6 +18,7 @@ from content_factory.publish.orders import OrderLinks, order_markup, handle_orde
 from content_factory.orchestrator.queue import TaskQueue
 from content_factory.orchestrator.confirm_store import ConfirmStore
 from content_factory.bot.commands import handle_command, handle_callback
+from content_factory.bot.voice import transcribe_voice_bytes
 
 
 def make_publish_fn(token: str, parse_mode: str, pub_state: PublishState, http=None,
@@ -347,6 +348,28 @@ def main():
             msg = u.get("message") or u.get("edited_message") or {}
             chat = str((msg.get("chat") or {}).get("id", ""))
             text = msg.get("text", "")
+            # Голосовое сообщение — распознаём в текст (ffmpeg+Google Speech Recognition,
+            # см. bot/voice.py) и дальше обрабатываем как обычный текст (визард /task,
+            # /make и т.д.). Модели/артикулы речь распознаёт ненадёжно — предупреждаем.
+            voice = msg.get("voice") or {}
+            if voice and (not owner or chat == owner) and not text:
+                data = download_telegram_file(http, token, voice.get("file_id"))
+                if data is None:
+                    continue
+                try:
+                    text = transcribe_voice_bytes(data)
+                except Exception as e:
+                    try:
+                        http.post(f"{TG_API}/bot{token}/sendMessage",
+                                 data={"chat_id": chat, "text": f"❌ Не распознал голосовое: {e}"})
+                    except httpx.HTTPError:
+                        pass
+                    continue
+                try:
+                    http.post(f"{TG_API}/bot{token}/sendMessage",
+                             data={"chat_id": chat, "text": f"🎤 Я услышал: «{text}»"})
+                except httpx.HTTPError:
+                    pass
             # Заказ по кнопке из канала: /start ord_<code> разрешён ЛЮБОМУ пользователю
             # (всё остальное от чужих игнорируется, как раньше).
             if text.startswith("/start ord_"):
