@@ -353,6 +353,13 @@ def main():
             # /make и т.д.). Модели/артикулы речь распознаёт ненадёжно — предупреждаем.
             voice = msg.get("voice") or {}
             if voice and (not owner or chat == owner) and not text:
+                # Длинные голосовые распознаются кусками (несколько сетевых
+                # round-trip'ов) — без этого сообщения выглядело бы зависшим.
+                try:
+                    http.post(f"{TG_API}/bot{token}/sendMessage",
+                             data={"chat_id": chat, "text": "🎤 Распознаю голосовое…"})
+                except httpx.HTTPError:
+                    pass
                 data = download_telegram_file(http, token, voice.get("file_id"))
                 if data is None:
                     continue
