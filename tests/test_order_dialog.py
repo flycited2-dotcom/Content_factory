@@ -18,6 +18,15 @@ def test_set_qty_moves_to_comment(tmp_path):
     assert st.qty == 3 and st.step == "awaiting_comment"
 
 
+def test_set_comment_moves_to_phone(tmp_path):
+    s = OrderDialogStore(tmp_path / "s.db")
+    s.start("777", "k")
+    s.set_qty("777", 2)
+    s.set_comment("777", "нужна доставка")
+    st = s.snapshot("777")
+    assert st.comment == "нужна доставка" and st.step == "awaiting_phone"
+
+
 def test_set_step_custom(tmp_path):
     s = OrderDialogStore(tmp_path / "s.db")
     s.start("777", "k")

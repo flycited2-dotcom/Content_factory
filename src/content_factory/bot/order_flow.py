@@ -1,8 +1,8 @@
-"""Опросник заказа клиента (задача 3, выбор владельца 2026-07-05). Кнопка
-«Заказать» под постом ведёт в бота: клиент видит ТОЛЬКО опросник заказа
-(кол-во → комментарий), готовая заявка улетает в отдельный чат (лиды),
-а не смешивается с управляющим ботом владельца. Чистая логика без Telegram
-(отправку инъектит bot/run.py); состояние — OrderDialogStore."""
+"""Опросник заказа клиента (задача 3 + follow-up 2026-07-05). Кнопка «Заказать»
+под постом ведёт в бота: клиент проходит кол-во → комментарий → телефон, и готовая
+заявка (наименование, цена, кол-во, телефон, комментарий, @клиент) улетает в
+отдельный чат лидов, а не смешивается с управляющим ботом владельца. Чистая логика
+без Telegram (отправку инъектит bot/run.py); состояние — OrderDialogStore."""
 from __future__ import annotations
 import re
 from dataclasses import dataclass
@@ -18,17 +18,25 @@ QTY_KB = {"inline_keyboard": [
     [{"text": "✏️ Другое количество", "callback_data": "order:qty:custom"}]]}
 SKIP_COMMENT_KB = {"inline_keyboard": [
     [{"text": "⏭ Пропустить", "callback_data": "order:skip_comment"}]]}
+# Телефон запрашиваем reply-клавиатурой (request_contact работает только в ней).
+CONTACT_KB = {"keyboard": [[{"text": "📱 Отправить телефон", "request_contact": True}],
+                          [{"text": "Пропустить"}]],
+              "resize_keyboard": True, "one_time_keyboard": True}
+REMOVE_KB = {"remove_keyboard": True}
 
 _COMMENT_PROMPT = ("Комментарий к заказу? (адрес, вопрос, удобное время) — "
                    "напишите или пропустите.")
+_PHONE_PROMPT = ("📱 Оставьте телефон, чтобы менеджер перезвонил: нажмите кнопку ниже, "
+                 "впишите номер или «Пропустить».")
 
 
 @dataclass
 class OrderReply:
     text: str
-    markup: dict | None = None
+    markup: dict | None = None         # inline-клавиатура
     force_reply: bool = False
     placeholder: str | None = None
+    keyboard: dict | None = None       # reply-клавиатура (телефон / убрать)
     lead: str | None = None            # текст заявки в чат лидов (когда заказ готов)
 
 
@@ -47,24 +55,31 @@ def _who(user: dict) -> str:
 
 def make_order_flow(store, links, pub_state):
     """start(chat, code, user) — по /start ord_<code>; callback(chat, data, user) —
-    кнопки order:*; text(chat, msg, user) — своё число/комментарий. Каждый вернёт
-    OrderReply (lead != None, когда заявку пора слать в чат лидов)."""
+    кнопки order:*; text(chat, msg, user) — число/комментарий/телефон-текст;
+    contact(chat, phone, user) — клиент поделился контактом. lead != None у ответа,
+    когда заявку пора слать в чат лидов."""
 
     def _comment_reply() -> OrderReply:
         return OrderReply(_COMMENT_PROMPT, SKIP_COMMENT_KB)
 
-    def _finalize(chat_id, st, user, comment) -> OrderReply:
+    def _phone_reply() -> OrderReply:
+        return OrderReply(_PHONE_PROMPT, keyboard=CONTACT_KB)
+
+    def _finalize(chat_id, st, user, phone) -> OrderReply:
         qty = st.qty or 1
+        comment = st.comment or ""
         links.add_lead(int(user.get("id") or 0), user.get("username") or "",
-                       st.key, qty=qty, comment=comment)
+                       st.key, qty=qty, comment=comment, phone=phone)
         summary = item_summary(pub_state, st.key)
         store.cancel(chat_id)
         r = OrderReply(f"✅ Заявка принята! {summary.splitlines()[0]} — {qty} шт.\n"
-                       f"Менеджер свяжется с вами в ближайшее время.")
-        lead = ["📩 Новая заявка", summary, f"Количество: {qty} шт."]
+                       f"Менеджер свяжется с вами в ближайшее время.", keyboard=REMOVE_KB)
+        lead = ["📩 Новая заявка", summary, f"🔢 Количество: {qty} шт."]
+        if phone:
+            lead.append(f"📱 Телефон: {phone}")
         if comment:
-            lead.append(f"Комментарий: {comment}")
-        lead.append(f"Клиент: {_who(user)} (id {user.get('id')})")
+            lead.append(f"💬 Комментарий: {comment}")
+        lead.append(f"👤 Клиент: {_who(user)} (id {user.get('id')})")
         r.lead = "\n".join(lead)
         return r
 
@@ -97,7 +112,8 @@ def make_order_flow(store, links, pub_state):
         if data == "order:skip_comment":
             if st.step != "awaiting_comment":
                 return OrderReply("Сначала выберите количество.")
-            return _finalize(chat_id, st, user, comment="")
+            store.set_comment(chat_id, "")
+            return _phone_reply()
         return OrderReply("Кнопка устарела.")
 
     def text(chat_id, msg_text, user) -> OrderReply | None:
@@ -116,7 +132,18 @@ def make_order_flow(store, links, pub_state):
             store.set_qty(chat_id, n)
             return _comment_reply()
         if st.step == "awaiting_comment":
-            return _finalize(chat_id, st, user, comment=(msg_text or "").strip())
+            store.set_comment(chat_id, (msg_text or "").strip())
+            return _phone_reply()
+        if st.step == "awaiting_phone":
+            t = (msg_text or "").strip()
+            phone = "" if t == "Пропустить" else t
+            return _finalize(chat_id, st, user, phone=phone)
         return None
 
-    return start, callback, text
+    def contact(chat_id, phone, user) -> OrderReply | None:
+        st = store.snapshot(chat_id)
+        if st is None or st.step != "awaiting_phone":
+            return None
+        return _finalize(chat_id, st, user, phone=(phone or "").strip())
+
+    return start, callback, text, contact

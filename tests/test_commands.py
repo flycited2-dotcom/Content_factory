@@ -104,6 +104,9 @@ def test_handle_approve_publishes(tmp_path):
     assert sent["key"] == "breeze|ballu|olympio"
     assert cs.get("breeze|ballu|olympio").status == "published"
     assert ps.is_published("breeze|ballu|olympio")
+    # подпись поста должна сохраниться (нужна для лида «Заказать»), а не затереться
+    rec = next(r for r in ps.records() if r.key == "breeze|ballu|olympio")
+    assert rec.caption == "подпись" and rec.channel == "@chan"
 
 
 def test_handle_approve_key_with_spaces(tmp_path):

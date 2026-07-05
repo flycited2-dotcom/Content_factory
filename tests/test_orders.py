@@ -21,19 +21,21 @@ def test_order_markup_url_button(tmp_path):
     assert btn["url"].startswith("https://t.me/Sendpr1ce_bot?start=ord_")
 
 
-def test_add_lead_stores_qty_and_comment(tmp_path):
+def test_add_lead_stores_qty_comment_phone(tmp_path):
     ol = OrderLinks(tmp_path / "s.db")
-    ol.add_lead(555, "ivan", "breeze|funai|x", qty=3, comment="нужна доставка")
+    ol.add_lead(555, "ivan", "breeze|funai|x", qty=3,
+                comment="нужна доставка", phone="+79781234567")
     (lead,) = ol.leads()
     assert lead.user_id == 555 and lead.key == "breeze|funai|x"
     assert lead.qty == 3 and lead.comment == "нужна доставка"
+    assert lead.phone == "+79781234567"
 
 
 def test_add_lead_defaults(tmp_path):
     ol = OrderLinks(tmp_path / "s.db")
     ol.add_lead(1, "", "k")
     (lead,) = ol.leads()
-    assert lead.qty == 1 and lead.comment == ""
+    assert lead.qty == 1 and lead.comment == "" and lead.phone == ""
 
 
 def test_item_summary_strips_html(tmp_path):

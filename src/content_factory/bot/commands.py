@@ -210,7 +210,9 @@ def handle_command(text: str, queue, today: date | None = None, held_provider=No
         if res and res.ok:
             confirm_store.mark(key, "published")
             if publish_state:
-                publish_state.mark(key, res.message_id)
+                # channel/caption из Awaiting — иначе mark (INSERT OR REPLACE) затрёт
+                # подпись, сохранённую publish_post (нужна для лида «Заказать»).
+                publish_state.mark(key, res.message_id, channel=a.channel, caption=a.caption)
             return f"✅ опубликовано: {key}"
         return f"❌ не удалось опубликовать {key}: {getattr(res, 'error', None)}"
     if cmd.startswith("/reject"):

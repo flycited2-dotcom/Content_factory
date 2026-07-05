@@ -295,7 +295,8 @@ def main():
     links = OrderLinks(cfg.state.db)
     pending = PendingCmdStore(cfg.state.db)              # ждём аргумент /find /make /pick
     order_store = OrderDialogStore(cfg.state.db)         # опросник заказа клиента
-    order_start, order_callback, order_text = make_order_flow(order_store, links, ps)
+    order_start, order_callback, order_text, order_contact = make_order_flow(
+        order_store, links, ps)
     lead_chat = config("TELEGRAM_LEAD_CHAT_ID", owner)   # куда слать лиды (дефолт — владелец)
     price_channel = str(config("TELEGRAM_PRICE_CHANNEL_ID", ""))  # авто-забор daily-прайса
     publish_fn = make_publish_fn(token, cfg.telegram.parse_mode, ps,
@@ -333,6 +334,8 @@ def main():
         data = {"chat_id": chat_id, "text": r.text}
         if r.markup:
             data["reply_markup"] = json.dumps(r.markup, ensure_ascii=False)
+        elif r.keyboard:
+            data["reply_markup"] = json.dumps(r.keyboard, ensure_ascii=False)
         elif r.force_reply:
             data["reply_markup"] = json.dumps(
                 {"force_reply": True, "input_field_placeholder": r.placeholder or ""},
@@ -472,8 +475,16 @@ def main():
                 except httpx.HTTPError:
                     pass
                 continue
-            # Комментарий / своё количество в опроснике заказа — от ЛЮБОГО клиента,
-            # но только при активном диалоге заказа (order_text вернёт None иначе).
+            # Клиент поделился телефоном (request_contact) в опроснике заказа.
+            contact = msg.get("contact")
+            if contact:
+                r = order_contact(chat, contact.get("phone_number", ""),
+                                  msg.get("from") or {})
+                if r is not None:
+                    _send_order_reply(chat, r)
+                    continue
+            # Комментарий / своё количество / телефон-текст в опроснике заказа —
+            # от ЛЮБОГО клиента, но только при активном диалоге (иначе order_text → None).
             if text:
                 r = order_text(chat, text, msg.get("from") or {})
                 if r is not None:
