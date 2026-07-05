@@ -1,24 +1,31 @@
 # Реестр машин Контент-завода — «разведение дорог» между агентами на разных ПК.
 #
-# Зачем: watchdog поднимает агента и на десктопе, и на ноуте независимо, и оба
-# стучат в LLM/бота одновременно. Общий реестр даёт каждой машине понять, кто она,
-# и развести задачи (или взять lock), не дублируя работу.
+# Зачем: watchdog поднимает генератор карточек (remote_agent.py, гонит ChatGPT через
+# Chrome CDP) и на десктопе, и на ноуте. Без разведения оба стучат в один ChatGPT/очередь
+# одновременно и дублируют работу. Реестр даёт каждой машине понять, кто она (по MachineGuid),
+# и какая у неё «дорога» — свой флаг start/stop в queue.db на VPS.
 #
 # Ключ машины — Windows MachineGuid: стабильный, уникальный, не меняется при
 # переименовании ПК. Узнать свой на любой машине (PowerShell):
 #   (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Cryptography' -Name MachineGuid).MachineGuid
 #
-# Агент/watchdog читает свой GUID в рантайме и ищет себя в machines[] по machine_guid.
+# command_key — имя флага в queue.db на VPS (см. HANDOFF-2026-07-05: agent_command_laptop).
+# Агент/watchdog слушает ТОЛЬКО свой command_key → так дороги не пересекаются.
+#
+# Заполнить машину проще скриптом (запускать НА нужной машине из корня репо):
+#   pwsh scripts/register-machine.ps1 -Name laptop -Role card-agent
 
 machines:
   - name: desktop
     machine_guid: "4557e2b1-f540-4dc1-a4db-f733c096ab11"
     hostname: "DESKTOP-A59E7AI"
-    role: ""          # чем занимается эта машина — заполнить при разведении дорог
-    runs_bot: false   # true только на ОДНОЙ машине: cf-bot — long-poll, два инстанса → 409 Conflict
+    role: "card-agent"                    # генератор карточек (ChatGPT через Chrome CDP)
+    command_key: "agent_command_desktop"  # своя дорога: флаг start/stop в queue.db на VPS
+    runs_bot: false                       # cf-bot (long-poll) держать на ОДНОЙ машине → иначе 409
 
   - name: laptop
-    machine_guid: ""  # заполнить на ноуте (см. команду выше)
+    machine_guid: ""                      # заполнить на ноуте (см. скрипт/команду выше)
     hostname: ""
-    role: ""
+    role: "card-agent"
+    command_key: "agent_command_laptop"   # уже используется на VPS (HANDOFF-2026-07-05)
     runs_bot: false
