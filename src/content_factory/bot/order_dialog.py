@@ -27,6 +27,10 @@ class OrderDialogStore:
             c.execute("CREATE TABLE IF NOT EXISTS order_dialog ("
                       "chat_id TEXT PRIMARY KEY, step TEXT, key TEXT, qty INTEGER, "
                       "comment TEXT)")
+            try:                                  # таблица из волны 1 была без comment —
+                c.execute("ALTER TABLE order_dialog ADD COLUMN comment TEXT")
+            except sqlite3.OperationalError:
+                pass                              # колонка уже есть (свежая таблица)
 
     def _c(self):
         return sqlite3.connect(self.path)

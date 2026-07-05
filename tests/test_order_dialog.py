@@ -1,6 +1,25 @@
 """Состояние диалога заказа клиента (задача 3): кол-во → комментарий → лид.
 Чистый стор в SQLite (как WizardStore), переживает рестарт cf-bot."""
+import sqlite3
 from content_factory.bot.order_dialog import OrderDialogStore
+
+
+def test_migrates_legacy_table_without_comment(tmp_path):
+    # прод-грабля 2026-07-05: таблица создана в волне 1 БЕЗ колонки comment;
+    # OrderDialogStore.__init__ должен доальтерить её, иначе snapshot падает
+    # (no such column: comment) и роняет long-poll cf-bot в крэш-луп.
+    db = tmp_path / "s.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE order_dialog (chat_id TEXT PRIMARY KEY, step TEXT, "
+                "key TEXT, qty INTEGER)")
+    con.execute("INSERT INTO order_dialog VALUES('1','awaiting_comment','k',2)")
+    con.commit()
+    con.close()
+    s = OrderDialogStore(db)                    # init обязан ALTER добавить comment
+    st = s.snapshot("1")                        # не должно падать
+    assert st.step == "awaiting_comment" and st.qty == 2 and st.comment is None
+    s.set_comment("1", "тест")
+    assert s.snapshot("1").comment == "тест"
 
 
 def test_start_sets_awaiting_qty(tmp_path):
