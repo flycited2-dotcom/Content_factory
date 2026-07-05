@@ -6,6 +6,7 @@ After=network-online.target
 Type=simple
 WorkingDirectory=/opt/content-factory
 Environment=PYTHONPATH=/opt/content-factory/src
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/opt/content-factory/.venv/bin/python -m content_factory.bot.run
 Restart=always
 RestartSec=5
