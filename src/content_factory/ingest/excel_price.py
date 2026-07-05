@@ -212,16 +212,33 @@ def stem(word: str) -> str:
     return s if len(s) >= 4 else w
 
 
-def match_phrase(item: PriceItem, phrase: str) -> int:
-    """0 — не подходит; 1 — все стемы фразы в разделе; 2 — все в наименовании
-    (приоритетнее: «генератор» в имени ≠ АВР из раздела «Генераторы»)."""
-    stems = [stem(w) for w in (phrase or "").split() if w.strip()]
-    if not stems:
+def _word_matches(word: str, text: str, aliases: dict) -> bool:
+    """Слово фразы найдено в тексте: по своему стему ИЛИ по алиасу (синоним/транслит).
+    Алиас-значение — фраза: срабатывает, если ВСЕ её стемы есть в тексте (напр.
+    «стиралка» → «стиральная машина»: нужны и «стиральн», и «машин»)."""
+    st = stem(word)
+    if st in text:
+        return True
+    for alias in aliases.get(st, ()):
+        astems = [stem(a) for a in alias.split()]
+        if astems and all(a in text for a in astems):
+            return True
+    return False
+
+
+def match_phrase(item: PriceItem, phrase: str, aliases: dict | None = None) -> int:
+    """0 — не подходит; 1 — все слова фразы в разделе; 2 — все в наименовании
+    (приоритетнее: «генератор» в имени ≠ АВР из раздела «Генераторы»).
+    aliases — словарь синонимов/транслита (см. load_search_aliases); None = без него."""
+    aliases = aliases or {}
+    words = [w for w in (phrase or "").split() if w.strip()]
+    if not words:
         return 0
-    name, sec = item.name.lower(), f"{item.section} {item.name}".lower()
-    if all(s in name for s in stems):
+    name = item.name.lower()
+    if all(_word_matches(w, name, aliases) for w in words):
         return 2
-    if all(s in sec for s in stems):
+    sec = f"{item.section} {item.name}".lower()
+    if all(_word_matches(w, sec, aliases) for w in words):
         return 1
     return 0
 
@@ -265,10 +282,28 @@ def match_model_lines(items: list[PriceItem], lines: list[str],
     return out
 
 
+def load_search_aliases(path) -> dict[str, list[str]]:
+    """Словарь синонимов/транслита для поиска из YAML:
+    «<как пишет пользователь>: [<что искать в наименовании>, …]» — напр.
+    «стиралка: [стиральная машина]», «бош: [bosch]». Ключи нормализуем в стем-форму
+    (ловим падежи запроса). Файла нет → пустой словарь (поиск как раньше)."""
+    p = Path(path)
+    if not p.exists():
+        return {}
+    import yaml
+    raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    out: dict[str, list[str]] = {}
+    for key, vals in raw.items():
+        vlist = vals if isinstance(vals, list) else [vals]
+        out.setdefault(stem(str(key)), []).extend(str(v).lower() for v in vlist)
+    return out
+
+
 def search_items(items: list[PriceItem], phrase: str, taken: set,
-                 limit: int = 20) -> list[PriceItem]:
-    """Поиск позиций по фразе (без падежей), имя-матчи первыми, дубли исключены."""
-    scored = [(match_phrase(i, phrase), i) for i in items]
+                 limit: int = 20, aliases: dict | None = None) -> list[PriceItem]:
+    """Поиск позиций по фразе (без падежей + синонимы/транслит), имя-матчи первыми,
+    дубли исключены. aliases — см. load_search_aliases (None = без словаря)."""
+    scored = [(match_phrase(i, phrase, aliases), i) for i in items]
     pool = [i for score, i in sorted(
         [(s, i) for s, i in scored if s and item_key(i) not in taken],
         key=lambda t: -t[0])]
@@ -276,11 +311,12 @@ def search_items(items: list[PriceItem], phrase: str, taken: set,
 
 
 def select_from_price(items: list[PriceItem], category_kw: str, quotas: dict,
-                      count: int, taken: set) -> list[PriceItem]:
-    """До `count` позиций категории (фраза ищется без падежей в разделе и наименовании).
-    quotas: {'beko': 3, 'stinol': 2, '*': None} — сначала явные квоты брендов,
-    затем добор любыми (если задан '*' или квот нет). Анти-дубль по taken-ключам."""
-    pool = search_items(items, category_kw, taken, limit=10 ** 9)
+                      count: int, taken: set, aliases: dict | None = None) -> list[PriceItem]:
+    """До `count` позиций категории (фраза ищется без падежей + синонимы/транслит в
+    разделе и наименовании). quotas: {'beko': 3, 'stinol': 2, '*': None} — сначала
+    явные квоты брендов, затем добор любыми (если задан '*' или квот нет).
+    Анти-дубль по taken-ключам."""
+    pool = search_items(items, category_kw, taken, limit=10 ** 9, aliases=aliases)
     out: list[PriceItem] = []
 
     explicit = {b: n for b, n in (quotas or {}).items() if b != "*" and n}

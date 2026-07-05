@@ -63,7 +63,8 @@ def make_make_fn(state_db, prices_dir):
     прайса и поставить в excel-конвейер (research → карточка → превью)."""
     def make_fn(count, category, quotas):
         from content_factory.ingest.excel_price import (
-            load_price_slots, select_from_price, item_key, extract_model)
+            load_price_slots, select_from_price, item_key, extract_model,
+            load_search_aliases)
         from content_factory.orchestrator.excel_pipeline import ExcelStore
         from content_factory.orchestrator.confirm_store import ConfirmStore
         slots = load_price_slots(prices_dir)
@@ -73,7 +74,8 @@ def make_make_fn(state_db, prices_dir):
         store = ExcelStore(state_db)
         taken = (PublishState(state_db).published_keys()
                  | ConfirmStore(state_db).blocked_keys() | store.all_keys())
-        got = select_from_price(items, category, quotas, count, taken)
+        got = select_from_price(items, category, quotas, count, taken,
+                                aliases=load_search_aliases(Path("config/search_aliases.yaml")))
         if not got:
             return f"❌ по запросу «{category}» ничего не нашлось (или всё уже в работе)"
         rows = [(item_key(i), i.brand, extract_model(i.name, i.brand), i.name, i.price)
@@ -92,9 +94,11 @@ def make_find_pick_fns(state_db, prices_dir):
     """/find <фраза> — нумерованный список кандидатов из прайса;
     /pick 1 3 5 — поставить выбранные в конвейер; /excel — статус конвейера."""
     from content_factory.ingest.excel_price import (
-        load_price_slots, search_items, item_key, extract_model)
+        load_price_slots, search_items, item_key, extract_model, load_search_aliases)
     from content_factory.orchestrator.excel_pipeline import ExcelStore
     from content_factory.orchestrator.confirm_store import ConfirmStore
+
+    aliases_path = Path("config/search_aliases.yaml")
 
     def _taken(store):
         return (PublishState(state_db).published_keys()
@@ -110,7 +114,8 @@ def make_find_pick_fns(state_db, prices_dir):
             return "❌ прайс не загружен — пришлите .xlsx файлом"
         items = [i for _, its in slots for i in its]      # свой прайс приоритетнее почтового
         store = ExcelStore(state_db)
-        found = search_items(items, phrase, _taken(store), limit=30)
+        found = search_items(items, phrase, _taken(store), limit=30,
+                             aliases=load_search_aliases(aliases_path))
         if not found:
             return (f"❌ по «{phrase}» ничего не нашлось (или всё уже в работе).\n"
                     f"Подсказка: слова ищутся без окончаний, можно сужать: "

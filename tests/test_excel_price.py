@@ -336,3 +336,53 @@ def test_load_price_slots_manual_and_supplier_slots_together(tmp_path):
     _xlsx(tmp_path, ROWS[3:6]).rename(tmp_path / f"{manual_slot_name('aksenov.xlsx')}.xlsx")
     slots = load_price_slots(tmp_path)
     assert len(slots) == 2 and sum(len(items) for _, items in slots) == 4
+
+
+# ── словарь синонимов/транслита для поиска (/find, /make) ─────────────────────
+_ALIAS_ROWS = [
+    ["Стиральные машины", "", "", "", "", ""],
+    ["1", "10", "Bosch", "Стиральная машина Bosch WQB245", "41990", ""],
+    ["2", "11", "Candy", "Стиральная машина Candy CS4", "19990", ""],
+    ["Микроволновые печи", "", "", "", "", ""],
+    ["3", "12", "Samsung", "Микроволновая печь Samsung ME81", "8990", ""],
+]
+
+
+def test_search_alias_synonym(tmp_path):
+    from content_factory.ingest.excel_price import search_items
+    items = parse_price_xlsx(_xlsx(tmp_path, _ALIAS_ROWS))
+    assert search_items(items, "стиралка", set()) == []            # без словаря — не находит
+    got = search_items(items, "стиралка", set(), aliases={"стиралк": ["стиральная машина"]})
+    assert len(got) == 2 and all("Стиральная" in i.name for i in got)
+
+
+def test_search_alias_brand_translit(tmp_path):
+    from content_factory.ingest.excel_price import search_items
+    items = parse_price_xlsx(_xlsx(tmp_path, _ALIAS_ROWS))
+    assert search_items(items, "бош", set()) == []                 # кириллица ≠ Bosch
+    got = search_items(items, "бош", set(), aliases={"бош": ["bosch"]})
+    assert len(got) == 1 and "Bosch" in got[0].name
+
+
+def test_search_alias_combined_synonym_and_brand(tmp_path):
+    from content_factory.ingest.excel_price import search_items
+    items = parse_price_xlsx(_xlsx(tmp_path, _ALIAS_ROWS))
+    aliases = {"стиралк": ["стиральная машина"], "бош": ["bosch"]}
+    got = search_items(items, "стиралка бош", set(), aliases=aliases)
+    assert len(got) == 1 and "Bosch" in got[0].name               # синоним + бренд вместе
+
+
+def test_load_search_aliases_from_yaml_stems_keys(tmp_path):
+    from content_factory.ingest.excel_price import load_search_aliases, stem
+    y = tmp_path / "a.yaml"
+    y.write_text("стиралка: [стиральная машина]\nбош: [bosch]\nсамсунг: samsung\n",
+                 encoding="utf-8")
+    al = load_search_aliases(y)
+    assert al[stem("стиралка")] == ["стиральная машина"]           # ключи в стем-форме
+    assert al[stem("бош")] == ["bosch"]
+    assert al[stem("самсунг")] == ["samsung"]                      # скаляр → список
+
+
+def test_load_search_aliases_missing_file_is_empty(tmp_path):
+    from content_factory.ingest.excel_price import load_search_aliases
+    assert load_search_aliases(tmp_path / "nope.yaml") == {}
