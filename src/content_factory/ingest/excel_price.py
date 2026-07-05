@@ -4,6 +4,7 @@
 /make N <категория> [бренд=K …] и ключи анти-дубля excel|бренд|модель."""
 from __future__ import annotations
 import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -153,8 +154,10 @@ def manual_slot_name(filename: str) -> str:
     """Имя слота ручного прайса из имени файла: «manual__<slug>». Несколько
     прайсов поставщиков живут рядом (грабля Аксёнов/БытТехОпт 2026-07-05: один
     слот manual.xlsx → новая загрузка затирала предыдущего поставщика). Повторная
-    загрузка того же файла обновляет только свой слот; регистр/пробелы не важны."""
-    stem = Path(filename or "price").stem.lower()
+    загрузка того же файла обновляет только свой слот; регистр/пробелы не важны.
+    NFC-нормализация — чтобы разложенные й/ё (NFD) из имени файла давали тот же
+    слот, что и precomposed (иначе повторная загрузка задваивала бы слот)."""
+    stem = unicodedata.normalize("NFC", Path(filename or "price").stem).lower()
     slug = _SLUG_RE.sub("_", stem).strip("_")[:48] or "price"
     return f"manual__{slug}"
 

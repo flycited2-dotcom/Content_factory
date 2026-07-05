@@ -313,6 +313,10 @@ def test_manual_slot_name_deterministic_and_distinct():
     assert a.startswith("manual__") and b.startswith("manual__") and a != b
     assert manual_slot_name("Прайс ИП Аксёнов 16.06.xlsx") == a          # детерминизм
     assert manual_slot_name("прайс  ип  аксёнов  16.06.XLSX") == a       # регистр/пробелы
+    import unicodedata                                                    # NFD (разложенные
+    nfd = unicodedata.normalize("NFD", "Прайс ИП Аксёнов 16.06.xlsx")     # й/ё) == NFC:
+    assert manual_slot_name(nfd) == a                                     # повторная загрузка
+    assert "__" in a and "_с_" not in a and "аксёнов" in a               # тот же слот
 
 
 def test_load_price_slots_multiple_manual_suppliers(tmp_path):
