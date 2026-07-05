@@ -301,3 +301,34 @@ def test_load_price_slots_only_channel(tmp_path):
     _xlsx(tmp_path, ROWS[0:3]).rename(tmp_path / "channel.xlsx")
     slots = load_price_slots(tmp_path)
     assert [label for label, _ in slots] == ["channel"]
+
+
+# ── несколько ручных прайсов поставщиков (Аксёнов + БытТехОпт) одновременно ────
+# Грабля 2026-07-05: один слот manual.xlsx → загрузка БытТехОпта затёрла Аксёнова.
+# Теперь ручной прайс кладётся в свой слот manual__<из-имени>, грузятся все.
+def test_manual_slot_name_deterministic_and_distinct():
+    from content_factory.ingest.excel_price import manual_slot_name
+    a = manual_slot_name("Прайс ИП Аксёнов 16.06.xlsx")
+    b = manual_slot_name("БытТехОпт_20260704.xlsx")
+    assert a.startswith("manual__") and b.startswith("manual__") and a != b
+    assert manual_slot_name("Прайс ИП Аксёнов 16.06.xlsx") == a          # детерминизм
+    assert manual_slot_name("прайс  ип  аксёнов  16.06.XLSX") == a       # регистр/пробелы
+
+
+def test_load_price_slots_multiple_manual_suppliers(tmp_path):
+    from content_factory.ingest.excel_price import load_price_slots, manual_slot_name
+    _xlsx(tmp_path, ROWS[0:3]).rename(tmp_path / f"{manual_slot_name('aksenov.xlsx')}.xlsx")
+    _xlsx(tmp_path, ROWS[3:6]).rename(tmp_path / f"{manual_slot_name('byttehopt.xlsx')}.xlsx")
+    slots = load_price_slots(tmp_path)
+    labels = [label for label, _ in slots]
+    assert len(labels) == 2 and all(label.startswith("manual__") for label in labels)
+    assert sum(len(items) for _, items in slots) == 4          # обе прайса загружены
+
+
+def test_load_price_slots_manual_and_supplier_slots_together(tmp_path):
+    # legacy manual.xlsx + новый manual__ слот сосуществуют (переходный период)
+    from content_factory.ingest.excel_price import load_price_slots, manual_slot_name
+    _xlsx(tmp_path, ROWS[0:3]).rename(tmp_path / "manual.xlsx")
+    _xlsx(tmp_path, ROWS[3:6]).rename(tmp_path / f"{manual_slot_name('aksenov.xlsx')}.xlsx")
+    slots = load_price_slots(tmp_path)
+    assert len(slots) == 2 and sum(len(items) for _, items in slots) == 4

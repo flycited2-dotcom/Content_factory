@@ -146,14 +146,30 @@ def parse_price_xlsx(path) -> list[PriceItem]:
     return items
 
 
+_SLUG_RE = re.compile(r"[^a-z0-9а-яё]+")
+
+
+def manual_slot_name(filename: str) -> str:
+    """Имя слота ручного прайса из имени файла: «manual__<slug>». Несколько
+    прайсов поставщиков живут рядом (грабля Аксёнов/БытТехОпт 2026-07-05: один
+    слот manual.xlsx → новая загрузка затирала предыдущего поставщика). Повторная
+    загрузка того же файла обновляет только свой слот; регистр/пробелы не важны."""
+    stem = Path(filename or "price").stem.lower()
+    slug = _SLUG_RE.sub("_", stem).strip("_")[:48] or "price"
+    return f"manual__{slug}"
+
+
 def load_price_slots(prices_dir) -> list[tuple[str, list[PriceItem]]]:
-    """Активные прайсы: свой «manual.xlsx» (приоритет) → авто-забор из канала
-    поставщика «channel.xlsx» → почтовый «mail.xlsx». Раздельные слоты — иначе
-    почта (cf-mail каждые 30 мин) молча перезаписывала единственный latest.xlsx
-    поверх прайса, загруженного владельцем вручную."""
+    """Активные прайсы: ручные прайсы поставщиков «manual__*.xlsx» (все, приоритет)
+    → legacy «manual.xlsx» → авто-забор из канала «channel.xlsx» → почта «mail.xlsx».
+    Раздельные слоты — иначе один прайс молча перезаписывал бы другой (почта каждые
+    30 мин; ручные загрузки разных поставщиков)."""
     out = []
+    pdir = Path(prices_dir)
+    for p in sorted(pdir.glob("manual__*.xlsx")):        # прайсы поставщиков (несколько)
+        out.append((p.stem, parse_price_xlsx(p)))
     for label in ("manual", "channel", "mail"):
-        p = Path(prices_dir) / f"{label}.xlsx"
+        p = pdir / f"{label}.xlsx"
         if p.exists():
             out.append((label, parse_price_xlsx(p)))
     return out

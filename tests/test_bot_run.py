@@ -192,8 +192,10 @@ def test_receive_price_saves_to_manual_slot(tmp_path):
     reply = botrun.receive_price(http, "TOK", {"file_id": "fid", "file_name": "price.xlsx"},
                                  tmp_path)
 
+    from content_factory.ingest.excel_price import manual_slot_name
     assert "1 позиций" in reply and "Холодильники" in reply
-    assert (tmp_path / "manual.xlsx").read_bytes() == xlsx_bytes
+    # ручной прайс — в свой слот поставщика (не общий manual.xlsx)
+    assert (tmp_path / f"{manual_slot_name('price.xlsx')}.xlsx").read_bytes() == xlsx_bytes
     assert (tmp_path / "price.xlsx").read_bytes() == xlsx_bytes
 
 

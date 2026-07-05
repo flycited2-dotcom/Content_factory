@@ -173,7 +173,7 @@ def receive_price(http, token: str, doc: dict, prices_dir, slot: str = "manual")
     канала-поставщика — slot='channel') и сделать его текущим прайсом в своём
     слоте (см. load_price_slots: раздельные слоты — иначе слоты перезаписывали
     бы друг друга)."""
-    from content_factory.ingest.excel_price import parse_price_xlsx
+    from content_factory.ingest.excel_price import parse_price_xlsx, manual_slot_name
     data = download_telegram_file(http, token, doc.get("file_id"))
     if data is None:
         return "❌ не удалось скачать файл из Telegram"
@@ -181,9 +181,12 @@ def receive_price(http, token: str, doc: dict, prices_dir, slot: str = "manual")
     pdir.mkdir(parents=True, exist_ok=True)
     name = doc.get("file_name") or "price.xlsx"
     (pdir / name).write_bytes(data)
-    (pdir / f"{slot}.xlsx").write_bytes(data)
+    # Ручной прайс — в свой слот поставщика (manual__<из-имени>): не затирает
+    # предыдущего поставщика. Канал/почта — свои фиксированные слоты.
+    slot_file = manual_slot_name(name) if slot == "manual" else slot
+    (pdir / f"{slot_file}.xlsx").write_bytes(data)
     try:
-        items = parse_price_xlsx(pdir / f"{slot}.xlsx")
+        items = parse_price_xlsx(pdir / f"{slot_file}.xlsx")
     except Exception as e:
         return f"❌ файл сохранён, но не парсится: {e}"
     sections = {}
@@ -191,7 +194,9 @@ def receive_price(http, token: str, doc: dict, prices_dir, slot: str = "manual")
         sections[i.section] = sections.get(i.section, 0) + 1
     top = "\n".join(f"— {s}: {n}" for s, n in
                     sorted(sections.items(), key=lambda x: -x[1])[:8])
-    return (f"📎 Прайс «{name}» принят: {len(items)} позиций, {len(sections)} разделов.\n"
+    n_sup = len(list(pdir.glob("manual__*.xlsx")))
+    extra = f"\nПоставщиков в поиске: {n_sup}." if slot == "manual" else ""
+    return (f"📎 Прайс «{name}» принят: {len(items)} позиций, {len(sections)} разделов.{extra}\n"
             f"Крупнейшие разделы:\n{top}\n\n"
             f"Дальше: /make 10 холодильники beko=3 stinol=* — и конвейер сделает превью.")
 
