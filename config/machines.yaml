@@ -1,0 +1,24 @@
+# Реестр машин Контент-завода — «разведение дорог» между агентами на разных ПК.
+#
+# Зачем: watchdog поднимает агента и на десктопе, и на ноуте независимо, и оба
+# стучат в LLM/бота одновременно. Общий реестр даёт каждой машине понять, кто она,
+# и развести задачи (или взять lock), не дублируя работу.
+#
+# Ключ машины — Windows MachineGuid: стабильный, уникальный, не меняется при
+# переименовании ПК. Узнать свой на любой машине (PowerShell):
+#   (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Cryptography' -Name MachineGuid).MachineGuid
+#
+# Агент/watchdog читает свой GUID в рантайме и ищет себя в machines[] по machine_guid.
+
+machines:
+  - name: desktop
+    machine_guid: "4557e2b1-f540-4dc1-a4db-f733c096ab11"
+    hostname: "DESKTOP-A59E7AI"
+    role: ""          # чем занимается эта машина — заполнить при разведении дорог
+    runs_bot: false   # true только на ОДНОЙ машине: cf-bot — long-poll, два инстанса → 409 Conflict
+
+  - name: laptop
+    machine_guid: ""  # заполнить на ноуте (см. команду выше)
+    hostname: ""
+    role: ""
+    runs_bot: false
