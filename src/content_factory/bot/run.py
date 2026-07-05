@@ -14,11 +14,15 @@ from decouple import config
 
 from content_factory.config import load_config
 from content_factory.publish.telegram import publish_post, PublishState, TG_API
-from content_factory.publish.orders import OrderLinks, order_markup, handle_order_start
+from content_factory.publish.orders import OrderLinks, order_markup
+from content_factory.bot.order_dialog import OrderDialogStore
+from content_factory.bot.order_flow import make_order_flow
 from content_factory.orchestrator.queue import TaskQueue
 from content_factory.orchestrator.confirm_store import ConfirmStore
 from content_factory.bot.commands import handle_command, handle_callback
 from content_factory.bot.voice import transcribe_voice_bytes
+from content_factory.bot.cmd_input import (
+    bare_arg_command, prompt_for, resolve_reply, PendingCmdStore)
 
 
 def make_publish_fn(token: str, parse_mode: str, pub_state: PublishState, http=None,
@@ -254,6 +258,33 @@ def _make_wizard(cfg, owner, prices_dir, http, excel_fn):
                             excel_fn)
 
 
+def setup_bot_commands(http, token: str, owner: str) -> None:
+    """setMyCommands: управляющее меню (/task /make /find …) видит ТОЛЬКО владелец
+    (scope chat). У всех остальных — клиентов, пришедших по кнопке «Заказать» —
+    меню пустое, чтобы они видели лишь опросник заказа. Best-effort (сеть/ID)."""
+    if not (token and owner):
+        return
+    owner_cmds = [
+        {"command": "task", "description": "Поставить задачу кнопками"},
+        {"command": "make", "description": "Авто-выбор из прайса по категории"},
+        {"command": "find", "description": "Найти позиции в прайсе"},
+        {"command": "pick", "description": "Взять номера из /find в работу"},
+        {"command": "excel", "description": "Статус конвейера прайса"},
+        {"command": "pending", "description": "Посты на подтверждении"},
+        {"command": "status", "description": "Что в очереди"},
+    ]
+    try:
+        http.post(f"{TG_API}/bot{token}/setMyCommands",
+                  data={"commands": json.dumps(owner_cmds, ensure_ascii=False),
+                        "scope": json.dumps({"type": "chat", "chat_id": int(owner)},
+                                            ensure_ascii=False)})
+        http.post(f"{TG_API}/bot{token}/setMyCommands",
+                  data={"commands": "[]",
+                        "scope": json.dumps({"type": "default"}, ensure_ascii=False)})
+    except (httpx.HTTPError, ValueError):
+        pass
+
+
 def main():
     cfg = load_config(Path("config/config.yaml"))
     token = config("TELEGRAM_BOT_TOKEN")
@@ -262,6 +293,9 @@ def main():
     cs = ConfirmStore(cfg.state.db)
     ps = PublishState(cfg.state.db)
     links = OrderLinks(cfg.state.db)
+    pending = PendingCmdStore(cfg.state.db)              # ждём аргумент /find /make /pick
+    order_store = OrderDialogStore(cfg.state.db)         # опросник заказа клиента
+    order_start, order_callback, order_text = make_order_flow(order_store, links, ps)
     lead_chat = config("TELEGRAM_LEAD_CHAT_ID", owner)   # куда слать лиды (дефолт — владелец)
     price_channel = str(config("TELEGRAM_PRICE_CHANNEL_ID", ""))  # авто-забор daily-прайса
     publish_fn = make_publish_fn(token, cfg.telegram.parse_mode, ps,
@@ -283,6 +317,38 @@ def main():
         except httpx.HTTPError:
             pass
 
+    def _send_force_reply(chat_id, text, placeholder):
+        """Приглашение с активным полем ввода (ForceReply) — для пустых /find /make /pick."""
+        markup = json.dumps({"force_reply": True, "input_field_placeholder": placeholder},
+                            ensure_ascii=False)
+        try:
+            http.post(f"{TG_API}/bot{token}/sendMessage",
+                      data={"chat_id": chat_id, "text": text, "reply_markup": markup})
+        except httpx.HTTPError:
+            pass
+
+    def _send_order_reply(chat_id, r):
+        """Ответ клиенту в опроснике заказа. Если заявка готова (r.lead) — шлём её
+        в чат лидов (TELEGRAM_LEAD_CHAT_ID), а не смешиваем с управляющим ботом."""
+        data = {"chat_id": chat_id, "text": r.text}
+        if r.markup:
+            data["reply_markup"] = json.dumps(r.markup, ensure_ascii=False)
+        elif r.force_reply:
+            data["reply_markup"] = json.dumps(
+                {"force_reply": True, "input_field_placeholder": r.placeholder or ""},
+                ensure_ascii=False)
+        try:
+            http.post(f"{TG_API}/bot{token}/sendMessage", data=data)
+        except httpx.HTTPError:
+            pass
+        if r.lead and lead_chat:
+            try:
+                http.post(f"{TG_API}/bot{token}/sendMessage",
+                          data={"chat_id": lead_chat, "text": r.lead})
+            except httpx.HTTPError:
+                pass
+
+    setup_bot_commands(http, token, owner)   # управляющее меню — только владельцу
     offset = 0
     print("bot: long-poll запущен")
     while True:
@@ -297,6 +363,18 @@ def main():
             # --- Нажатие inline-кнопки (✅/❌ под превью) ---
             cq = u.get("callback_query")
             if cq:
+                data_cq = cq.get("data") or ""
+                # Опросник заказа: кнопки кол-ва/пропуска от ЛЮБОГО клиента — до owner-гейта.
+                if data_cq.startswith("order:"):
+                    chat_o = str((cq.get("message") or {}).get("chat", {}).get("id", ""))
+                    r = order_callback(chat_o, data_cq, cq.get("from") or {})
+                    try:
+                        http.post(f"{TG_API}/bot{token}/answerCallbackQuery",
+                                  data={"callback_query_id": cq.get("id"), "text": r.text[:180]})
+                    except httpx.HTTPError:
+                        pass
+                    _send_order_reply(chat_o, r)
+                    continue
                 frm = str((cq.get("from") or {}).get("id", ""))
                 if owner and frm != owner:
                     continue
@@ -377,19 +455,11 @@ def main():
                              data={"chat_id": chat, "text": f"🎤 Я услышал: «{text}»"})
                 except httpx.HTTPError:
                     pass
-            # Заказ по кнопке из канала: /start ord_<code> разрешён ЛЮБОМУ пользователю
-            # (всё остальное от чужих игнорируется, как раньше).
+            # Заказ по кнопке из канала: /start ord_<code> запускает опросник заказа
+            # (разрешён ЛЮБОМУ пользователю; всё остальное от чужих игнорируется).
             if text.startswith("/start ord_"):
-                reply_c, lead = handle_order_start(text, msg.get("from") or {}, links, ps)
-                try:
-                    if reply_c:
-                        http.post(f"{TG_API}/bot{token}/sendMessage",
-                                  data={"chat_id": chat, "text": reply_c})
-                    if lead and lead_chat:
-                        http.post(f"{TG_API}/bot{token}/sendMessage",
-                                  data={"chat_id": lead_chat, "text": lead})
-                except httpx.HTTPError:
-                    pass
+                code = text.split(maxsplit=1)[1][4:].strip()   # "ord_<code>" → "<code>"
+                _send_order_reply(chat, order_start(chat, code, msg.get("from") or {}))
                 continue
             # Excel-прайс файлом (только от владельца)
             doc = msg.get("document") or {}
@@ -402,6 +472,13 @@ def main():
                 except httpx.HTTPError:
                     pass
                 continue
+            # Комментарий / своё количество в опроснике заказа — от ЛЮБОГО клиента,
+            # но только при активном диалоге заказа (order_text вернёт None иначе).
+            if text:
+                r = order_text(chat, text, msg.get("from") or {})
+                if r is not None:
+                    _send_order_reply(chat, r)
+                    continue
             if owner and chat != owner:                    # только владелец управляет ботом
                 continue
             # /task — старт визарда постановки задачи кнопками
@@ -422,6 +499,17 @@ def main():
                 if wr is not None:
                     _send_wizard_reply(chat, wr)
                     continue
+            # Пустой вызов /find /make /pick → приглашение с полем ввода (ForceReply);
+            # следующий текст (не команда) подставляется как аргумент этой команды.
+            if text:
+                bc = bare_arg_command(text)
+                if bc:
+                    pending.set(chat, bc)
+                    _send_force_reply(chat, *prompt_for(bc))
+                    continue
+                reconstructed = resolve_reply(pending.take(chat), text)
+                if reconstructed:
+                    text = reconstructed
             if not text:
                 continue
             reply = handle_command(text, q, confirm_store=cs, publish_fn=publish_fn,

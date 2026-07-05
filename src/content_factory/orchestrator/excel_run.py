@@ -32,9 +32,10 @@ def _money(p) -> str:
 def build_preview_caption(name: str, price: int, utp: str) -> str:
     """Подпись превью. Названия из прайсов содержат <артикулы в скобках> —
     при parse_mode=HTML Telegram считает их битым тегом и отклоняет пост,
-    поэтому экранируем (грабля чайников Vitek 2026-07-03)."""
-    return (f"{html.escape(name)}\n💰 {_money(price)}\n{DIVIDER}\n"
-            f"Ключевые особенности:\n{html.escape(utp or '')}")
+    поэтому экранируем (грабля чайников Vitek 2026-07-03). Цена — отдельной
+    плашкой-цитатой (blockquote) с 💎 и жирным номиналом (2026-07-05)."""
+    return (f"{html.escape(name)}\n<blockquote>💎 <b>{_money(price)}</b></blockquote>\n"
+            f"{DIVIDER}\nКлючевые особенности:\n{html.escape(utp or '')}")
 
 
 def main():

@@ -98,5 +98,5 @@ def test_preview_caption_escapes_html():
     cap = build_preview_caption("Чайник Vitek VT-7032 <VT-7032 BN>", 995,
                                 "✓ 1.7 л <стекло>")
     assert "<VT-7032" not in cap and "&lt;VT-7032 BN&gt;" in cap
-    assert "💰 995 ₽" in cap
+    assert "<blockquote>💎 <b>995 ₽</b></blockquote>" in cap
     assert "&lt;стекло&gt;" in cap

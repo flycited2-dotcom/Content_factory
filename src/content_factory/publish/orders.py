@@ -4,11 +4,22 @@
 допускает только [A-Za-z0-9_-] и ≤64 символов, наши ключи туда не влезают."""
 from __future__ import annotations
 import hashlib
+import html
 import json
+import re
 import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _plain(s: str) -> str:
+    """Строку подписи (HTML) → обычный текст: убрать теги, раскрыть сущности.
+    Подпись канала — в HTML (blockquote/b, экранированные <артикулы>), а клиенту
+    и в лид шлём обычным текстом (sendMessage без parse_mode)."""
+    return html.unescape(_TAG_RE.sub("", s or "")).strip()
 
 
 @dataclass
@@ -17,6 +28,8 @@ class Lead:
     user_id: int
     username: str
     key: str
+    qty: int = 1
+    comment: str = ""
 
 
 class OrderLinks:
@@ -29,6 +42,12 @@ class OrderLinks:
                       "(code TEXT PRIMARY KEY, key TEXT)")
             c.execute("CREATE TABLE IF NOT EXISTS leads "
                       "(ts REAL, user_id INTEGER, username TEXT, key TEXT)")
+            for ddl in ("ALTER TABLE leads ADD COLUMN qty INTEGER DEFAULT 1",
+                        "ALTER TABLE leads ADD COLUMN comment TEXT DEFAULT ''"):
+                try:
+                    c.execute(ddl)
+                except sqlite3.OperationalError:
+                    pass                              # колонка уже есть
 
     def _c(self):
         return sqlite3.connect(self.path)
@@ -44,14 +63,17 @@ class OrderLinks:
             row = c.execute("SELECT key FROM order_links WHERE code=?", (code,)).fetchone()
         return row[0] if row else None
 
-    def add_lead(self, user_id: int, username: str, key: str) -> None:
+    def add_lead(self, user_id: int, username: str, key: str,
+                 qty: int = 1, comment: str = "") -> None:
         with self._c() as c:
-            c.execute("INSERT INTO leads(ts, user_id, username, key) VALUES(?,?,?,?)",
-                      (time.time(), user_id, username or "", key))
+            c.execute("INSERT INTO leads(ts, user_id, username, key, qty, comment) "
+                      "VALUES(?,?,?,?,?,?)",
+                      (time.time(), user_id, username or "", key, int(qty), comment or ""))
 
     def leads(self) -> list[Lead]:
         with self._c() as c:
-            rows = c.execute("SELECT ts, user_id, username, key FROM leads ORDER BY ts").fetchall()
+            rows = c.execute("SELECT ts, user_id, username, key, qty, comment "
+                             "FROM leads ORDER BY ts").fetchall()
         return [Lead(*r) for r in rows]
 
 
@@ -62,29 +84,11 @@ def order_markup(order_bot: str, code: str) -> str:
         ensure_ascii=False)
 
 
-def _item_summary(pub_state, key: str) -> str:
-    """Название + строка цены из сохранённой подписи поста."""
+def item_summary(pub_state, key: str) -> str:
+    """Название + строка цены из сохранённой подписи поста, очищённые от HTML
+    (подпись канала — в HTML; клиенту/в лид шлём обычным текстом)."""
     for r in pub_state.records():
         if r.key == key and r.caption:
             lines = r.caption.splitlines()
-            return "\n".join(lines[:2])
+            return "\n".join(_plain(ln) for ln in lines[:2])
     return key
-
-
-def handle_order_start(text: str, user: dict, links: OrderLinks, pub_state) -> tuple:
-    """/start ord_<code> от клиента → (ответ клиенту, лид владельцу | None).
-    Не заказ (обычный /start и пр.) → (None, None) — бот работает как раньше."""
-    parts = (text or "").split(maxsplit=1)
-    if len(parts) < 2 or not parts[1].startswith("ord_") or not parts[0].startswith("/start"):
-        return None, None
-    key = links.key_for(parts[1][4:].strip())
-    if not key:
-        return "К сожалению, товар не найден (возможно, пост устарел). Напишите нам!", None
-    summary = _item_summary(pub_state, key)
-    uname = user.get("username") or ""
-    who = (f"@{uname}" if uname else "") or user.get("first_name") or str(user.get("id"))
-    links.add_lead(int(user.get("id") or 0), uname, key)
-    reply = (f"Спасибо за заявку! 👍\n\nВы выбрали:\n{summary}\n\n"
-             f"Менеджер свяжется с вами в ближайшее время.")
-    lead = f"📩 ЛИД: {who} (id {user.get('id')})\n{summary}"
-    return reply, lead

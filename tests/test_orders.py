@@ -1,7 +1,6 @@
-"""Кнопка «📩 Заказать» (волна 1б): ссылки-коды, лиды, разбор /start."""
+"""Кнопка «📩 Заказать»: коды-ссылки, лиды (кол-во+комментарий), plain-text сводка."""
 import json
-from content_factory.publish.orders import (
-    OrderLinks, order_markup, handle_order_start)
+from content_factory.publish.orders import OrderLinks, order_markup, item_summary
 from content_factory.publish.telegram import PublishState
 
 
@@ -22,29 +21,33 @@ def test_order_markup_url_button(tmp_path):
     assert btn["url"].startswith("https://t.me/Sendpr1ce_bot?start=ord_")
 
 
-def test_handle_order_start_creates_lead(tmp_path):
+def test_add_lead_stores_qty_and_comment(tmp_path):
     ol = OrderLinks(tmp_path / "s.db")
-    ps = PublishState(tmp_path / "s.db")
-    key = "breeze|funai|kadzoku inverter"
-    ps.mark(key, 10, channel="@chan",
-            caption="FUNAI серии KADZOKU Inverter\n💰 от 22 390 ₽\n═══\nещё текст")
-    code = ol.code_for(key)
-    user = {"id": 555, "username": "ivan", "first_name": "Иван"}
-    reply, lead = handle_order_start(f"/start ord_{code}", user, ol, ps)
-    assert "KADZOKU" in reply and "22 390" in reply          # клиент видит товар и цену
-    assert "@ivan" in lead and "KADZOKU" in lead             # лид владельцу
-    leads = ol.leads()
-    assert len(leads) == 1 and leads[0].user_id == 555 and leads[0].key == key
+    ol.add_lead(555, "ivan", "breeze|funai|x", qty=3, comment="нужна доставка")
+    (lead,) = ol.leads()
+    assert lead.user_id == 555 and lead.key == "breeze|funai|x"
+    assert lead.qty == 3 and lead.comment == "нужна доставка"
 
 
-def test_handle_order_start_unknown_code(tmp_path):
+def test_add_lead_defaults(tmp_path):
     ol = OrderLinks(tmp_path / "s.db")
-    ps = PublishState(tmp_path / "s.db")
-    reply, lead = handle_order_start("/start ord_zzz", {"id": 1}, ol, ps)
-    assert lead is None and "не найден" in reply.lower()
+    ol.add_lead(1, "", "k")
+    (lead,) = ol.leads()
+    assert lead.qty == 1 and lead.comment == ""
 
 
-def test_handle_order_start_not_order(tmp_path):
-    ol = OrderLinks(tmp_path / "s.db")
+def test_item_summary_strips_html(tmp_path):
     ps = PublishState(tmp_path / "s.db")
-    assert handle_order_start("/start", {"id": 1}, ol, ps) == (None, None)
+    ps.mark("breeze|funai|kadzoku", 10, channel="@chan",
+            caption=("FUNAI серии KADZOKU &lt;RAC-07&gt;\n"
+                     "<blockquote>💎 <b>от 22 390 ₽</b></blockquote>\n═══\nещё текст"))
+    summary = item_summary(ps, "breeze|funai|kadzoku")
+    assert "<b>" not in summary and "<blockquote>" not in summary   # HTML вычищен
+    assert "&lt;" not in summary                                    # сущности раскрыты
+    assert "FUNAI серии KADZOKU <RAC-07>" in summary
+    assert "💎 от 22 390 ₽" in summary
+
+
+def test_item_summary_unknown_key_returns_key(tmp_path):
+    ps = PublishState(tmp_path / "s.db")
+    assert item_summary(ps, "нет-такого") == "нет-такого"
