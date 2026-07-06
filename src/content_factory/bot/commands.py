@@ -125,6 +125,38 @@ def _status(queue) -> str:
     return "\n".join(lines) if lines else "Очередь пуста."
 
 
+def parse_due_at(text: str, now) -> float | None:
+    """«завтра 9:00» / «сегодня 18:00» / «9:00» / «DD.MM ЧЧ:ММ» → unix-время
+    (расписание /task, 2026-07-07). Голое ЧЧ:ММ, которое уже прошло, — завтра.
+    Непонятный текст → None (вызывающий переспросит)."""
+    from datetime import datetime, timedelta
+    parts = (text or "").strip().lower().split()
+    if not parts:
+        return None
+    day = now.date()
+    if parts[0] == "завтра":
+        day, parts = day + timedelta(days=1), parts[1:]
+    elif parts[0] == "сегодня":
+        parts = parts[1:]
+    elif re.match(r"^\d{1,2}\.\d{1,2}$", parts[0]):
+        d, m = parts[0].split(".")
+        try:
+            day = day.replace(day=int(d), month=int(m))
+        except ValueError:
+            return None
+        parts = parts[1:]
+    if not parts or not _TIME.match(parts[0]):
+        return None
+    h, m = parts[0].split(":")
+    try:
+        due = datetime.combine(day, datetime.min.time()).replace(hour=int(h), minute=int(m))
+    except ValueError:
+        return None
+    if due <= now and (text or "").strip().lower().split()[0] not in ("завтра", "сегодня"):
+        due += timedelta(days=1)                   # голое время в прошлом → завтра
+    return due.timestamp()
+
+
 def parse_make(text: str):
     """`/make 10 холодильники beko=3 indesit=3 stinol=*` → (count, категория, quotas).
     Квота `*`/«остальные» = добор до count любыми брендами категории.

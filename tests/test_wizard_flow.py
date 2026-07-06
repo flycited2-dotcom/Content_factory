@@ -1,10 +1,15 @@
-"""Оркестрация визарда /task: категория → список моделей → (опц.) фото →
-(опц.) УТП → подтверждение. Чистая логика (без Telegram) — download/send
-инъецируются извне, тут — переходы и запись в ExcelStore/фотоагент."""
+"""Оркестрация визарда /task v2: категория (кнопки/текст) → автосписок с
+номерами (или свой список строк) → время («сейчас»/расписание) → (для «сейчас»)
+опц. фото → опц. УТП → подтверждение. Чистая логика (без Telegram)."""
+import time as _time
+from datetime import datetime
+
 import openpyxl
 from content_factory.bot.wizard import WizardStore
 from content_factory.bot.wizard_flow import make_wizard_flow
 from content_factory.orchestrator.excel_pipeline import ExcelStore
+
+NOW = datetime(2026, 7, 7, 12, 0)
 
 
 def _price(tmp_path, rows, fname="manual.xlsx"):
@@ -23,18 +28,18 @@ ROWS = [
     ["Стиральные машины", "", "", "", "", ""],
     ["1", "10", "Beko", "Стиральная машина Beko WSRE6512", "21990", ""],
     ["2", "11", "Candy", "Стиральная машина Candy CS4", "19990", ""],
+    ["Телевизоры", "", "", "", "", ""],
+    ["3", "20", "MIU", "Телевизор MIU H32 Smart", "8650", ""],
 ]
 
 
-def _flow(tmp_path, submit_card=None, saved_photos=None, excel_fn=None):
+def _flow(tmp_path, submit_card=None):
     prices = _price(tmp_path, ROWS)
     store = WizardStore(tmp_path / "wizard.db")
-    saved = saved_photos if saved_photos is not None else []
 
     def save_photo(chat_id, photo_bytes):
         p = tmp_path / f"photo_{chat_id}.jpg"
         p.write_bytes(photo_bytes)
-        saved.append(str(p))
         return str(p)
 
     calls = []
@@ -45,122 +50,118 @@ def _flow(tmp_path, submit_card=None, saved_photos=None, excel_fn=None):
 
     start, handle_text, handle_photo, handle_callback = make_wizard_flow(
         tmp_path / "state.db", prices, store, _submit_card, save_photo,
-        excel_fn=excel_fn or (lambda: "СТАТУС"))
+        excel_fn=lambda: "СТАТУС", now_fn=lambda: NOW)
     return start, handle_text, handle_photo, handle_callback, calls, store
 
 
-def test_start_asks_category(tmp_path):
+def test_start_offers_category_buttons(tmp_path):
     start, *_ = _flow(tmp_path)
     r = start("1")
-    assert "категория" in r.text.lower()
-
-
-def test_start_includes_status_button(tmp_path):
-    start, *_ = _flow(tmp_path)
-    r = start("1")
-    assert r.markup is not None
     flat = [b for row in r.markup["inline_keyboard"] for b in row]
-    assert any(b["callback_data"] == "wizard:status" for b in flat)
+    cats = [b for b in flat if b["callback_data"].startswith("wizard:cat:")]
+    assert len(cats) == 2                              # два раздела из прайса
+    assert any("Стиральные машины" in b["text"] for b in cats)
 
 
-def test_status_callback_matches_excel_fn_without_active_wizard(tmp_path):
-    _, _, _, handle_callback, *_ = _flow(tmp_path, excel_fn=lambda: "research 2 | card 1")
-    r = handle_callback("1", "wizard:status")
-    assert r.text == "research 2 | card 1"
+def test_category_button_returns_numbered_autolist(tmp_path):
+    start, _, _, handle_callback, _, store = _flow(tmp_path)
+    start("1")
+    sections_btn_idx = 0                               # топ-раздел: Стиральные машины
+    r = handle_callback("1", f"wizard:cat:{sections_btn_idx}")
+    assert "1." in r.text and "2." in r.text           # нумерованный список
+    assert store.snapshot("1").step == "awaiting_pick"
 
 
-def test_status_callback_does_not_disrupt_active_wizard(tmp_path):
-    start, handle_text, _, handle_callback, _, store = _flow(
-        tmp_path, excel_fn=lambda: "research 2 | card 1")
+def test_category_text_also_works(tmp_path):
+    start, handle_text, *_ = _flow(tmp_path)
+    start("1")
+    r = handle_text("1", "телевизоры")
+    assert "MIU" in r.text and "1." in r.text
+
+
+def test_pick_numbers_then_now_then_confirm(tmp_path):
+    start, handle_text, _, handle_callback, calls, store = _flow(tmp_path)
     start("1")
     handle_text("1", "стиральные машины")
-    r = handle_callback("1", "wizard:status")
-    assert r.text == "research 2 | card 1"
-    assert store.snapshot("1").step == "awaiting_list"     # диалог не сброшен
-
-
-def test_handle_text_none_when_no_active_wizard(tmp_path):
-    _, handle_text, *_ = _flow(tmp_path)
-    assert handle_text("1", "что угодно") is None
-
-
-def test_full_happy_path_no_overrides(tmp_path):
-    start, handle_text, handle_photo, handle_callback, calls, store = _flow(tmp_path)
-    start("1")
-    handle_text("1", "стиральные машины")
-    r = handle_text("1", "Стиральная машина Beko WSRE6512\nСтиральная машина Candy CS4")
-    assert "найдено 2 из 2" in r.text
-    r = handle_callback("1", "wizard:skip_photo")
-    assert "УТП" in r.text
+    r = handle_text("1", "2")                          # выбрали Candy
+    assert "Сейчас" in str(r.markup)                   # шаг времени
+    r = handle_callback("1", "wizard:time_now")
+    assert "фото" in r.text.lower()
+    handle_callback("1", "wizard:skip_photo")
     r = handle_callback("1", "wizard:skip_utp")
-    assert "Подтвердить" in r.text and r.markup is not None
+    assert "Подтвердить" in r.text and "сейчас" in r.text
     r = handle_callback("1", "wizard:confirm")
-    assert "поставлено" in r.text and "2" in r.text
+    assert "поставлено" in r.text
 
     es = ExcelStore(tmp_path / "state.db")
     items = es.by_status("new")
-    assert {i.name for i in items} == {"Стиральная машина Beko WSRE6512",
-                                       "Стиральная машина Candy CS4"}
-    assert calls == []                          # без override submit_card не звался
-    assert store.snapshot("1") is None          # диалог завершён и сброшен
+    assert [i.name for i in items] == ["Стиральная машина Candy CS4"]
+    assert calls == []                                 # без фото — обычный конвейер
 
 
-def test_photo_override_skips_research_and_calls_submit_card(tmp_path):
-    start, handle_text, handle_photo, handle_callback, calls, store = _flow(tmp_path)
+def test_pick_all_keyword(tmp_path):
+    start, handle_text, _, handle_callback, _, store = _flow(tmp_path)
     start("1")
     handle_text("1", "стиральные машины")
-    handle_text("1", "Стиральная машина Beko WSRE6512")
-    r = handle_photo("1", b"PHOTOBYTES")
-    assert "УТП" in r.text
-    handle_callback("1", "wizard:skip_utp")
-    r = handle_callback("1", "wizard:confirm")
-    assert "поставлено" in r.text
-
-    es = ExcelStore(tmp_path / "state.db")
-    items = es.by_status("card")
-    assert len(items) == 1 and items[0].name == "Стиральная машина Beko WSRE6512"
-    assert len(calls) == 1
-    brand, model, utp, photo_path = calls[0]
-    assert brand == "Beko" and utp == "" and photo_path.endswith("photo_1.jpg")
+    handle_text("1", "все")
+    assert len(store.snapshot("1").candidates) == 2
 
 
-def test_photo_and_utp_override_both_used(tmp_path):
-    start, handle_text, handle_photo, handle_callback, calls, store = _flow(tmp_path)
-    start("1")
-    handle_text("1", "стиральные машины")
-    handle_text("1", "Стиральная машина Candy CS4")
-    handle_photo("1", b"PHOTOBYTES")
-    handle_text("1", "Тихая, экономичная, 4 кг")
-    r = handle_callback("1", "wizard:confirm")
-    assert "поставлено" in r.text
-    assert calls[0][2] == "Тихая, экономичная, 4 кг"
-
-
-def test_list_step_reports_unmatched_with_candidates(tmp_path):
-    start, handle_text, *_ = _flow(tmp_path)
-    start("1")
-    handle_text("1", "стиральные машины")
-    r = handle_text("1", "Стиральная машина Beko WSRE6512\nНечто совсем другое xyz123")
-    assert "найдено 1 из 2" in r.text
-    assert "не найдено" in r.text.lower()
-    assert "xyz123" in r.text
-
-
-def test_cancel_resets_wizard(tmp_path):
+def test_scheduled_time_skips_photo_and_sets_due_at(tmp_path):
     start, handle_text, _, handle_callback, calls, store = _flow(tmp_path)
     start("1")
-    handle_text("1", "стиральные машины")
+    handle_text("1", "телевизоры")
+    handle_text("1", "1")
+    r = handle_text("1", "завтра 9:00")                # расписание текстом
+    assert "Подтвердить" in r.text and "08.07 09:00" in r.text   # фото/УТП пропущены
+    r = handle_callback("1", "wizard:confirm")
+    assert "запланировано" in r.text
+
+    es = ExcelStore(tmp_path / "state.db")
+    assert es.by_status("new") == []                   # до срока тик не видит
+    import sqlite3
+    with sqlite3.connect(tmp_path / "state.db") as c:
+        due = c.execute("SELECT due_at FROM excel_items").fetchone()[0]
+    assert due == datetime(2026, 7, 8, 9, 0).timestamp()
+
+
+def test_manual_multiline_list_still_works(tmp_path):
+    start, handle_text, handle_photo, handle_callback, calls, store = _flow(tmp_path)
+    start("1")
+    r = handle_text("1", "Стиральная машина Beko WSRE6512\nТелевизор MIU H32 Smart")
+    assert "найдено 2 из 2" in r.text
+    handle_callback("1", "wizard:time_now")
+    handle_photo("1", b"PHOTOBYTES")                   # фото-override при «сейчас»
+    handle_callback("1", "wizard:skip_utp")
+    r = handle_callback("1", "wizard:confirm")
+    assert "минуя research" in r.text
+    assert len(calls) == 2                             # submit_card на обе позиции
+    es = ExcelStore(tmp_path / "state.db")
+    assert len(es.by_status("card")) == 2
+
+
+def test_bad_time_reasks(tmp_path):
+    start, handle_text, *_ = _flow(tmp_path)
+    start("1")
+    handle_text("1", "телевизоры")
+    handle_text("1", "1")
+    r = handle_text("1", "когда-нибудь потом")
+    assert "❌" in r.text and "Сейчас" in str(r.markup)
+
+
+def test_status_callback_does_not_disrupt(tmp_path):
+    start, handle_text, _, handle_callback, _, store = _flow(tmp_path)
+    start("1")
+    handle_text("1", "телевизоры")
+    r = handle_callback("1", "wizard:status")
+    assert r.text == "СТАТУС"
+    assert store.snapshot("1").step == "awaiting_pick"   # диалог не сброшен
+
+
+def test_cancel_any_step(tmp_path):
+    start, handle_text, _, handle_callback, _, store = _flow(tmp_path)
+    start("1")
+    handle_text("1", "телевизоры")
     r = handle_callback("1", "wizard:cancel")
     assert "отменено" in r.text.lower()
     assert store.snapshot("1") is None
-
-
-def test_confirm_with_nothing_matched(tmp_path):
-    start, handle_text, _, handle_callback, calls, store = _flow(tmp_path)
-    start("1")
-    handle_text("1", "стиральные машины")
-    handle_text("1", "Абсолютно несуществующий товар zzz")
-    handle_callback("1", "wizard:skip_photo")
-    r = handle_callback("1", "wizard:skip_utp")
-    r = handle_callback("1", "wizard:confirm")
-    assert "❌" in r.text

@@ -35,7 +35,12 @@ class ExcelStore:
             c.execute("CREATE TABLE IF NOT EXISTS excel_items ("
                       "key TEXT PRIMARY KEY, brand TEXT, model TEXT, name TEXT, "
                       "price INTEGER, status TEXT DEFAULT 'new', research_job INTEGER, "
-                      "card_job INTEGER, tries INTEGER DEFAULT 0, error TEXT, ts REAL)")
+                      "card_job INTEGER, tries INTEGER DEFAULT 0, error TEXT, ts REAL, "
+                      "due_at REAL)")
+            try:      # миграция существующей таблицы (SQLite: колонку — только ALTER)
+                c.execute("ALTER TABLE excel_items ADD COLUMN due_at REAL")
+            except sqlite3.OperationalError:
+                pass                       # колонка уже есть
             c.execute("CREATE TABLE IF NOT EXISTS research_cache ("
                       "model_key TEXT PRIMARY KEY, utp TEXT, photo_path TEXT, "
                       "source TEXT DEFAULT 'research', ts REAL)")
@@ -43,15 +48,16 @@ class ExcelStore:
     def _c(self):
         return sqlite3.connect(self.path)
 
-    def add_items(self, rows) -> int:
-        """rows: [(key, brand, model, name, price)]. Повторные ключи игнорируются."""
+    def add_items(self, rows, due_at: float | None = None) -> int:
+        """rows: [(key, brand, model, name, price)]. Повторные ключи игнорируются.
+        due_at — расписание (/task «завтра 9:00»): до срока тик товар не берёт."""
         n = 0
         with self._c() as c:
             for key, brand, model, name, price in rows:
                 cur = c.execute("INSERT OR IGNORE INTO excel_items"
-                                "(key, brand, model, name, price, status, tries, ts) "
-                                "VALUES(?,?,?,?,?,'new',0,?)",
-                                (key, brand, model, name, price, time.time()))
+                                "(key, brand, model, name, price, status, tries, ts, due_at) "
+                                "VALUES(?,?,?,?,?,'new',0,?,?)",
+                                (key, brand, model, name, price, time.time(), due_at))
                 n += cur.rowcount
         return n
 
@@ -66,10 +72,14 @@ class ExcelStore:
             return {r[0] for r in c.execute("SELECT key FROM excel_items").fetchall()}
 
     def by_status(self, status: str) -> list[ExcelItem]:
+        # new с due_at в будущем скрыты от тика (расписание /task); остальные
+        # статусы расписание не фильтрует — товар уже в работе
+        due_filter = " AND (due_at IS NULL OR due_at <= ?)" if status == "new" else ""
+        args = (status, time.time()) if status == "new" else (status,)
         with self._c() as c:
             rows = c.execute("SELECT key, brand, model, name, price, status, research_job, "
-                             "card_job, tries, error FROM excel_items WHERE status=? "
-                             "ORDER BY ts", (status,)).fetchall()
+                             f"card_job, tries, error FROM excel_items WHERE status=?{due_filter} "
+                             "ORDER BY ts", args).fetchall()
         return [self._row(r) for r in rows]
 
     def update(self, key: str, **fields) -> None:

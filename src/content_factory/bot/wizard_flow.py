@@ -1,19 +1,22 @@
-"""Оркестрация визарда /task: категория → список моделей → (опц.) фото → (опц.)
-УТП → подтверждение. Замена /make для владельца — не нужно помнить синтаксис
-«число первым словом», список моделей сопоставляется построчно (match_model_lines).
+"""Оркестрация визарда /task v2 (2026-07-07): категория (кнопки из прайса или
+текст) → автосписок с номерами (или свой список строк — многострочный ввод) →
+время выгрузки («🚀 сейчас» / «завтра 9:00») → (только для «сейчас») опц. фото →
+опц. УТП → подтверждение.
 
-Override-механика (см. план 2026-07-04-bot-task-wizard): submit_card (card_submit.py)
-всегда требует готовое фото — поэтому «в обход research» можно поставить карточку,
-ТОЛЬКО если владелец дал фото. УТП без фото — не даёт пропустить research (нечего
-слать агенту), товар в этом случае идёт обычным путём (research переопределит УТП).
-Если фото дано — УТП (если тоже дано) используется как есть, иначе пустая строка.
+Расписание: due_at пишется в excel_items — тик конвейера не берёт товар до
+срока (ExcelStore.by_status). Фото/УТП-override доступен только в режиме
+«сейчас»: submit_card дёргает агента немедленно и сломал бы расписание.
 
 Чистая логика без Telegram: download/send инъецируются извне (bot/run.py)."""
 from __future__ import annotations
+import re
 from dataclasses import dataclass
+from datetime import datetime
 
+from content_factory.bot.commands import parse_due_at
 from content_factory.ingest.excel_price import (
-    load_price_slots, match_model_lines, item_key, extract_model)
+    load_price_slots, match_model_lines, search_items, top_sections,
+    item_key, extract_model)
 from content_factory.orchestrator.excel_pipeline import ExcelStore
 from content_factory.orchestrator.confirm_store import ConfirmStore
 from content_factory.publish.telegram import PublishState
@@ -27,6 +30,11 @@ _CONFIRM_KB = {"inline_keyboard": [[
     {"text": "❌ Отмена", "callback_data": "wizard:cancel"}]]}
 _STATUS_KB = {"inline_keyboard": [[
     {"text": "📊 Статус", "callback_data": "wizard:status"}]]}
+_TIME_KB = {"inline_keyboard": [[
+    {"text": "🚀 Сейчас", "callback_data": "wizard:time_now"}],
+    [{"text": "❌ Отмена", "callback_data": "wizard:cancel"}]]}
+
+_MAX_LIST = 30            # позиций в автосписке
 
 
 @dataclass
@@ -35,11 +43,24 @@ class WizardReply:
     markup: dict | None = None
 
 
-def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel_fn):
+def _category_keyboard(prices_dir) -> dict | None:
+    """Кнопки топ-разделов прайсов (wizard:cat:<индекс> — категории кириллицей
+    не влезают в 64 байта callback_data, поэтому индекс в top_sections)."""
+    sections = top_sections(prices_dir)
+    if not sections:
+        return None
+    rows = [[{"text": s[:40], "callback_data": f"wizard:cat:{i}"}]
+            for i, s in enumerate(sections)]
+    rows.append([{"text": "📊 Статус", "callback_data": "wizard:status"}])
+    return {"inline_keyboard": rows}
+
+
+def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel_fn,
+                     now_fn=datetime.now):
     """submit_card(brand, model, utp, photo_path) -> job_id (см. card_submit.py).
     save_photo(chat_id, photo_bytes) -> абсолютный путь к сохранённому файлу.
-    excel_fn() -> str — статус конвейера прайса (тот же текст, что /excel; кнопка
-    «📊 Статус» работает независимо от активного диалога и не сбрасывает его)."""
+    excel_fn() -> str — статус конвейера (кнопка «📊 Статус», не сбрасывает диалог).
+    now_fn — инъекция часов для тестов расписания."""
 
     def _taken(excel_store: ExcelStore) -> set:
         return (PublishState(state_db).published_keys()
@@ -51,49 +72,93 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
 
     def start(chat_id: str) -> WizardReply:
         store.start(chat_id)
-        return WizardReply("🧾 Какая категория товара? Напишите текстом "
-                           "(напр.: стиральные машины).", _STATUS_KB)
+        kb = _category_keyboard(prices_dir)
+        if kb is None:
+            return WizardReply("🧾 Какая категория товара? Напишите текстом "
+                               "(напр.: стиральные машины).", _STATUS_KB)
+        return WizardReply("🧾 Выберите категорию кнопкой — пришлю список позиций "
+                           "из прайсов. Или напишите категорию/список моделей текстом.",
+                           kb)
+
+    def _autolist(chat_id: str, category: str) -> WizardReply:
+        excel_store = ExcelStore(state_db)
+        found = search_items(_price_items(), category, _taken(excel_store),
+                             limit=_MAX_LIST)
+        if not found:
+            return WizardReply(f"❌ по «{category}» в прайсах пусто (или всё уже "
+                               f"в работе) — попробуйте другую категорию")
+        cands = [(item_key(i), i.brand, extract_model(i.name, i.brand),
+                  i.name, i.price) for i in found]
+        store.set_candidates(chat_id, category, cands)
+        listing = "\n".join(f"{n}. {c[3][:60]} — {c[4]:,} ₽".replace(",", " ")
+                            for n, c in enumerate(cands, 1))
+        return WizardReply(f"🔎 «{category}» — найдено {len(cands)}:\n{listing}\n\n"
+                           f"Какие взять? Номера через пробел (напр.: 1 3 5) "
+                           f"или «все».")
+
+    def _time_prompt() -> WizardReply:
+        return WizardReply("⏰ Когда выгружать? «🚀 Сейчас» — или напишите время: "
+                           "«завтра 9:00», «сегодня 18:00», «08.07 10:30».", _TIME_KB)
 
     def _confirm_prompt(st) -> WizardReply:
+        n = len(st.candidates or st.lines or [])
+        when = "сейчас" if st.due_at is None else \
+            datetime.fromtimestamp(st.due_at).strftime("%d.%m %H:%M")
         photo = "есть" if st.photo_path else "нет"
         utp = "есть" if st.utp_text else "нет"
         return WizardReply(
-            f"Категория: {st.category}\nПозиций в списке: {len(st.lines or [])}\n"
+            f"Категория: {st.category or '—'}\nПозиций: {n}\nВыгрузка: {when}\n"
             f"Фото: {photo} · УТП: {utp}\n\nПодтвердить постановку в очередь?",
             _CONFIRM_KB)
 
     def handle_text(chat_id: str, text: str) -> WizardReply | None:
         st = store.snapshot(chat_id)
         if st is None:
-            return None                                    # не в мастере — пусть идёт в handle_command
+            return None                                    # не в мастере
         text = (text or "").strip()
 
         if st.step == "awaiting_category":
             if not text:
                 return WizardReply("❌ категория пустая — напишите текстом")
-            store.set_category(chat_id, text)
-            return WizardReply("📋 Пришлите список моделей — каждая с новой строки.")
-
-        if st.step == "awaiting_list":
             lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
-            if not lines:
-                return WizardReply("❌ список пустой — пришлите хотя бы одну строку")
-            excel_store = ExcelStore(state_db)
-            matches = match_model_lines(_price_items(), lines, _taken(excel_store))
-            store.set_list(chat_id, lines)
-            found = [m for m in matches if m.item]
-            missing = [m for m in matches if not m.item]
-            lines_out = [f"✅ найдено {len(found)} из {len(matches)}:"]
-            lines_out += [f"— {m.item.name} · {m.item.price:,} ₽".replace(",", " ")
-                         for m in found]
-            if missing:
-                lines_out.append(f"\n❌ не найдено ({len(missing)}):")
-                for m in missing:
-                    cand = ", ".join(c.name[:40] for c in m.candidates) or "нет похожих"
-                    lines_out.append(f"— «{m.line[:50]}» (похоже: {cand})")
-            lines_out.append("\n📎 Пришлите фото (одно, на все позиции списка) "
-                             "или пропустите.")
-            return WizardReply("\n".join(lines_out), _SKIP_PHOTO_KB)
+            if len(lines) > 1:                             # свой список моделей
+                excel_store = ExcelStore(state_db)
+                matches = match_model_lines(_price_items(), lines, _taken(excel_store))
+                store.set_category(chat_id, "свой список")
+                store.set_list(chat_id, lines)
+                found = [m for m in matches if m.item]
+                missing = [m for m in matches if not m.item]
+                out = [f"✅ найдено {len(found)} из {len(matches)}:"]
+                out += [f"— {m.item.name} · {m.item.price:,} ₽".replace(",", " ")
+                        for m in found]
+                if missing:
+                    out.append(f"\n❌ не найдено ({len(missing)}):")
+                    for m in missing:
+                        cand = ", ".join(c.name[:40] for c in m.candidates) or "нет похожих"
+                        out.append(f"— «{m.line[:50]}» (похоже: {cand})")
+                reply = _time_prompt()
+                return WizardReply("\n".join(out) + "\n\n" + reply.text, reply.markup)
+            return _autolist(chat_id, text)                # категория → автосписок
+
+        if st.step == "awaiting_pick":
+            if text.lower() in ("все", "всё", "all"):
+                picked = list(st.candidates or [])
+            else:
+                nums = [int(t) for t in re.findall(r"\d+", text)]
+                cands = st.candidates or []
+                picked = [cands[i - 1] for i in nums if 1 <= i <= len(cands)]
+            if not picked:
+                return WizardReply("❌ не понял номера — напр.: 1 3 5, или «все»")
+            store.set_pick(chat_id, picked)
+            return _time_prompt()
+
+        if st.step == "awaiting_time":
+            due = parse_due_at(text, now_fn())
+            if due is None:
+                return WizardReply("❌ не понял время — напр.: «завтра 9:00», "
+                                   "«18:30», или кнопка «🚀 Сейчас»", _TIME_KB)
+            store.set_time(chat_id, due)
+            return _confirm_prompt(store.snapshot(chat_id))
 
         if st.step == "awaiting_utp":
             store.set_utp(chat_id, text or None)
@@ -111,26 +176,34 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
 
     def _do_confirm(chat_id: str, st) -> WizardReply:
         excel_store = ExcelStore(state_db)
-        matches = match_model_lines(_price_items(), st.lines or [], _taken(excel_store))
-        found = [m.item for m in matches if m.item]
-        if not found:
+        if st.candidates:                                  # авто-путь: точные позиции
+            rows = [tuple(c) for c in st.candidates]
+        else:                                              # свой список строк
+            matches = match_model_lines(_price_items(), st.lines or [],
+                                        _taken(excel_store))
+            rows = [(item_key(m.item), m.item.brand,
+                     extract_model(m.item.name, m.item.brand),
+                     m.item.name, m.item.price) for m in matches if m.item]
+        if not rows:
             store.cancel(chat_id)
             return WizardReply("❌ ни одна позиция не подтвердилась "
                                "(возможно, уже в работе)")
-        rows = [(item_key(i), i.brand, extract_model(i.name, i.brand), i.name, i.price)
-               for i in found]
-        excel_store.add_items(rows)
+        excel_store.add_items(rows, due_at=st.due_at)
         n_override = 0
-        if st.photo_path:                          # override только при фото (см. докстринг)
-            for i in found:
-                job = submit_card(i.brand, extract_model(i.name, i.brand),
-                                  st.utp_text or "", st.photo_path)
-                excel_store.update(item_key(i), status="card", card_job=job, tries=0)
+        if st.photo_path and st.due_at is None:            # override только «сейчас»
+            for key, brand, model, name, price in rows:
+                job = submit_card(brand, model, st.utp_text or "", st.photo_path)
+                excel_store.update(key, status="card", card_job=job, tries=0)
                 n_override += 1
         store.cancel(chat_id)
-        mode = "карточка сразу, минуя research (своё фото)" if n_override \
-            else "обычный конвейер (research → карточка)"
-        return WizardReply(f"✅ поставлено в очередь: {len(found)} ({mode}). "
+        if n_override:
+            mode = "карточка сразу, минуя research (своё фото)"
+        elif st.due_at is not None:
+            mode = ("запланировано на "
+                    + datetime.fromtimestamp(st.due_at).strftime("%d.%m %H:%M"))
+        else:
+            mode = "обычный конвейер (research → карточка)"
+        return WizardReply(f"✅ поставлено в очередь: {len(rows)} ({mode}). "
                            f"Статус: /excel")
 
     def handle_callback(chat_id: str, data: str) -> WizardReply | None:
@@ -142,6 +215,17 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
         if st is None:
             return WizardReply("❌ нет активного диалога — начните /task")
         action = data.split(":", 1)[1]
+        if action.startswith("cat:") and st.step == "awaiting_category":
+            sections = top_sections(prices_dir)
+            try:
+                category = sections[int(action.split(":", 1)[1])]
+            except (ValueError, IndexError):
+                return WizardReply("❌ категория устарела — напишите текстом")
+            return _autolist(chat_id, category)
+        if action == "time_now" and st.step == "awaiting_time":
+            store.set_time(chat_id, None)
+            return WizardReply("📎 Пришлите фото (одно, на все позиции) "
+                               "или пропустите.", _SKIP_PHOTO_KB)
         if action == "skip_photo" and st.step == "awaiting_photo":
             store.set_photo(chat_id, None)
             return WizardReply("📝 Пришлите текст УТП или пропустите.", _SKIP_UTP_KB)

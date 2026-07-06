@@ -1,5 +1,38 @@
 """Конвейер excel-товара: new → research → card → preview (+ кэш УТП, ретраи)."""
+import time as _time
+
 from content_factory.orchestrator.excel_pipeline import ExcelStore, tick
+
+
+def test_add_items_with_due_at_hidden_until_due(tmp_path):
+    # /task с расписанием (2026-07-07): товар с due_at в будущем не берётся тиком
+    es = ExcelStore(tmp_path / "s.db")
+    es.add_items([("excel|a|1", "A", "1", "Товар A1", 100)],
+                 due_at=_time.time() + 3600)                 # через час
+    es.add_items([("excel|b|2", "B", "2", "Товар B2", 200)])  # без расписания
+    assert [i.key for i in es.by_status("new")] == ["excel|b|2"]  # будущий скрыт
+
+
+def test_due_item_appears_when_time_comes(tmp_path):
+    es = ExcelStore(tmp_path / "s.db")
+    es.add_items([("excel|a|1", "A", "1", "Товар A1", 100)],
+                 due_at=_time.time() - 10)                   # срок уже наступил
+    assert [i.key for i in es.by_status("new")] == ["excel|a|1"]
+
+
+def test_due_at_survives_existing_db_migration(tmp_path):
+    # грабля SQLite: колонку в существующую таблицу — только идемпотентный ALTER
+    import sqlite3
+    db = tmp_path / "s.db"
+    with sqlite3.connect(db) as c:                           # старая схема без due_at
+        c.execute("CREATE TABLE excel_items ("
+                  "key TEXT PRIMARY KEY, brand TEXT, model TEXT, name TEXT, "
+                  "price INTEGER, status TEXT DEFAULT 'new', research_job INTEGER, "
+                  "card_job INTEGER, tries INTEGER DEFAULT 0, error TEXT, ts REAL)")
+        c.execute("INSERT INTO excel_items(key, name, status, ts) "
+                  "VALUES('excel|old|x', 'Старый товар', 'new', 1)")
+    es = ExcelStore(db)                                      # миграция в __init__
+    assert [i.key for i in es.by_status("new")] == ["excel|old|x"]  # старые видны
 
 
 def _store(tmp_path):

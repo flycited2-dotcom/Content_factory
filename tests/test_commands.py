@@ -276,6 +276,20 @@ def test_parse_make_errors():
         parse_make("/make 5")                      # нет категории
 
 
+def test_parse_due_at_variants():
+    # время для /task-расписания: «завтра 9:00», «сегодня 18:00», «9:00», «08.07 10:30»
+    from datetime import datetime
+    from content_factory.bot.commands import parse_due_at
+    now = datetime(2026, 7, 7, 12, 0)
+    assert parse_due_at("завтра 9:00", now) == datetime(2026, 7, 8, 9, 0).timestamp()
+    assert parse_due_at("сегодня 18:00", now) == datetime(2026, 7, 7, 18, 0).timestamp()
+    assert parse_due_at("9:00", now) == datetime(2026, 7, 8, 9, 0).timestamp()   # прошло → завтра
+    assert parse_due_at("18:00", now) == datetime(2026, 7, 7, 18, 0).timestamp() # ещё впереди
+    assert parse_due_at("08.07 10:30", now) == datetime(2026, 7, 8, 10, 30).timestamp()
+    assert parse_due_at("ерунда", now) is None
+    assert parse_due_at("", now) is None
+
+
 def test_parse_make_count_must_be_first_token():
     # грабля 2026-07-03: владелец прислал список моделей («…Stinol WSTU 410 C…»)
     # без /make N — число «410» из середины подхватилось как count (запрошено 410,

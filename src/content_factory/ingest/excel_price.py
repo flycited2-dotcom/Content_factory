@@ -178,6 +178,18 @@ def load_price_slots(prices_dir) -> list[tuple[str, list[PriceItem]]]:
     return out
 
 
+def top_sections(prices_dir, n: int = 8) -> list[str]:
+    """Крупнейшие разделы активных прайсов (кнопки категорий в /task-визарде):
+    по числу позиций, без пустых имён."""
+    from collections import Counter
+    counts: Counter = Counter()
+    for _, items in load_price_slots(prices_dir):
+        for i in items:
+            if (i.section or "").strip():
+                counts[i.section.strip()] += 1
+    return [s for s, _ in counts.most_common(n)]
+
+
 def extract_model(name: str, brand: str) -> str:
     """Модель = часть наименования после бренда, без скобок:
     «Холодильник Stinol STS 167 (167*60*62)» → «STS 167»."""
