@@ -24,8 +24,8 @@ machines:
     runs_bot: false                       # cf-bot (long-poll) держать на ОДНОЙ машине → иначе 409
 
   - name: laptop
-    machine_guid: ""                      # заполнить на ноуте (см. скрипт/команду выше)
-    hostname: ""
+    machine_guid: "f91c394d-3440-40c5-994c-227743f224c6"
+    hostname: "WIN-DO3I2LOARD0"
     role: "card-agent"
     command_key: "agent_command_laptop"   # уже используется на VPS (HANDOFF-2026-07-05)
     runs_bot: false
