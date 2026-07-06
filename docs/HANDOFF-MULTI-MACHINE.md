@@ -27,17 +27,33 @@ ChatGPT/очередь одновременно → дубли, гонки, ли
 - Добавлен [scripts/register-machine.ps1](../scripts/register-machine.ps1) — самозаполнение
   блока машины (GUID/hostname/role/runs_bot).
 
-## Что сделать на НОУТЕ (следующий шаг владельца)
-1. Подтянуть репо: `git pull origin master`.
-2. Зарегистрировать ноут (из корня репо):
-   `pwsh scripts/register-machine.ps1 -Name laptop -Role card-agent`
-3. Закоммитить и запушить: `git add config/machines.yaml && git commit -m "chore(ops): реестр машин — laptop" && git push origin master`.
+## Сделано (laptop, сессия 2026-07-06) — Phase 1 спеки лейнов
+- **Ноут зарегистрирован** в machines.yaml (GUID f91c394d…, WIN-DO3I2LOARD0).
+- **Ветки агента сведены**: рабочая ветка влита в `main` (репо агента, c4785bf) —
+  дальше обе машины работают от `main`.
+- **Атомарный claim + аренда + /api/requeue** (репо агента, 79b2c41, ЗАДЕПЛОЕНО на VPS):
+  `/api/next-job` захватывает задачу одним `UPDATE…RETURNING` (+`?lane=` в `claimed_by`);
+  processing старше `AGENT_JOB_LEASE_SECONDS` (45 мин) возвращается в pending.
+  Эксклюзивность работы машин теперь обеспечивает ОЧЕРЕДЬ, а не command_key.
+- **vps_bot знает desktop-ключ**: `agent_command_desktop` в `_AGENT_FLAG_KEYS` и в
+  эксклюзивных кнопках (двухканально с legacy `agent_command`) — десктоп-вотчдог
+  может переходить на `worker=desktop`, не оглохнув для кнопок.
+
+## Уточнения после ревью (важно для следующих фаз)
+- **«Завести флаг в queue.db» НЕ нужно** — флаги создаются на лету при постановке команды.
+- **`command_key` ≠ эксклюзивность**: он разводит только доставку команд. Не строить
+  на нём взаимоисключение — это делает атомарный claim (и старый лиз-слой `workers`,
+  судьбу которого решить в Phase 6).
+- **`runs_bot` — ложная дилемма**: cf-bot живёт на VPS (systemd), Windows-машины его
+  не запускают. Держать false у всех.
+- **lanes.json (Phase 3) ОБЯЗАН иметь привязку к машине** (`machine:` + резолв по
+  MachineGuid через этот реестр) — иначе оба вотчдога поднимут все дорожки и
+  задвоят аккаунты.
 
 ## Открытые вопросы / TODO
-- **VPS-флаг `agent_command_desktop`** — завести в `queue.db` (сейчас есть только laptop).
-- **Watchdog должен читать реестр**: определять свой GUID → свой `command_key` → слушать только
-  его. Сейчас код это ещё не делает (реестр заведён, потребитель — нет).
-- **Распределённый lock** на случай, если обе машины возьмутся за одну задачу (обсуждалось —
-  через git-remote/VPS). Пока не реализовано.
-- **Стратегия слияния веток** между машинами — отложена («решим позже»).
-- Решить, какая машина держит `runs_bot=true`.
+- Phase 0 (фикстура модалки лимита) — ждёт реального лимита на акк1.
+- Phase 2-3 (профили Chrome, lanes.json c `machine:`, LANE_ID в remote_agent).
+- Phase 4 (детект лимита + остывание; дорожка в cooldown обязана слать heartbeat).
+- Phase 5 (вотчдог N дорожек; heartbeat per-lane = НОВАЯ таблица, PK не альтерится).
+- Phase 6 (судьба лиз-слоя `workers`; wake_agent в content-factory).
+- Десктоп: `git checkout main && git pull` в репо агента (ветки сведены).
