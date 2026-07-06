@@ -173,6 +173,56 @@ def make_find_pick_fns(state_db, prices_dir):
     return find_fn, pick_fn, excel_fn
 
 
+_EXCEL_ACTIVE_STATUSES = ("new", "research", "card")   # до preview — можно отменить
+
+
+def make_cancel_excel_fn(state_db, queue_db):
+    """cancel_fn(key|'*') → отмена товаров excel-конвейера (запрос владельца
+    2026-07-06: «нет кнопки остановить задачу»). Товар → status='cancelled'
+    (тик его больше не продвигает), связанные PENDING-задачи очереди агента
+    снимаются; processing не трогаем — агент уже генерит, результат просто
+    никуда не поедет (товар вне конвейера)."""
+    def cancel_fn(target: str) -> str:
+        from content_factory.orchestrator.excel_pipeline import ExcelStore
+        store = ExcelStore(state_db)
+        items = [i for s in _EXCEL_ACTIVE_STATUSES for i in store.by_status(s)]
+        if target != "*":
+            items = [i for i in items if i.key == target]
+        if not items:
+            return "❌ нечего отменять — активных задач нет"
+        cancelled_jobs = 0
+        with sqlite3.connect(queue_db) as q:
+            for item in items:
+                store.update(item.key, status="cancelled")
+                for job_id in (item.research_job, item.card_job):
+                    if job_id:
+                        cancelled_jobs += q.execute(
+                            "UPDATE jobs SET status='cancelled' "
+                            "WHERE id=? AND status='pending'", (job_id,)).rowcount
+        names = ", ".join(i.name[:30] for i in items[:3])
+        more = f" (+{len(items) - 3})" if len(items) > 3 else ""
+        return (f"🛑 отменено {len(items)}: {names}{more}"
+                + (f"; снято из очереди агента: {cancelled_jobs}" if cancelled_jobs else ""))
+    return cancel_fn
+
+
+def excel_cancel_markup(state_db, links) -> dict | None:
+    """Кнопки отмены под /excel-статусом: по одной на активный товар (до 8) +
+    «отменить все». None, если в конвейере нет активных. excel-ключи длинные —
+    в callback_data короткий код (OrderLinks, как у превью-кнопок)."""
+    from content_factory.orchestrator.excel_pipeline import ExcelStore
+    store = ExcelStore(state_db)
+    items = [i for s in _EXCEL_ACTIVE_STATUSES for i in store.by_status(s)]
+    if not items:
+        return None
+    rows = [[{"text": f"🛑 {i.name[:40]}",
+              "callback_data": f"excancel:{links.code_for(i.key)}"}]
+            for i in items[:8]]
+    rows.append([{"text": f"🛑 Отменить все ({len(items)})",
+                  "callback_data": "excancel:*"}])
+    return {"inline_keyboard": rows}
+
+
 def download_telegram_file(http, token: str, file_id: str) -> bytes | None:
     """Скачать файл из Telegram по file_id (getFile → скачивание по file_path).
     None, если Telegram не отдал file_path (файл недоступен/устарел). Общий хелпер
@@ -326,6 +376,7 @@ def main():
     prices_dir = Path(cfg.state.db).parent / "prices"
     make_fn = make_make_fn(cfg.state.db, prices_dir)
     find_fn, pick_fn, excel_fn = make_find_pick_fns(cfg.state.db, prices_dir)
+    cancel_excel_fn = make_cancel_excel_fn(cfg.state.db, config("FOTOGEN_QUEUE_DB"))
     http = httpx.Client(timeout=40)
     wizard_start, wizard_text, wizard_photo, wizard_callback = _make_wizard(
         cfg, owner, prices_dir, http, excel_fn)
@@ -418,6 +469,20 @@ def main():
                     except httpx.HTTPError:
                         pass
                     _send_wizard_reply(chat_w, wr)
+                    continue
+                if data_cq.startswith("excancel:"):    # отмена задач excel-конвейера
+                    target = data_cq.split(":", 1)[1]
+                    if target != "*":
+                        target = links.key_for(target) or target
+                    reply = cancel_excel_fn(target)
+                    chat_c = str((cq.get("message") or {}).get("chat", {}).get("id", ""))
+                    try:
+                        http.post(f"{TG_API}/bot{token}/answerCallbackQuery",
+                                  data={"callback_query_id": cq.get("id"), "text": reply[:180]})
+                        http.post(f"{TG_API}/bot{token}/sendMessage",
+                                  data={"chat_id": chat_c, "text": reply})
+                    except httpx.HTTPError:
+                        pass
                     continue
                 reply = handle_callback(resolve_callback_data(cq.get("data", ""), cs, links),
                                         q, confirm_store=cs,
@@ -547,9 +612,13 @@ def main():
             reply = handle_command(text, q, confirm_store=cs, publish_fn=publish_fn,
                                    publish_state=ps, regen_fn=regen_fn, make_fn=make_fn,
                                    find_fn=find_fn, pick_fn=pick_fn, excel_fn=excel_fn)
+            data = {"chat_id": chat, "text": reply}
+            if text.strip().startswith("/excel"):      # кнопки отмены активных задач
+                markup = excel_cancel_markup(cfg.state.db, links)
+                if markup:
+                    data["reply_markup"] = json.dumps(markup, ensure_ascii=False)
             try:
-                http.post(f"{TG_API}/bot{token}/sendMessage",
-                          data={"chat_id": chat, "text": reply})
+                http.post(f"{TG_API}/bot{token}/sendMessage", data=data)
             except httpx.HTTPError:
                 pass
 
