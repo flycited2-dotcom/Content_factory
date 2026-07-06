@@ -213,6 +213,46 @@ def make_price_fn(state_db, token: str, review_channel: str, parse_mode: str,
     return price_fn
 
 
+def make_sources_fn(prices_dir):
+    """/sources — источники прайсов: имя, позиций, наценка, свежесть. Новый
+    источник добавляется просто отправкой .xlsx файлом в чат (бот сам спросит
+    наценку); наценка меняется /markup <слот> <±число> (2026-07-07)."""
+    def sources_fn() -> str:
+        import time as _t
+        from content_factory.ingest.excel_price import load_price_slots, get_markups
+        slots = load_price_slots(prices_dir)
+        if not slots:
+            return ("❌ источников нет — пришлите .xlsx прайс файлом в этот чат, "
+                    "он добавится источником")
+        markups = get_markups(prices_dir)
+        lines = ["📦 Источники прайсов:"]
+        for label, items in slots:
+            pct = markups.get(label, 0)
+            pct_s = f" · {'+' if pct > 0 else ''}{pct:g}%" if pct else ""
+            p = Path(prices_dir) / f"{label}.xlsx"
+            age_h = (_t.time() - p.stat().st_mtime) / 3600 if p.exists() else None
+            age_s = f" · {age_h:.0f}ч назад" if age_h is not None else ""
+            lines.append(f"• {label}: {len(items)} поз.{pct_s}{age_s}")
+        lines.append("\n➕ Добавить: пришлите .xlsx файлом. "
+                     "Наценка: /markup <слот> <±число>")
+        return "\n".join(lines)
+    return sources_fn
+
+
+def make_markup_fn(prices_dir):
+    """markup_fn(slot, pct) — наценка/скидка источника (владелец пишет число
+    со знаком: +5 наценка, -7 скидка, 0 убрать)."""
+    def markup_fn(slot: str, pct: float) -> str:
+        from content_factory.ingest.excel_price import set_markup
+        if not (Path(prices_dir) / f"{slot}.xlsx").exists():
+            return f"❌ нет такого источника: {slot} (см. /sources)"
+        set_markup(prices_dir, slot, pct)
+        sign = f"{'+' if pct > 0 else ''}{pct:g}%"
+        return (f"💹 наценка «{slot}»: {sign} — применится ко всем ценам источника "
+                f"(листинги и превью)" if pct else f"💹 наценка «{slot}» убрана")
+    return markup_fn
+
+
 _EXCEL_ACTIVE_STATUSES = ("new", "research", "card")   # до preview — можно отменить
 
 
@@ -421,6 +461,8 @@ def main():
     review_channel = config("TELEGRAM_REVIEW_CHANNEL_ID", cfg.telegram.review_channel_id)
     price_fn = make_price_fn(cfg.state.db, token, review_channel,
                              cfg.telegram.parse_mode, links, http=http)
+    sources_fn = make_sources_fn(prices_dir)
+    markup_fn = make_markup_fn(prices_dir)
     wizard_start, wizard_text, wizard_photo, wizard_callback = _make_wizard(
         cfg, owner, prices_dir, http, excel_fn)
 
@@ -618,6 +660,16 @@ def main():
                               data={"chat_id": chat, "text": reply})
                 except httpx.HTTPError:
                     pass
+                # Источник добавлен — следующим шагом спрашиваем наценку
+                # (ответ владельца станет «/markup <слот> <число>» через resolve_reply)
+                if reply.startswith("📎"):
+                    from content_factory.ingest.excel_price import manual_slot_name
+                    slot = manual_slot_name(doc.get("file_name") or "price.xlsx")
+                    pending.set(chat, f"/markup {slot}")
+                    _send_force_reply(chat,
+                                      f"💹 Наценка для «{slot}»? Число со знаком: "
+                                      f"+5 (наценка), -7 (скидка), 0 (без).",
+                                      "напр.: +5")
                 continue
             # Клиент поделился телефоном (request_contact) в опроснике заказа.
             contact = msg.get("contact")
@@ -670,7 +722,8 @@ def main():
             reply = handle_command(text, q, confirm_store=cs, publish_fn=publish_fn,
                                    publish_state=ps, regen_fn=regen_fn, make_fn=make_fn,
                                    find_fn=find_fn, pick_fn=pick_fn, excel_fn=excel_fn,
-                                   price_fn=price_fn)
+                                   price_fn=price_fn, sources_fn=sources_fn,
+                                   markup_fn=markup_fn)
             data = {"chat_id": chat, "text": reply}
             if text.strip().startswith("/excel"):      # кнопки отмены активных задач
                 markup = excel_cancel_markup(cfg.state.db, links)

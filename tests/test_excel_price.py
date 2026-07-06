@@ -285,6 +285,63 @@ def test_load_price_slots_empty_dir(tmp_path):
     assert load_price_slots(tmp_path) == []
 
 
+# ── динамические источники с наценкой (кнопка «Добавить источник», 2026-07-07) ──
+def _xlsx_bytes(rows):
+    import io
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["№", "Артикул", "Бренд", "Наименование", "Цена (руб.)", "Заказ (шт.)"])
+    for r in rows:
+        ws.append(r)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_markup_applied_per_slot_on_load(tmp_path):
+    from content_factory.ingest.excel_price import set_markup, get_markups, load_price_slots
+    (tmp_path / "manual__ivanov.xlsx").write_bytes(_xlsx_bytes(
+        [["Холодильники", "", "", "", "", ""],
+         ["1", "10", "Beko", "Холодильник Beko X100", "10000", ""]]))
+    set_markup(tmp_path, "manual__ivanov", 5)
+    assert get_markups(tmp_path) == {"manual__ivanov": 5}
+    items = dict(load_price_slots(tmp_path))["manual__ivanov"]
+    assert items[0].price == 10500                     # +5% применены при чтении
+
+
+def test_negative_markup_is_discount(tmp_path):
+    from content_factory.ingest.excel_price import set_markup, load_price_slots
+    (tmp_path / "manual__sale.xlsx").write_bytes(_xlsx_bytes(
+        [["Чайники", "", "", "", "", ""],
+         ["1", "10", "Vitek", "Чайник Vitek V1", "1000", ""]]))
+    set_markup(tmp_path, "manual__sale", -7)
+    items = dict(load_price_slots(tmp_path))["manual__sale"]
+    assert items[0].price == 930                       # минус 7% = скидка
+
+
+def test_markup_change_and_zero_removes(tmp_path):
+    from content_factory.ingest.excel_price import set_markup, get_markups, load_price_slots
+    (tmp_path / "manual__x.xlsx").write_bytes(_xlsx_bytes(
+        [["Чайники", "", "", "", "", ""],
+         ["1", "10", "Vitek", "Чайник Vitek V1", "1000", ""]]))
+    set_markup(tmp_path, "manual__x", 10)
+    assert dict(load_price_slots(tmp_path))["manual__x"][0].price == 1100
+    set_markup(tmp_path, "manual__x", 0)               # 0 = без наценки, запись удаляется
+    assert get_markups(tmp_path) == {}
+    assert dict(load_price_slots(tmp_path))["manual__x"][0].price == 1000
+
+
+def test_slots_without_markup_untouched(tmp_path):
+    from content_factory.ingest.excel_price import set_markup, load_price_slots
+    _xlsx(tmp_path, ROWS[0:3]).rename(tmp_path / "manual.xlsx")
+    (tmp_path / "manual__other.xlsx").write_bytes(_xlsx_bytes(
+        [["Чайники", "", "", "", "", ""],
+         ["1", "10", "Vitek", "Чайник Vitek V1", "1000", ""]]))
+    set_markup(tmp_path, "manual__other", 50)
+    slots = dict(load_price_slots(tmp_path))
+    assert slots["manual"][0].price == 40451           # соседний слот не задет
+
+
 # ── третий слот: канал-поставщик (авто-забор daily-прайса из Telegram-канала) ──
 def test_load_price_slots_includes_channel_between_manual_and_mail(tmp_path):
     from content_factory.ingest.excel_price import load_price_slots

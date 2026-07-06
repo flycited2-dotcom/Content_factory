@@ -188,7 +188,7 @@ def parse_make(text: str):
 def handle_command(text: str, queue, today: date | None = None, held_provider=None,
                    confirm_store=None, publish_fn=None, publish_state=None,
                    regen_fn=None, make_fn=None, find_fn=None, pick_fn=None,
-                   excel_fn=None, price_fn=None) -> str:
+                   excel_fn=None, price_fn=None, sources_fn=None, markup_fn=None) -> str:
     """Маршрутизация команды → действие → текст ответа владельцу.
     confirm_store/publish_fn/publish_state нужны для confirm-пилота (/approve, /reject, /pending).
     publish_fn(awaiting) -> PublishResult публикует подтверждённый пост в канал.
@@ -225,6 +225,21 @@ def handle_command(text: str, queue, today: date | None = None, held_provider=No
         except ValueError as e:
             return f"❌ {e}"
         return make_fn(count, category, quotas)
+
+    if cmd.startswith("/sources"):
+        return sources_fn() if sources_fn else "❌ источники недоступны"
+
+    if cmd.startswith("/markup"):
+        # /markup <слот> <±число>: наценка источника (минус = скидка)
+        if not markup_fn:
+            return "❌ наценки недоступны"
+        try:
+            pct = float(parts[-1].replace(",", "."))
+        except (ValueError, IndexError):
+            return "❌ формат: /markup <слот> <±число>, напр.: /markup manual__ivanov +5"
+        if len(parts) < 3:
+            return "❌ формат: /markup <слот> <±число>"
+        return markup_fn(" ".join(parts[1:-1]), pct)
 
     if cmd.startswith("/price"):
         # /price <key> <цена> — ключ может содержать пробелы, цена — ПОСЛЕДНИЙ токен

@@ -113,3 +113,35 @@ def test_excel_cancel_markup_empty_when_idle(tmp_path):
     ExcelStore(state_db)
     links = OrderLinks(state_db)
     assert botrun.excel_cancel_markup(state_db, links) is None
+
+
+# ── /sources: источники с наценками (2026-07-07) ─────────────────────────────
+def test_sources_fn_lists_slots_with_markup(tmp_path):
+    import openpyxl
+    from content_factory.ingest.excel_price import set_markup
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["№", "Артикул", "Бренд", "Наименование", "Цена (руб.)", "Заказ (шт.)"])
+    ws.append(["Чайники", "", "", "", "", ""])
+    ws.append(["1", "10", "Vitek", "Чайник Vitek V1", "1000", ""])
+    prices = tmp_path / "prices"
+    prices.mkdir()
+    wb.save(prices / "manual__ivanov.xlsx")
+    set_markup(prices, "manual__ivanov", 5)
+
+    text = botrun.make_sources_fn(prices)()
+    assert "manual__ivanov" in text
+    assert "+5%" in text
+    assert "1 поз" in text
+
+
+def test_markup_fn_sets_and_reports(tmp_path):
+    prices = tmp_path / "prices"
+    prices.mkdir()
+    (prices / "manual__x.xlsx").write_bytes(b"PK")     # файл существует (не парсим)
+    markup_fn = botrun.make_markup_fn(prices)
+    reply = markup_fn("manual__x", -7)
+    assert "-7" in reply
+    from content_factory.ingest.excel_price import get_markups
+    assert get_markups(prices) == {"manual__x": -7}
+    assert "❌" in markup_fn("manual__нет_такого", 5)   # незнакомый слот

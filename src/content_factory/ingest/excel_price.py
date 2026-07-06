@@ -162,19 +162,56 @@ def manual_slot_name(filename: str) -> str:
     return f"manual__{slug}"
 
 
+def _markups_path(prices_dir) -> Path:
+    return Path(prices_dir) / "markups.json"
+
+
+def get_markups(prices_dir) -> dict:
+    """Наценки источников {имя слота: ±проценты} (кнопка «наценка» в /sources,
+    2026-07-07: минус = скидка от прайса). Нет файла → пусто (все без наценки)."""
+    import json
+    p = _markups_path(prices_dir)
+    if not p.exists():
+        return {}
+    return json.loads(p.read_text(encoding="utf-8"))
+
+
+def set_markup(prices_dir, slot_label: str, pct: float) -> None:
+    """Наценка слота; 0 — убрать запись (без наценки)."""
+    import json
+    Path(prices_dir).mkdir(parents=True, exist_ok=True)
+    m = get_markups(prices_dir)
+    if pct:
+        m[slot_label] = pct
+    else:
+        m.pop(slot_label, None)
+    _markups_path(prices_dir).write_text(
+        json.dumps(m, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def _apply_markup(items: list[PriceItem], pct: float) -> list[PriceItem]:
+    if not pct:
+        return items
+    for i in items:
+        i.price = int(round(i.price * (1 + pct / 100)))
+    return items
+
+
 def load_price_slots(prices_dir) -> list[tuple[str, list[PriceItem]]]:
     """Активные прайсы: ручные прайсы поставщиков «manual__*.xlsx» (все, приоритет)
     → legacy «manual.xlsx» → авто-забор из канала «channel.xlsx» → почта «mail.xlsx».
     Раздельные слоты — иначе один прайс молча перезаписывал бы другой (почта каждые
-    30 мин; ручные загрузки разных поставщиков)."""
+    30 мин; ручные загрузки разных поставщиков). Per-source наценка (markups.json)
+    применяется ЗДЕСЬ — единая точка: /find, /task и превью видят наценённую цену."""
     out = []
     pdir = Path(prices_dir)
+    markups = get_markups(prices_dir)
     for p in sorted(pdir.glob("manual__*.xlsx")):        # прайсы поставщиков (несколько)
-        out.append((p.stem, parse_price_xlsx(p)))
+        out.append((p.stem, _apply_markup(parse_price_xlsx(p), markups.get(p.stem, 0))))
     for label in ("manual", "channel", "mail"):
         p = pdir / f"{label}.xlsx"
         if p.exists():
-            out.append((label, parse_price_xlsx(p)))
+            out.append((label, _apply_markup(parse_price_xlsx(p), markups.get(label, 0))))
     return out
 
 
