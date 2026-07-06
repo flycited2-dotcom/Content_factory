@@ -9,13 +9,18 @@ from content_factory.cards_pipeline import (
 )
 
 
-def test_wake_agent_sets_start_flag(tmp_path):
+def test_wake_agent_sets_start_flag_for_all_machines(tmp_path):
+    # бродкаст на все ключи (агент теперь на 2 машинах с адресными флагами:
+    # ноут слушает только agent_command_laptop — глобальный ключ его не будил)
     db = str(tmp_path / "q.db")
     sqlite3.connect(db).close()
     wake_agent(db)
     con = sqlite3.connect(db)
-    assert con.execute("SELECT value FROM flags WHERE key='agent_command'").fetchone()[0] == "start"
+    flags = dict(con.execute("SELECT key, value FROM flags").fetchall())
     con.close()
+    assert flags == {"agent_command": "start",
+                     "agent_command_laptop": "start",
+                     "agent_command_desktop": "start"}
 
 
 def _make_queue_db(tmp_path, rows):
