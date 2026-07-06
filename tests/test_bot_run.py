@@ -60,7 +60,7 @@ def test_make_regen_fn_removes_card_and_store_entry(tmp_path):
         c.execute("CREATE TABLE card_jobs (key TEXT PRIMARY KEY, input_filename TEXT, "
                   "status TEXT, tries INTEGER DEFAULT 0)")
         c.execute("INSERT INTO card_jobs VALUES ('NC_123', 'in.jpg', 'done', 1)")
-    fn = botrun.make_regen_fn(store_db)
+    fn = botrun.make_regen_fn(store_db, tmp_path / "state.db")
     a = Awaiting(key="breeze|x|y", channel="@c", card_path=str(card),
                  caption="cap", status="published")
     assert fn(a) is True
@@ -75,10 +75,40 @@ def test_make_regen_fn_survives_missing_file(tmp_path):
     with sqlite3.connect(store_db) as c:
         c.execute("CREATE TABLE card_jobs (key TEXT PRIMARY KEY, input_filename TEXT, "
                   "status TEXT, tries INTEGER DEFAULT 0)")
-    fn = botrun.make_regen_fn(store_db)
+    fn = botrun.make_regen_fn(store_db, tmp_path / "state.db")
     a = Awaiting(key="k", channel="@c", card_path=str(tmp_path / "нет_файла.jpg"),
                  caption="cap", status="pending")
     assert fn(a) is True                           # отсутствие файла/записи — не ошибка
+
+
+def test_make_regen_fn_resets_excel_item_to_new(tmp_path):
+    # Грабля 2026-07-06 (владелец: «отпускаю на перегенерацию — не перегенерируется»):
+    # для excel-товара удаление карточки недостаточно — excel_items оставался в
+    # preview, а тик пересобирает только new/research/card. Теперь regen возвращает
+    # товар в new: research возьмётся из кэша → сразу новая карточка.
+    from content_factory.orchestrator.excel_pipeline import ExcelStore
+    import sqlite3
+    store_db = tmp_path / "cards.db"
+    with sqlite3.connect(store_db) as c:
+        c.execute("CREATE TABLE card_jobs (key TEXT PRIMARY KEY, input_filename TEXT, "
+                  "status TEXT, tries INTEGER DEFAULT 0)")
+    state_db = tmp_path / "state.db"
+    es = ExcelStore(state_db)
+    es.add_items([("excel|lg|ga-b419slgl", "LG", "GA-B419SLGL",
+                   "Холодильник LG GA-B419SLGL", 45000)])
+    es.update("excel|lg|ga-b419slgl", status="preview", research_job=568, card_job=597)
+
+    card = tmp_path / "excel_lg-ga-b419slgl.jpg"
+    card.write_bytes(b"IMG")
+    fn = botrun.make_regen_fn(store_db, state_db)
+    a = Awaiting(key="excel|lg|ga-b419slgl", channel="@c", card_path=str(card),
+                 caption="cap", status="published")
+    assert fn(a) is True
+    assert not card.exists()
+    item = [i for i in es.by_status("new") if i.key == "excel|lg|ga-b419slgl"]
+    assert len(item) == 1                          # товар вернулся в конвейер
+    assert item[0].research_job is None and item[0].card_job is None
+    assert item[0].tries == 0
 
 
 def test_publish_fn_adds_order_button(tmp_path):

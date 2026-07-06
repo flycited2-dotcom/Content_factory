@@ -39,10 +39,14 @@ def make_publish_fn(token: str, parse_mode: str, pub_state: PublishState, http=N
     return publish_fn
 
 
-def make_regen_fn(card_jobs_db):
+def make_regen_fn(card_jobs_db, state_db):
     """regen_fn(awaiting) → убрать карточку для перегенерации: удалить файл и запись
     CardJobStore (ключ store = имя файла карточки без расширения). После этого серия
-    снова «без карточки» — cf-cards пересабмитит её агенту на ближайшем тике."""
+    снова «без карточки» — cf-cards пересабмитит её агенту на ближайшем тике.
+    Excel-товар (ключ excel|*) дополнительно возвращается в status='new' — иначе
+    он оставался в preview, а excel-тик пересобирает только new/research/card,
+    и перегенерация не происходила НИКОГДА (грабля 2026-07-06); research возьмётся
+    из кэша (research_cache), так что сразу пойдёт новая карточка."""
     def regen_fn(a) -> bool:
         p = Path(a.card_path or "")
         try:
@@ -54,6 +58,13 @@ def make_regen_fn(card_jobs_db):
                 c.execute("DELETE FROM card_jobs WHERE key=?", (p.stem,))
         except sqlite3.OperationalError:
             pass                                   # store ещё не создан — нечего чистить
+        if (a.key or "").startswith("excel|"):
+            try:
+                with sqlite3.connect(state_db) as c:
+                    c.execute("UPDATE excel_items SET status='new', research_job=NULL, "
+                              "card_job=NULL, tries=0 WHERE key=?", (a.key,))
+            except sqlite3.OperationalError:
+                pass                               # таблицы ещё нет — не excel-путь
         return True
     return regen_fn
 
@@ -311,7 +322,7 @@ def main():
     price_channel = str(config("TELEGRAM_PRICE_CHANNEL_ID", ""))  # авто-забор daily-прайса
     publish_fn = make_publish_fn(token, cfg.telegram.parse_mode, ps,
                                  order_bot=cfg.telegram.order_bot, links=links)
-    regen_fn = make_regen_fn(cfg.state.card_jobs_db)
+    regen_fn = make_regen_fn(cfg.state.card_jobs_db, cfg.state.db)
     prices_dir = Path(cfg.state.db).parent / "prices"
     make_fn = make_make_fn(cfg.state.db, prices_dir)
     find_fn, pick_fn, excel_fn = make_find_pick_fns(cfg.state.db, prices_dir)
