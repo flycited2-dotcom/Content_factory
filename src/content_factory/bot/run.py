@@ -164,13 +164,53 @@ def make_find_pick_fns(state_db, prices_dir):
         lines = [f"Конвейер прайса: 🆕 {counts['new']} · 🔎 research {counts['research']} · "
                  f"🎨 card {counts['card']} · 👀 превью {counts['preview']} · "
                  f"❌ failed {counts['failed']}"]
-        for s, mark in (("research", "🔎"), ("card", "🎨"), ("failed", "❌")):
-            for i in store.by_status(s)[:5]:
-                extra = f" ({i.error})" if s == "failed" and i.error else ""
-                lines.append(f"{mark} {i.brand} {i.model}{extra}".strip())
+        # секции с разделителями, ошибки — первой строкой (многострочные Call log
+        # Playwright сливали статус в нечитаемую простыню — жалоба 2026-07-07)
+        for s, mark, title in (("research", "🔎", "На research"),
+                               ("card", "🎨", "Рисуются карточки"),
+                               ("failed", "❌", "Ошибки")):
+            items = store.by_status(s)[:5]
+            if not items:
+                continue
+            lines.append("━" * 22)
+            lines.append(f"{mark} {title}:")
+            for i in items:
+                extra = ""
+                if s == "failed" and i.error:
+                    extra = f" — {i.error.splitlines()[0][:70]}"
+                lines.append(f"• {i.brand} {i.model}{extra}".strip())
         return "\n".join(lines)
 
     return find_fn, pick_fn, excel_fn
+
+
+def make_price_fn(state_db, token: str, review_channel: str, parse_mode: str,
+                  links, http=None):
+    """price_fn(key, new_price) — ручная цена для превью на подтверждении
+    (кнопка «💰 Изменить цену», запрос владельца 2026-07-07: акции на единичный
+    товар). Подпись обновляется, статус сбрасывается в pending, свежее превью
+    пересылается в ревью-канал со штатными кнопками. Только excel|* — у серий
+    кондиционеров цены линейкой, их не трогаем."""
+    from content_factory.orchestrator.confirm_store import ConfirmStore
+    from content_factory.orchestrator.excel_run import (
+        replace_price_in_caption, preview_markup, _money)
+
+    def price_fn(key: str, new_price: int) -> str:
+        if not key.startswith("excel|"):
+            return "❌ смена цены доступна только товарам из прайса (не сериям)"
+        cs = ConfirmStore(state_db)
+        a = cs.get(key)
+        if a is None:
+            return f"❌ нет превью на подтверждении: {key}"
+        caption = replace_price_in_caption(a.caption, new_price)
+        cs.add(key, a.channel, a.card_path, caption)     # upsert → снова pending
+        kb = json.dumps(preview_markup(links.code_for(key)), ensure_ascii=False)
+        res = publish_post(token, review_channel, a.card_path,
+                           f"{caption}\n\n— на подтверждение (цена изменена) —",
+                           http=http, parse_mode=parse_mode, reply_markup=kb)
+        note = "" if res.ok else f" (превью не переслалось: {res.error})"
+        return f"💰 цена обновлена: {_money(new_price)} — висит на подтверждении{note}"
+    return price_fn
 
 
 _EXCEL_ACTIVE_STATUSES = ("new", "research", "card")   # до preview — можно отменить
@@ -378,6 +418,9 @@ def main():
     find_fn, pick_fn, excel_fn = make_find_pick_fns(cfg.state.db, prices_dir)
     cancel_excel_fn = make_cancel_excel_fn(cfg.state.db, config("FOTOGEN_QUEUE_DB"))
     http = httpx.Client(timeout=40)
+    review_channel = config("TELEGRAM_REVIEW_CHANNEL_ID", cfg.telegram.review_channel_id)
+    price_fn = make_price_fn(cfg.state.db, token, review_channel,
+                             cfg.telegram.parse_mode, links, http=http)
     wizard_start, wizard_text, wizard_photo, wizard_callback = _make_wizard(
         cfg, owner, prices_dir, http, excel_fn)
 
@@ -469,6 +512,21 @@ def main():
                     except httpx.HTTPError:
                         pass
                     _send_wizard_reply(chat_w, wr)
+                    continue
+                if data_cq.startswith("price:"):       # «💰 Изменить цену» на превью
+                    code = data_cq.split(":", 1)[1]
+                    key_p = links.key_for(code) or code
+                    chat_p = str((cq.get("message") or {}).get("chat", {}).get("id", ""))
+                    # ответ владельца станет «/price <key> <цена>» (resolve_reply)
+                    pending.set(owner or chat_p, f"/price {key_p}")
+                    try:
+                        http.post(f"{TG_API}/bot{token}/answerCallbackQuery",
+                                  data={"callback_query_id": cq.get("id")})
+                    except httpx.HTTPError:
+                        pass
+                    _send_force_reply(owner or chat_p,
+                                      f"💰 Новая цена для «{key_p[:50]}»? Только число.",
+                                      "напр.: 25990")
                     continue
                 if data_cq.startswith("excancel:"):    # отмена задач excel-конвейера
                     target = data_cq.split(":", 1)[1]
@@ -611,7 +669,8 @@ def main():
                 continue
             reply = handle_command(text, q, confirm_store=cs, publish_fn=publish_fn,
                                    publish_state=ps, regen_fn=regen_fn, make_fn=make_fn,
-                                   find_fn=find_fn, pick_fn=pick_fn, excel_fn=excel_fn)
+                                   find_fn=find_fn, pick_fn=pick_fn, excel_fn=excel_fn,
+                                   price_fn=price_fn)
             data = {"chat_id": chat, "text": reply}
             if text.strip().startswith("/excel"):      # кнопки отмены активных задач
                 markup = excel_cancel_markup(cfg.state.db, links)

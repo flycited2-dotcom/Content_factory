@@ -267,6 +267,25 @@ def test_receive_price_saves_to_named_slot(tmp_path):
     assert not (tmp_path / "manual.xlsx").exists()   # свой прайс владельца не задет
 
 
+# ── /excel: читаемый статус (жалоба владельца 2026-07-07: «всё слитно») ──────
+def test_excel_fn_truncates_multiline_errors_and_separates_sections(tmp_path):
+    from content_factory.orchestrator.excel_pipeline import ExcelStore
+    es = ExcelStore(tmp_path / "state.db")
+    es.add_items([("excel|don|r-103", "DON", "R-103", "Морозильная камера DON R-103", 9000),
+                  ("excel|lg|x", "LG", "X", "Холодильник LG X", 30000)])
+    es.update("excel|don|r-103", status="failed",
+              error="research: Page.wait_for_selector: Timeout 20000ms exceeded.\n"
+                    "Call log:\n  - waiting for locator(\"div\") to be visible\n)")
+    es.update("excel|lg|x", status="card", card_job=1)
+
+    _, _, excel_fn = botrun.make_find_pick_fns(tmp_path / "state.db", tmp_path)
+    text = excel_fn()
+
+    assert "Call log" not in text                  # простыня ошибки обрезана
+    assert "Timeout 20000ms" in text               # суть ошибки осталась
+    assert "─" in text or "—" in text or "━" in text   # есть разделители секций
+
+
 def test_resolve_callback_data_expands_code(tmp_path):
     from content_factory.publish.orders import OrderLinks
     from content_factory.orchestrator.confirm_store import ConfirmStore

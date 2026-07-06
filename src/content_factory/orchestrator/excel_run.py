@@ -8,6 +8,7 @@
 from __future__ import annotations
 import html
 import json
+import re
 import shutil
 import sqlite3
 from pathlib import Path
@@ -36,6 +37,27 @@ def build_preview_caption(name: str, price: int, utp: str) -> str:
     плашкой-цитатой (blockquote) с 💎 и жирным номиналом (2026-07-05)."""
     return (f"{html.escape(name)}\n<blockquote>💎 <b>{_money(price)}</b></blockquote>\n"
             f"{DIVIDER}\nКлючевые особенности:\n{html.escape(utp or '')}")
+
+
+_PRICE_BLOCK_RE = re.compile(r"<blockquote>💎 <b>[^<]*</b></blockquote>")
+
+
+def replace_price_in_caption(caption: str, new_price: int) -> str:
+    """Заменить цену-плашку в готовой подписи превью (кнопка «💰 Изменить цену»,
+    запрос владельца 2026-07-07: ручная цена для акций на единичный товар)."""
+    return _PRICE_BLOCK_RE.sub(
+        f"<blockquote>💎 <b>{_money(new_price)}</b></blockquote>", caption)
+
+
+def preview_markup(code: str) -> dict:
+    """Кнопки превью excel-товара: публикация/отклонение/перегенерация + ручная
+    цена. Общая для excel_run (первичное превью) и bot (переотправка после
+    смены цены) — единый вид, одна точка правки."""
+    return {"inline_keyboard": [
+        [{"text": "✅ Опубликовать", "callback_data": f"approve:{code}"},
+         {"text": "❌ Отклонить", "callback_data": f"reject:{code}"}],
+        [{"text": "🔄 Перегенерировать карточку", "callback_data": f"regen:{code}"}],
+        [{"text": "💰 Изменить цену", "callback_data": f"price:{code}"}]]}
 
 
 def main():
@@ -85,11 +107,7 @@ def main():
         cs.add(item.key, channel, card, caption)
         # excel-ключи длинные → в callback_data короткий код (бот развернёт обратно)
         code = links.code_for(item.key)
-        kb = json.dumps({"inline_keyboard": [
-            [{"text": "✅ Опубликовать", "callback_data": f"approve:{code}"},
-             {"text": "❌ Отклонить", "callback_data": f"reject:{code}"}],
-            [{"text": "🔄 Перегенерировать карточку", "callback_data": f"regen:{code}"}]]},
-            ensure_ascii=False)
+        kb = json.dumps(preview_markup(code), ensure_ascii=False)
         res = publish_post(token, review, card, f"{caption}\n\n— на подтверждение —",
                            http=http, parse_mode=cfg.telegram.parse_mode, reply_markup=kb)
         if not res.ok:                    # не молчим: владелец должен видеть сбой

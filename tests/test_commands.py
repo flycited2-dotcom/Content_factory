@@ -66,6 +66,23 @@ def test_handle_status(tmp_path):
     assert "t1" in reply or "1" in reply        # есть инфо о задаче/слотах
 
 
+def test_status_collapses_done_lists_pending(tmp_path):
+    # жалоба владельца 2026-07-07: /status — бесконечная простыня done-слотов
+    # прошлых дней; выполненное — одной сводной строкой, ожидающее — детально
+    q = TaskQueue(tmp_path / "q.db")
+    handle_command("/plan 5 кондиционеры завтра 10:00 id=old-1", q, today=TODAY)
+    handle_command("/plan 6 кондиционеры завтра 14:00 id=old-2", q, today=TODAY)
+    for s in q.all_slots():
+        q.mark_done(s.task_id, s.due_at)        # старые отработали
+    handle_command("/plan 5 кондиционеры завтра 10:00 id=fresh", q, today=TODAY)
+
+    reply = handle_command("/status", q, today=TODAY)
+
+    assert "old-1" not in reply and "old-2" not in reply   # done не перечисляются
+    assert "fresh" in reply                                # ожидающие — поимённо
+    assert "2" in reply                                    # сводка выполненных задач
+
+
 def test_handle_cancel(tmp_path):
     q = TaskQueue(tmp_path / "q.db")
     handle_command("/plan 5 кондиционеры завтра 10:00 id=t1", q, today=TODAY)

@@ -102,16 +102,27 @@ def parse_plan(text: str, today: date | None = None, keyword_filters: dict | Non
 
 
 def _status(queue) -> str:
+    """Ожидающие задачи — поимённо, выполненные — одной сводкой: раньше done-слоты
+    прошлых дней перечислялись бесконечной простынёй (жалоба владельца 2026-07-07)."""
     slots = queue.all_slots()
     if not slots:
         return "Очередь пуста."
     by_task: dict[str, Counter] = {}
     for s in slots:
         by_task.setdefault(s.task_id, Counter())[s.status] += 1
-    lines = ["Задачи в очереди:"]
-    for tid, c in by_task.items():
-        lines.append(f"— {tid}: " + ", ".join(f"{k} {v}" for k, v in c.items()))
-    return "\n".join(lines)
+    active = {tid: c for tid, c in by_task.items()
+              if any(k != "done" for k in c)}
+    done_tasks = len(by_task) - len(active)
+    done_slots = sum(c["done"] for c in by_task.values())
+    lines = []
+    if active:
+        lines.append("⏳ В очереди:")
+        for tid, c in active.items():
+            lines.append(f"— {tid}: " + ", ".join(f"{k} {v}" for k, v in c.items()))
+    if done_slots:
+        lines.append(f"✅ Выполнено: {done_tasks} задач ({done_slots} слотов) — "
+                     f"свёрнуто, детали в журнале превью")
+    return "\n".join(lines) if lines else "Очередь пуста."
 
 
 def parse_make(text: str):
@@ -145,7 +156,7 @@ def parse_make(text: str):
 def handle_command(text: str, queue, today: date | None = None, held_provider=None,
                    confirm_store=None, publish_fn=None, publish_state=None,
                    regen_fn=None, make_fn=None, find_fn=None, pick_fn=None,
-                   excel_fn=None) -> str:
+                   excel_fn=None, price_fn=None) -> str:
     """Маршрутизация команды → действие → текст ответа владельцу.
     confirm_store/publish_fn/publish_state нужны для confirm-пилота (/approve, /reject, /pending).
     publish_fn(awaiting) -> PublishResult публикует подтверждённый пост в канал.
@@ -182,6 +193,15 @@ def handle_command(text: str, queue, today: date | None = None, held_provider=No
         except ValueError as e:
             return f"❌ {e}"
         return make_fn(count, category, quotas)
+
+    if cmd.startswith("/price"):
+        # /price <key> <цена> — ключ может содержать пробелы, цена — ПОСЛЕДНИЙ токен
+        if not price_fn:
+            return "❌ смена цены недоступна"
+        if len(parts) < 3 or not parts[-1].isdigit():
+            return "❌ формат: /price <ключ> <новая цена числом>"
+        key = " ".join(parts[1:-1])
+        return price_fn(key, int(parts[-1]))
 
     if cmd.startswith("/regen"):
         if not (confirm_store and regen_fn):
