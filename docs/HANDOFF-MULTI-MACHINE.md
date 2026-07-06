@@ -60,12 +60,22 @@ ChatGPT/очередь одновременно → дубли, гонки, ли
   поведение прежнее (одна дорожка).
 - **vps_api heartbeat per-lane** (таблица `lane_heartbeat`) — ЗАДЕПЛОЕНО на VPS.
 
+## Сделано (laptop, продолжение-2 2026-07-06) — Phase 5
+- **agent_watchdog на N дорожек** (a7bf15d): команда из TG применяется ко всем
+  дорожкам машины (`my_lanes()`); per-lane Chrome/агент/state-файл/само-
+  восстановление; kill по LANE_ID в cmdline; legacy-режим без lanes.json.
+  ⚠️ На ноуте живёт СТАРЫЙ процесс вотчдога — новый код включится после
+  перезапуска вотчдога (kill процесса → планировщик поднимет за ≤5 мин).
+- **vps_bot: per-lane статус** («Дорожки: 🟢 laptop-a1: N сек») — ЗАДЕПЛОЕНО.
+
 ## Открытые вопросы / TODO
 - Phase 0 (фикстура модалки лимита генерации) — ждёт реального лимита на акк1.
 - Включение акк2 (владелец): проекты+эталоны в ChatGPT-акк2 → `start_chrome.bat 9334
   chrome_profile_acc2` → логин → env-URL (`*_PROJECT_URL_ACC2`) в .env →
   `enabled: true` у laptop-a2 в lanes.json.
 - Phase 4 (детект лимита генерации + остывание; в cooldown слать heartbeat).
-- Phase 5 (вотчдог N дорожек из my_lanes(); статус per-lane в vps_bot).
-- Phase 6 (судьба лиз-слоя `workers`; wake_agent в content-factory).
+- Phase 6 (судьба лиз-слоя `workers`; wake_agent в content-factory; per-lane
+  кнопки start/stop в vps_bot — сейчас команды машинного уровня).
 - Десктоп: `git checkout main && git pull` в репо агента (ветки сведены).
+- result_sender: пустой output-файл (0 байт) зацикливает отправку — код не чинился
+  (2026-07-06 job 324 погашен вручную result_sent=1).
