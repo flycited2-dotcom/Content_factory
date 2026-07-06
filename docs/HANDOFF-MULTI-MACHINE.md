@@ -50,10 +50,22 @@ ChatGPT/очередь одновременно → дубли, гонки, ли
   MachineGuid через этот реестр) — иначе оба вотчдога поднимут все дорожки и
   задвоят аккаунты.
 
+## Сделано (laptop, продолжение 2026-07-06) — Phase 2-3
+- **lanes.json** (репо агента, 117ceff): карта машин по MachineGuid + дорожки с
+  `machine:`-привязкой; `my_lanes()` отдаёт только свои — проверено на ноуте
+  (→ `['laptop-a1']`). project_urls: литерал или `env:ИМЯ` (URL в .env).
+- **start_chrome.bat** параметризован (`%1`=порт, `%2`=профиль; дефолты прежние).
+- **agent.py / remote_agent.py**: cdp_url/project_url per-lane, `LANE_ID` (env/CLI),
+  лог `remote_agent_{lane}.log`, `?lane=` в next-job и heartbeat. Без LANE_ID —
+  поведение прежнее (одна дорожка).
+- **vps_api heartbeat per-lane** (таблица `lane_heartbeat`) — ЗАДЕПЛОЕНО на VPS.
+
 ## Открытые вопросы / TODO
-- Phase 0 (фикстура модалки лимита) — ждёт реального лимита на акк1.
-- Phase 2-3 (профили Chrome, lanes.json c `machine:`, LANE_ID в remote_agent).
-- Phase 4 (детект лимита + остывание; дорожка в cooldown обязана слать heartbeat).
-- Phase 5 (вотчдог N дорожек; heartbeat per-lane = НОВАЯ таблица, PK не альтерится).
+- Phase 0 (фикстура модалки лимита генерации) — ждёт реального лимита на акк1.
+- Включение акк2 (владелец): проекты+эталоны в ChatGPT-акк2 → `start_chrome.bat 9334
+  chrome_profile_acc2` → логин → env-URL (`*_PROJECT_URL_ACC2`) в .env →
+  `enabled: true` у laptop-a2 в lanes.json.
+- Phase 4 (детект лимита генерации + остывание; в cooldown слать heartbeat).
+- Phase 5 (вотчдог N дорожек из my_lanes(); статус per-lane в vps_bot).
 - Phase 6 (судьба лиз-слоя `workers`; wake_agent в content-factory).
 - Десктоп: `git checkout main && git pull` в репо агента (ветки сведены).
