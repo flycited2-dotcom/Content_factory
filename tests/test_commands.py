@@ -328,5 +328,18 @@ def test_handle_find_and_pick(tmp_path):
 
 def test_handle_excel_status(tmp_path):
     q = TaskQueue(tmp_path / "q.db")
-    reply = handle_command("/excel", q, excel_fn=lambda: "research 2 | card 1")
+    reply = handle_command("/excel", q,
+                           excel_fn=lambda arg=None: "research 2 | card 1")
     assert "research 2" in reply
+
+
+def test_handle_excel_retry_passes_arg(tmp_path):
+    q = TaskQueue(tmp_path / "q.db")
+    got = {}
+
+    def excel_fn(arg=None):
+        got["arg"] = arg
+        return "🔁 возвращено"
+
+    reply = handle_command("/excel retry", q, excel_fn=excel_fn)
+    assert got["arg"] == "retry" and "🔁" in reply

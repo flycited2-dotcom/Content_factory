@@ -157,8 +157,15 @@ def make_find_pick_fns(state_db, prices_dir):
         return (f"✅ взято в работу {n} из {len(rows)}:\n{listing}\n\n"
                 f"Конвейер: УТП+фото → карточка → превью сюда (тик ~10 мин). Статус: /excel")
 
-    def excel_fn():
+    def excel_fn(arg: str | None = None):
         store = ExcelStore(state_db)
+        # /excel retry — вернуть failed в конвейер с чистого листа (2026-07-07)
+        if arg in ("retry", "повтор", "повторить"):
+            n = store.retry_failed()
+            if not n:
+                return "✅ failed-позиций нет — повторять нечего"
+            return (f"🔁 возвращено в конвейер: {n} (research заново, "
+                    f"тик ~10 мин). Статус: /excel")
         counts = {s: len(store.by_status(s))
                   for s in ("new", "research", "card", "preview", "failed")}
         lines = [f"Конвейер прайса: 🆕 {counts['new']} · 🔎 research {counts['research']} · "
@@ -179,6 +186,8 @@ def make_find_pick_fns(state_db, prices_dir):
                 if s == "failed" and i.error:
                     extra = f" — {i.error.splitlines()[0][:70]}"
                 lines.append(f"• {i.brand} {i.model}{extra}".strip())
+        if counts["failed"]:
+            lines.append("↻ Вернуть ошибки в работу: /excel retry")
         return "\n".join(lines)
 
     return find_fn, pick_fn, excel_fn

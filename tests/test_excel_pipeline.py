@@ -126,6 +126,18 @@ def test_research_done_without_photo_fails(tmp_path):
     assert calls["card"] == []
 
 
+def test_retry_failed_returns_items_to_pipeline(tmp_path):
+    # запрос владельца 2026-07-07: failed-позиции («research без фото»,
+    # таймауты) возвращать в конвейер одной командой, а не терять
+    s = _store(tmp_path)
+    s.update("excel|beko|x1", status="failed", error="research без фото", tries=2)
+    n = s.retry_failed()
+    assert n == 1
+    (item,) = s.by_status("new")
+    assert item.tries == 0 and item.error is None       # чистый повторный заход
+    assert s.retry_failed() == 0                        # повторно нечего
+
+
 def test_preview_caption_escapes_html():
     from content_factory.orchestrator.excel_run import build_preview_caption
     cap = build_preview_caption("Чайник Vitek VT-7032 <VT-7032 BN>", 995,

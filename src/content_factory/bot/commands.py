@@ -215,7 +215,11 @@ def handle_command(text: str, queue, today: date | None = None, held_provider=No
         return pick_fn(nums)
 
     if cmd.startswith("/excel"):
-        return excel_fn() if excel_fn else "❌ excel-источник недоступен"
+        if not excel_fn:
+            return "❌ excel-источник недоступен"
+        # /excel retry — вернуть failed-позиции в конвейер с чистого листа
+        arg = parts[1].lower() if len(parts) > 1 else ""
+        return excel_fn(arg or None)
 
     if cmd.startswith("/make"):
         if not make_fn:

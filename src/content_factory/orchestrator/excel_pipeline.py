@@ -88,6 +88,16 @@ class ExcelStore:
             c.execute(f"UPDATE excel_items SET {sets} WHERE key=?",
                       (*fields.values(), key))
 
+    def retry_failed(self) -> int:
+        """Вернуть все failed-позиции в конвейер с чистого листа (status new,
+        tries 0, error снят) — команда /excel retry (запрос владельца 2026-07-07:
+        «research без фото»/таймауты не терять, а перезапускать одной командой)."""
+        with self._c() as c:
+            cur = c.execute("UPDATE excel_items SET status='new', tries=0, "
+                            "error=NULL, research_job=NULL, card_job=NULL "
+                            "WHERE status='failed'")
+            return cur.rowcount
+
     # ── кэш research (волна 1в): повторные модели не дёргают ChatGPT ──────────
     def cache_get(self, model_key: str):
         with self._c() as c:
