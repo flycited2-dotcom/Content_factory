@@ -215,9 +215,10 @@ def load_price_slots(prices_dir) -> list[tuple[str, list[PriceItem]]]:
     return out
 
 
-def top_sections(prices_dir, n: int = 8) -> list[str]:
-    """Крупнейшие разделы активных прайсов (кнопки категорий в /task-визарде):
-    по числу позиций, без пустых имён."""
+def top_sections(prices_dir, n: int | None = None) -> list[str]:
+    """Разделы активных прайсов (кнопки категорий в /task-визарде), крупные
+    первыми, без пустых имён. По умолчанию ВСЕ разделы: топ-8 отрезал
+    большинство групп товаров (жалоба владельца 2026-07-07). n — опц. лимит."""
     from collections import Counter
     counts: Counter = Counter()
     for _, items in load_price_slots(prices_dir):

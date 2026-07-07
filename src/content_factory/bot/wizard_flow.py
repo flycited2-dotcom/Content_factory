@@ -43,14 +43,31 @@ class WizardReply:
     markup: dict | None = None
 
 
-def _category_keyboard(prices_dir) -> dict | None:
-    """Кнопки топ-разделов прайсов (wizard:cat:<индекс> — категории кириллицей
-    не влезают в 64 байта callback_data, поэтому индекс в top_sections)."""
+_CATS_PER_PAGE = 24       # 12 рядов по 2: групп бывает 200+, все кнопки в одно
+                          # сообщение Telegram не влезают — листаем страницами
+
+
+def _category_keyboard(prices_dir, page: int = 0) -> dict | None:
+    """Кнопки разделов прайсов, страница `page` (wizard:cat:<ГЛОБАЛЬНЫЙ индекс> —
+    категории кириллицей не влезают в 64 байта callback_data, поэтому индекс в
+    top_sections; листание — wizard:catpage:<n>). Все группы доступны."""
     sections = top_sections(prices_dir)
     if not sections:
         return None
-    rows = [[{"text": s[:40], "callback_data": f"wizard:cat:{i}"}]
-            for i, s in enumerate(sections)]
+    pages = max(1, -(-len(sections) // _CATS_PER_PAGE))
+    page = max(0, min(page, pages - 1))
+    lo = page * _CATS_PER_PAGE
+    btns = [{"text": s[:32], "callback_data": f"wizard:cat:{lo + k}"}
+            for k, s in enumerate(sections[lo:lo + _CATS_PER_PAGE])]
+    rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
+    if pages > 1:                                  # ряд листания
+        nav = []
+        if page > 0:
+            nav.append({"text": "◂ Назад", "callback_data": f"wizard:catpage:{page - 1}"})
+        nav.append({"text": f"стр. {page + 1}/{pages}", "callback_data": "wizard:status"})
+        if page < pages - 1:
+            nav.append({"text": "Ещё ▸", "callback_data": f"wizard:catpage:{page + 1}"})
+        rows.append(nav)
     rows.append([{"text": "📊 Статус", "callback_data": "wizard:status"}])
     return {"inline_keyboard": rows}
 
@@ -215,6 +232,16 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
         if st is None:
             return WizardReply("❌ нет активного диалога — начните /task")
         action = data.split(":", 1)[1]
+        if action.startswith("catpage:") and st.step == "awaiting_category":
+            try:
+                page = int(action.split(":", 1)[1])
+            except ValueError:
+                page = 0
+            kb = _category_keyboard(prices_dir, page=page)
+            if kb is None:
+                return WizardReply("❌ прайсы пусты — пришлите .xlsx файлом")
+            return WizardReply("🧾 Выберите категорию кнопкой (или напишите "
+                               "категорию/список моделей текстом).", kb)
         if action.startswith("cat:") and st.step == "awaiting_category":
             sections = top_sections(prices_dir)
             try:

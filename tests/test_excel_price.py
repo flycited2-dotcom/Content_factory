@@ -386,6 +386,29 @@ def test_load_price_slots_multiple_manual_suppliers(tmp_path):
     assert sum(len(items) for _, items in slots) == 4          # обе прайса загружены
 
 
+# ── top_sections: ВСЕ разделы прайсов (кнопки категорий /task) ────────────────
+# Жалоба владельца 2026-07-07: показывались только топ-8 разделов — остальные
+# группы товаров не выбрать кнопкой.
+def test_top_sections_returns_all_sections(tmp_path):
+    from content_factory.ingest.excel_price import top_sections, manual_slot_name
+    rows = [["Раздел A", "", "", "", "", ""],
+            ["1", "1", "X", "Товар A1", "100", ""],
+            ["2", "2", "X", "Товар A2", "100", ""]]
+    for i in range(12):                       # 12 разделов по 1 позиции
+        rows += [[f"Раздел {i:02d}", "", "", "", "", ""],
+                 [str(10 + i), str(10 + i), "Y", f"Товар {i}", "200", ""]]
+    _xlsx(tmp_path, rows).rename(tmp_path / f"{manual_slot_name('p.xlsx')}.xlsx")
+    secs = top_sections(tmp_path)
+    assert len(secs) == 13                    # ВСЕ разделы, не топ-8
+    assert secs[0] == "Раздел A"              # крупнейший — первым
+
+
+def test_top_sections_optional_limit(tmp_path):
+    from content_factory.ingest.excel_price import top_sections
+    _xlsx(tmp_path, ROWS).rename(tmp_path / "manual.xlsx")
+    assert len(top_sections(tmp_path, n=2)) == 2
+
+
 def test_load_price_slots_manual_and_supplier_slots_together(tmp_path):
     # legacy manual.xlsx + новый manual__ слот сосуществуют (переходный период)
     from content_factory.ingest.excel_price import load_price_slots, manual_slot_name

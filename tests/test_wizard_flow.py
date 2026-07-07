@@ -79,6 +79,41 @@ def test_category_text_also_works(tmp_path):
     assert "MIU" in r.text and "1." in r.text
 
 
+# ── пагинация категорий: групп бывает 200+ (Аксёнов+БытТехОпт), в одно
+# сообщение все кнопки не влезают — листаем по страницам ──────────────────────
+def test_category_buttons_paginated_when_many(tmp_path, monkeypatch):
+    import content_factory.bot.wizard_flow as wf
+    many = [f"Группа {i:03d}" for i in range(60)]
+    monkeypatch.setattr(wf, "top_sections", lambda pd: many)
+    kb = wf._category_keyboard(tmp_path, page=0)
+    flat = [b for row in kb["inline_keyboard"] for b in row]
+    cats = [b for b in flat if b["callback_data"].startswith("wizard:cat:")]
+    assert len(cats) == wf._CATS_PER_PAGE                 # первая страница
+    assert cats[0]["callback_data"] == "wizard:cat:0"
+    assert any(b["callback_data"] == "wizard:catpage:1" for b in flat)   # «▸»
+    assert not any(b["callback_data"] == "wizard:catpage:-1" for b in flat)
+
+    kb2 = wf._category_keyboard(tmp_path, page=1)
+    flat2 = [b for row in kb2["inline_keyboard"] for b in row]
+    cats2 = [b for b in flat2 if b["callback_data"].startswith("wizard:cat:")]
+    # индексы ГЛОБАЛЬНЫЕ (резолв по top_sections), страница 2 начинается с 24
+    assert cats2[0]["callback_data"] == f"wizard:cat:{wf._CATS_PER_PAGE}"
+    assert any(b["callback_data"] == "wizard:catpage:0" for b in flat2)  # «◂»
+
+
+def test_catpage_callback_flips_page(tmp_path, monkeypatch):
+    import content_factory.bot.wizard_flow as wf
+    many = [f"Группа {i:03d}" for i in range(60)]
+    monkeypatch.setattr(wf, "top_sections", lambda pd: many)
+    start, _, _, handle_callback, _, store = _flow(tmp_path)
+    start("1")
+    r = handle_callback("1", "wizard:catpage:2")
+    flat = [b for row in r.markup["inline_keyboard"] for b in row]
+    cats = [b for b in flat if b["callback_data"].startswith("wizard:cat:")]
+    assert cats[0]["callback_data"] == f"wizard:cat:{2 * wf._CATS_PER_PAGE}"
+    assert store.snapshot("1").step == "awaiting_category"   # шаг не сломан
+
+
 def test_pick_numbers_then_now_then_confirm(tmp_path):
     start, handle_text, _, handle_callback, calls, store = _flow(tmp_path)
     start("1")
