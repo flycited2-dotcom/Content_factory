@@ -131,10 +131,16 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
             datetime.fromtimestamp(st.due_at).strftime("%d.%m %H:%M")
         photo = "есть" if st.photo_path else "нет"
         utp = "есть" if st.utp_text else "нет"
+        kb = {"inline_keyboard": list(_CONFIRM_KB["inline_keyboard"])}
+        if st.due_at is None:              # «назад»: фото/УТП есть только в «сейчас»
+            kb["inline_keyboard"] = [
+                [{"text": "📎 Фото заново", "callback_data": "wizard:redo_photo"},
+                 {"text": "📝 УТП заново", "callback_data": "wizard:redo_utp"}],
+                *_CONFIRM_KB["inline_keyboard"]]
         return WizardReply(
             f"Категория: {st.category or '—'}\nПозиций: {n}\nВыгрузка: {when}\n"
             f"Фото: {photo} · УТП: {utp}\n\nПодтвердить постановку в очередь?",
-            _CONFIRM_KB)
+            kb)
 
     def handle_text(chat_id: str, text: str) -> WizardReply | None:
         st = store.snapshot(chat_id)
@@ -318,6 +324,14 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
         if action == "skip_utp" and st.step == "awaiting_utp":
             store.set_utp(chat_id, None)
             return _confirm_prompt(store.snapshot(chat_id))
+        if action == "redo_photo" and st.step == "awaiting_confirm":
+            store.set_time(chat_id, None)              # назад на шаг фото («сейчас»)
+            return WizardReply("📎 Пришлите новое фото (заменит прежнее) "
+                               "или пропустите.", _SKIP_PHOTO_KB)
+        if action == "redo_utp" and st.step == "awaiting_confirm":
+            store.set_photo(chat_id, st.photo_path)    # тот же путь → шаг УТП
+            return WizardReply("📝 Пришлите новый текст УТП (заменит прежний) "
+                               "или пропустите.", _SKIP_UTP_KB)
         if action == "cancel":
             store.cancel(chat_id)
             return WizardReply("❌ отменено")

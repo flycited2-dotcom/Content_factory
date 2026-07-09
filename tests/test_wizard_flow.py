@@ -315,3 +315,26 @@ def test_confirm_missing_photo_reasks_instead_of_crash(tmp_path):
     assert "фото" in r.text.lower() and "заново" in r.text      # мягкий ответ
     assert calls == []                                    # submit_card не дёргали
     assert store.snapshot("1").step == "awaiting_photo"   # вернулись на шаг фото
+
+
+def test_confirm_offers_redo_photo_and_utp(tmp_path):
+    # «кнопка назад» (2026-07-09): на подтверждении можно переснять фото/УТП
+    start, handle_text, handle_photo, handle_callback, _, store = _flow(tmp_path)
+    start("1")
+    handle_text("1", "телевизоры")
+    handle_text("1", "1")
+    handle_callback("1", "wizard:time_now")
+    handle_photo("1", b"OLD")
+    r = handle_callback("1", "wizard:skip_utp")
+    assert "wizard:redo_photo" in str(r.markup) and "wizard:redo_utp" in str(r.markup)
+
+    r = handle_callback("1", "wizard:redo_photo")          # назад к фото
+    assert store.snapshot("1").step == "awaiting_photo"
+    handle_photo("1", b"NEW")                              # новое заменяет старое
+    assert (tmp_path / "photo_1.jpg").read_bytes() == b"NEW"
+
+    handle_callback("1", "wizard:skip_utp")
+    r = handle_callback("1", "wizard:redo_utp")            # назад к УТП
+    assert store.snapshot("1").step == "awaiting_utp"
+    handle_text("1", "Тихий, экономичный")
+    assert store.snapshot("1").utp_text == "Тихий, экономичный"
