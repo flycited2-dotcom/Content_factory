@@ -1,7 +1,7 @@
 import httpx
 from content_factory.ingest.breez import (
     _extract_base, _parse_leftovers, _parse_products_utp,
-    fetch_breez_base_by_nc, fetch_breez_utp_by_nc)
+    base_lookup, fetch_breez_base_by_nc, fetch_breez_utp_by_nc)
 
 
 def test_parse_products_utp():
@@ -83,3 +83,13 @@ def test_fetch_base_http_error_returns_empty():
 def test_fetch_base_no_creds_returns_empty():
     assert fetch_breez_base_by_nc(base_url="", auth_header="") == {}
     assert fetch_breez_base_by_nc(base_url="https://x", auth_header="REPLACE_ME") == {}
+
+
+def test_base_lookup_converts_to_decimal():
+    # мост {nc: число из JSON} → лукап для collect_offers (ждёт Decimal | None)
+    from decimal import Decimal
+    lookup = base_lookup({"НС-1": 38000, "НС-2": 24550.5})
+    assert lookup("НС-1") == Decimal("38000")
+    assert lookup("НС-2") == Decimal("24550.5")
+    assert lookup("НС-нет") is None
+    assert lookup(None) is None

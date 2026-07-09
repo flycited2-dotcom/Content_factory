@@ -103,8 +103,11 @@ def main():
     raw = fetch_raw_products(dsn, cfg.source.warehouse,
                              cfg.source.catalog.report_category_ids,
                              cfg.source.catalog.exclude_title_patterns)
+    # Опт Бриза: в БД сайта у Бриза РОЗНИЦА, опт отдаёт только /leftoversnew/.
+    # API недоступен → пустая карта → мягкий фолбэк на цену из БД (как раньше).
+    from content_factory.ingest.breez import base_lookup, fetch_breez_base_by_nc
     offers = collect_offers(raw, Path(config("JAC_STOCK_JSON", "")), cfg.source.catalog,
-                            lambda nc: None)
+                            base_lookup(fetch_breez_base_by_nc()))
     groups = group_by_series(offers)
 
     # УТП Бриза (✓-фичи): тянем один раз; для не-breeze вернёт None (берётся из ТТХ/«Описание»)

@@ -7,6 +7,8 @@
    сайта у Бриза лежит РОЗНИЦА. Rusklimat/Daichi опт берут из БД (там он есть)."""
 from __future__ import annotations
 import logging
+from decimal import Decimal
+from typing import Callable
 import httpx
 from decouple import config
 
@@ -113,3 +115,12 @@ def fetch_breez_base_by_nc(base_url: str | None = None, auth_header: str | None 
     res = _parse_leftovers(data)
     log.info("breez: опт-цен (base) по %d позициям", len(res))
     return res
+
+
+def base_lookup(base_map: dict) -> Callable[[str | None], Decimal | None]:
+    """Мост к collect_offers: {nc: число из JSON} → лукап nc_code → Decimal | None
+    (resolve_cost ждёт Decimal; None → мягкий фолбэк на цену из БД — розницу)."""
+    def lookup(nc):
+        v = base_map.get(str(nc)) if nc else None
+        return Decimal(str(v)) if v is not None else None
+    return lookup
