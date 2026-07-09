@@ -223,3 +223,39 @@ def test_autolist_and_bad_pick_have_cancel_button(tmp_path):
     assert "wizard:cancel" in str(r.markup)
     r = handle_text("1", "ерунда без номеров")
     assert "wizard:cancel" in str(r.markup)
+
+
+def test_manual_product_full_path(tmp_path):
+    # п.4 (2026-07-09): свой товар НЕ из прайсов/остатков — вручную в генерацию
+    start, handle_text, _, handle_callback, calls, store = _flow(tmp_path)
+    r = start("1")
+    assert "wizard:manual" in str(r.markup)                # кнопка «Свой товар»
+    r = handle_callback("1", "wizard:manual")
+    assert "азвание" in r.text                             # просит название
+    r = handle_text("1", "Кондиционер BORK AC-3001 белый")
+    assert "цен" in r.text.lower()                         # просит цену
+    r = handle_text("1", "45 990")
+    assert "Сейчас" in str(r.markup)                       # дальше стандартный шаг времени
+    st = store.snapshot("1")
+    assert st.step == "awaiting_time"
+    (key, brand, model, name, price), = st.candidates
+    assert key.startswith("manual|") and price == 45990
+    assert name == "Кондиционер BORK AC-3001 белый"
+    # довести до конца: сейчас → без фото → без УТП → подтвердить
+    handle_callback("1", "wizard:time_now")
+    handle_callback("1", "wizard:skip_photo")
+    handle_callback("1", "wizard:skip_utp")
+    r = handle_callback("1", "wizard:confirm")
+    assert "поставлено" in r.text
+    es = ExcelStore(tmp_path / "state.db")
+    assert [i.name for i in es.by_status("new")] == ["Кондиционер BORK AC-3001 белый"]
+
+
+def test_manual_product_bad_price_reasks(tmp_path):
+    start, handle_text, _, handle_callback, _, store = _flow(tmp_path)
+    start("1")
+    handle_callback("1", "wizard:manual")
+    handle_text("1", "Тепловая пушка Ballu BHP-5")
+    r = handle_text("1", "дорого")
+    assert "❌" in r.text                                  # не число — переспросить
+    assert store.snapshot("1").step == "awaiting_manual_price"

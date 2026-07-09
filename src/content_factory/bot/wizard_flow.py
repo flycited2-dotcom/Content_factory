@@ -70,7 +70,8 @@ def _category_keyboard(prices_dir, page: int = 0) -> dict | None:
         if page < pages - 1:
             nav.append({"text": "Ещё ▸", "callback_data": f"wizard:catpage:{page + 1}"})
         rows.append(nav)
-    rows.append([{"text": "📊 Статус", "callback_data": "wizard:status"}])
+    rows.append([{"text": "➕ Свой товар", "callback_data": "wizard:manual"},
+                 {"text": "📊 Статус", "callback_data": "wizard:status"}])
     return {"inline_keyboard": rows}
 
 
@@ -93,8 +94,12 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
         store.start(chat_id)
         kb = _category_keyboard(prices_dir)
         if kb is None:
-            return WizardReply("🧾 Какая категория товара? Напишите текстом "
-                               "(напр.: стиральные машины).", _STATUS_KB)
+            return WizardReply(
+                "🧾 Какая категория товара? Напишите текстом "
+                "(напр.: стиральные машины).",
+                {"inline_keyboard": [[
+                    {"text": "➕ Свой товар", "callback_data": "wizard:manual"},
+                    {"text": "📊 Статус", "callback_data": "wizard:status"}]]})
         return WizardReply("🧾 Выберите категорию кнопкой — пришлю список позиций "
                            "из прайсов. Или напишите категорию/список моделей текстом.",
                            kb)
@@ -163,6 +168,24 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
                 reply = _time_prompt()
                 return WizardReply("\n".join(out) + "\n\n" + reply.text, reply.markup)
             return _autolist(chat_id, text)                # категория → автосписок
+
+        if st.step == "awaiting_manual_name":
+            if not text:
+                return WizardReply("❌ название пустое — напишите текстом", _CANCEL_KB)
+            store.set_manual_name(chat_id, text)
+            return WizardReply("💰 Цена, ₽ — только число (напр.: 45990).", _CANCEL_KB)
+
+        if st.step == "awaiting_manual_price":
+            digits = re.sub(r"[^\d]", "", text)
+            if not digits:
+                return WizardReply("❌ не понял цену — только число, напр.: 45990",
+                                   _CANCEL_KB)
+            name = st.category or ""
+            # свой товар = один «кандидат»: без бренда (карточке/research уходит
+            # полное название), дальше стандартные шаги времени/фото/УТП
+            key = "manual|" + re.sub(r"\s+", " ", name.lower()).strip()[:80]
+            store.set_pick(chat_id, [(key, "", name, name, int(digits))])
+            return _time_prompt()
 
         if st.step == "awaiting_pick":
             if text.lower() in ("все", "всё", "all"):
@@ -258,6 +281,10 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
             except (ValueError, IndexError):
                 return WizardReply("❌ категория устарела — напишите текстом")
             return _autolist(chat_id, category)
+        if action == "manual" and st.step == "awaiting_category":
+            store.to_manual(chat_id)
+            return WizardReply("📦 Название товара одной строкой "
+                               "(напр.: Кондиционер BORK AC-3001).", _CANCEL_KB)
         if action == "time_now" and st.step == "awaiting_time":
             store.set_time(chat_id, None)
             return WizardReply("📎 Пришлите фото (одно, на все позиции) "

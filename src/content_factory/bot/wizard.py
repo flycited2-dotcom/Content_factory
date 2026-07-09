@@ -11,7 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 STEPS = ("awaiting_category", "awaiting_pick", "awaiting_list", "awaiting_time",
-         "awaiting_photo", "awaiting_utp", "awaiting_confirm")
+         "awaiting_photo", "awaiting_utp", "awaiting_confirm",
+         "awaiting_manual_name", "awaiting_manual_price")
 
 
 @dataclass
@@ -68,6 +69,18 @@ class WizardStore:
         with self._c() as c:
             c.execute("UPDATE wizard_state SET candidates_json=?, step=? WHERE chat_id=?",
                       (json.dumps(picked, ensure_ascii=False), "awaiting_time", chat_id))
+
+    def to_manual(self, chat_id: str) -> None:
+        """Ветка «свой товар» (не из прайсов/остатков) — ждём название."""
+        with self._c() as c:
+            c.execute("UPDATE wizard_state SET step=? WHERE chat_id=?",
+                      ("awaiting_manual_name", chat_id))
+
+    def set_manual_name(self, chat_id: str, name: str) -> None:
+        """Название своего товара (кладём в category — видно в подтверждении)."""
+        with self._c() as c:
+            c.execute("UPDATE wizard_state SET category=?, step=? WHERE chat_id=?",
+                      (name, "awaiting_manual_price", chat_id))
 
     def set_category(self, chat_id: str, category: str) -> None:
         with self._c() as c:
