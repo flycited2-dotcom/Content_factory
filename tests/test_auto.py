@@ -1,6 +1,7 @@
 from datetime import date
 import pytest
-from content_factory.orchestrator.auto import materialize_auto_tasks
+from content_factory.orchestrator.auto import (
+    auto_enabled, materialize_auto_tasks, set_auto_enabled)
 from content_factory.orchestrator.queue import TaskQueue
 
 CFG = [{"id": "ac", "filter": {"categories": [2]}, "count": 2, "times": ["10:00", "14:00"]}]
@@ -40,6 +41,19 @@ def test_materialize_confirm_off_and_mode(tmp_path):
             "mode": "kbt", "confirm": False, "channel": "@special"}]
     (t,) = materialize_auto_tasks(cfg, date(2026, 7, 2), q)
     assert (t.mode, t.confirm, t.channel) == ("kbt", False, "@special")
+
+
+def test_auto_enabled_default_off(tmp_path):
+    # нет записи = ВЫКЛЮЧЕНО (решение владельца 2026-07-09: после деплоя автомат молчит)
+    assert auto_enabled(tmp_path / "s.db") is False
+
+
+def test_set_auto_enabled_roundtrip(tmp_path):
+    db = tmp_path / "s.db"
+    set_auto_enabled(db, True)
+    assert auto_enabled(db) is True
+    set_auto_enabled(db, False)
+    assert auto_enabled(db) is False
 
 
 def test_materialize_invalid_config_raises(tmp_path):

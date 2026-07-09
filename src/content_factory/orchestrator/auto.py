@@ -4,7 +4,9 @@
 (TaskQueue.add — INSERT OR IGNORE по (task_id, due_at), done-статусы сохраняются).
 confirm по умолчанию ВКЛ — всё идёт через ревью-канал владельца."""
 from __future__ import annotations
+import sqlite3
 from datetime import date
+from pathlib import Path
 from content_factory.orchestrator.tasks import Task
 
 
@@ -29,3 +31,27 @@ def materialize_auto_tasks(auto_cfgs: list, today: date, queue) -> list[Task]:
         queue.add(t)
         tasks.append(t)
     return tasks
+
+
+def _settings_c(db) -> sqlite3.Connection:
+    """Соединение с таблицей settings (key-value) в state-БД. Создаёт при первом
+    обращении — как остальные сторы (CREATE TABLE IF NOT EXISTS)."""
+    p = Path(db)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    c = sqlite3.connect(p)
+    c.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+    return c
+
+
+def auto_enabled(db) -> bool:
+    """Флаг автомата. НЕТ ЗАПИСИ = ВЫКЛЮЧЕНО (решение владельца 2026-07-09:
+    после деплоя авто-контент молчит, пока явно не включат /auto on)."""
+    with _settings_c(db) as c:
+        row = c.execute("SELECT value FROM settings WHERE key='auto_enabled'").fetchone()
+    return bool(row) and row[0] == "1"
+
+
+def set_auto_enabled(db, on: bool) -> None:
+    with _settings_c(db) as c:
+        c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('auto_enabled', ?)",
+                  ("1" if on else "0",))
