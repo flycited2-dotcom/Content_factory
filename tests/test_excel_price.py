@@ -1,7 +1,8 @@
 """Excel-прайс (БытТехОпт): парсер, извлечение модели, выбор позиций под /make."""
 import openpyxl
 from content_factory.ingest.excel_price import (
-    parse_price_xlsx, extract_model, item_key, select_from_price)
+    PriceItem, parse_price_xlsx, extract_model, item_key, search_items,
+    select_from_price)
 
 
 def _xlsx(tmp_path, rows):
@@ -466,3 +467,26 @@ def test_load_search_aliases_from_yaml_stems_keys(tmp_path):
 def test_load_search_aliases_missing_file_is_empty(tmp_path):
     from content_factory.ingest.excel_price import load_search_aliases
     assert load_search_aliases(tmp_path / "nope.yaml") == {}
+
+
+def _pi(name, section, brand="B", price=10000, art="1"):
+    return PriceItem(section=section, article=art, brand=brand, name=name, price=price)
+
+
+def test_name_matches_displace_section_matches():
+    # грабля 2026-07-09: «морозильные камеры» выдавали холодильники из секции
+    # «Холодильники и морозильные камеры» — имён-матчи должны вытеснять секционные
+    items = [
+        _pi("Холодильник Midea MDRB457", "Холодильники и морозильные камеры"),
+        _pi("Морозильная камера Бирюса М514", "Морозильные камеры"),
+    ]
+    got = search_items(items, "морозильные камеры", set(), limit=10)
+    assert [i.name for i in got] == ["Морозильная камера Бирюса М514"]
+
+
+def test_freezer_chest_alias_matches_kamera():
+    # «морозильная камера» ≈ «морозильный ларь» (синоним типа в aliases)
+    items = [_pi("Морозильный ларь Hyundai CH1002", "Морозильные лари")]
+    aliases = {"камер": ["камера", "ларь"]}   # ключ — стем (как load_search_aliases)
+    got = search_items(items, "морозильные камеры", set(), limit=10, aliases=aliases)
+    assert [i.name for i in got] == ["Морозильный ларь Hyundai CH1002"]

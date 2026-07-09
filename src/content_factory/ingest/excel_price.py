@@ -351,13 +351,14 @@ def load_search_aliases(path) -> dict[str, list[str]]:
 
 def search_items(items: list[PriceItem], phrase: str, taken: set,
                  limit: int = 20, aliases: dict | None = None) -> list[PriceItem]:
-    """Поиск позиций по фразе (без падежей + синонимы/транслит), имя-матчи первыми,
-    дубли исключены. aliases — см. load_search_aliases (None = без словаря)."""
+    """Поиск позиций по фразе (без падежей + синонимы/транслит). Имя-матчи
+    ВЫТЕСНЯЮТ секционные (грабля 2026-07-09: «морозильные камеры» выдавали
+    холодильники из секции «Холодильники и морозильные камеры»); секция —
+    только фолбэк, когда по именам пусто. aliases — см. load_search_aliases."""
     scored = [(match_phrase(i, phrase, aliases), i) for i in items]
-    pool = [i for score, i in sorted(
-        [(s, i) for s, i in scored if s and item_key(i) not in taken],
-        key=lambda t: -t[0])]
-    return pool[:limit]
+    alive = [(s, i) for s, i in scored if s and item_key(i) not in taken]
+    by_name = [i for s, i in alive if s == 2]
+    return (by_name or [i for s, i in alive])[:limit]
 
 
 def select_from_price(items: list[PriceItem], category_kw: str, quotas: dict,
