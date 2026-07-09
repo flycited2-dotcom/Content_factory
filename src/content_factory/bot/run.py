@@ -420,6 +420,17 @@ def _make_wizard(cfg, owner, prices_dir, http, excel_fn):
                             excel_fn)
 
 
+def auto_markup(enabled: bool) -> dict:
+    """Кнопка-переключатель под ответами /auto (владелец просил кнопки вкл/выкл,
+    2026-07-09, а не текстовые команды). Одна контекстная кнопка: показываем
+    противоположное действие."""
+    if enabled:
+        return {"inline_keyboard": [[
+            {"text": "⏸ Выключить авто-контент", "callback_data": "auto:off"}]]}
+    return {"inline_keyboard": [[
+        {"text": "▶️ Включить авто-контент", "callback_data": "auto:on"}]]}
+
+
 def setup_bot_commands(http, token: str, owner: str) -> None:
     """setMyCommands: управляющее меню (/task /make /find …) видит ТОЛЬКО владелец
     (scope chat). У всех остальных — клиентов, пришедших по кнопке «Заказать» —
@@ -603,6 +614,20 @@ def main():
                     except httpx.HTTPError:
                         pass
                     continue
+                if data_cq.startswith("auto:"):        # кнопки вкл/выкл автомата
+                    reply = auto_fn(data_cq.split(":", 1)[1])
+                    chat_a = str((cq.get("message") or {}).get("chat", {}).get("id", ""))
+                    d = {"chat_id": chat_a, "text": reply}
+                    st_a = auto_state_fn()
+                    if st_a is not None:               # свежая кнопка под новым статусом
+                        d["reply_markup"] = json.dumps(auto_markup(st_a), ensure_ascii=False)
+                    try:
+                        http.post(f"{TG_API}/bot{token}/answerCallbackQuery",
+                                  data={"callback_query_id": cq.get("id"), "text": reply[:180]})
+                        http.post(f"{TG_API}/bot{token}/sendMessage", data=d)
+                    except httpx.HTTPError:
+                        pass
+                    continue
                 reply = handle_callback(resolve_callback_data(cq.get("data", ""), cs, links),
                                         q, confirm_store=cs,
                                         publish_fn=publish_fn, publish_state=ps,
@@ -749,6 +774,10 @@ def main():
                 markup = excel_cancel_markup(cfg.state.db, links)
                 if markup:
                     data["reply_markup"] = json.dumps(markup, ensure_ascii=False)
+            if text.strip().startswith(("/auto", "/status")):   # кнопка вкл/выкл автомата
+                st_a = auto_state_fn()
+                if st_a is not None:
+                    data["reply_markup"] = json.dumps(auto_markup(st_a), ensure_ascii=False)
             try:
                 http.post(f"{TG_API}/bot{token}/sendMessage", data=data)
             except httpx.HTTPError:

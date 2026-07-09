@@ -318,3 +318,11 @@ def test_setup_bot_commands_includes_auto():
     assert '"command": "status"' in owner_body
     _, default_body = reqs[1]
     assert "commands=[]" in default_body               # у клиентов меню пустое
+
+
+def test_auto_markup_toggle_button():
+    # владелец просил КНОПКИ вкл/выкл (2026-07-09), не текстовые команды
+    on = botrun.auto_markup(True)["inline_keyboard"][0][0]
+    assert on["callback_data"] == "auto:off" and "Выключить" in on["text"]
+    off = botrun.auto_markup(False)["inline_keyboard"][0][0]
+    assert off["callback_data"] == "auto:on" and "Включить" in off["text"]
