@@ -434,6 +434,7 @@ def setup_bot_commands(http, token: str, owner: str) -> None:
         {"command": "excel", "description": "Статус конвейера прайса"},
         {"command": "pending", "description": "Посты на подтверждении"},
         {"command": "status", "description": "Что в очереди"},
+        {"command": "auto", "description": "Авто-контент: статус, вкл/выкл"},
     ]
     try:
         http.post(f"{TG_API}/bot{token}/setMyCommands",

@@ -300,3 +300,21 @@ def test_resolve_callback_data_expands_code(tmp_path):
     assert botrun.resolve_callback_data("approve:breeze|funai|daijin", cs, links) == \
         "approve:breeze|funai|daijin"
     assert botrun.resolve_callback_data("noop", cs, links) == "noop"
+
+
+def test_setup_bot_commands_includes_auto():
+    # /auto должен попасть в меню владельца (setMyCommands применяется при старте бота)
+    reqs = []
+
+    def handler(req):
+        reqs.append((req.url.path, unquote_plus(req.read().decode())))
+        return httpx.Response(200, json={"ok": True})
+    http = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.telegram.org")
+    botrun.setup_bot_commands(http, "TOK", "42")
+    assert len(reqs) == 2
+    path, owner_body = reqs[0]
+    assert path == "/botTOK/setMyCommands"
+    assert '"command": "auto"' in owner_body           # выключатель автомата в меню
+    assert '"command": "status"' in owner_body
+    _, default_body = reqs[1]
+    assert "commands=[]" in default_body               # у клиентов меню пустое
