@@ -173,7 +173,10 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
             if not text:
                 return WizardReply("❌ название пустое — напишите текстом", _CANCEL_KB)
             store.set_manual_name(chat_id, text)
-            return WizardReply("💰 Цена, ₽ — только число (напр.: 45990).", _CANCEL_KB)
+            return WizardReply(f"✅ {text}\n💰 Теперь цена, ₽ — ответным сообщением, "
+                               f"только число.",
+                               {"force_reply": True,
+                                "input_field_placeholder": "45990"})
 
         if st.step == "awaiting_manual_price":
             digits = re.sub(r"[^\d]", "", text)
@@ -283,11 +286,17 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
             return _autolist(chat_id, category)
         if action == "manual":
             # «Свой товар» стартует с ЛЮБОГО шага (грабля 2026-07-09: на шаге
-            # списка кнопка падала в «неожиданное действие») — начинаем заново
+            # списка кнопка падала в «неожиданное действие») — начинаем заново.
+            # force_reply: Telegram открывает поле ввода с примером — владелец
+            # принимал запрос названия с кнопкой «❌ Отмена» за ошибку
             store.start(chat_id)
             store.to_manual(chat_id)
-            return WizardReply("📦 Название товара одной строкой "
-                               "(напр.: Кондиционер BORK AC-3001).", _CANCEL_KB)
+            return WizardReply(
+                "✍️ Напишите название товара ответным сообщением — одной строкой.\n"
+                "Дальше спрошу: цена → время → фото (опц.) → УТП (опц.).\n"
+                "Передумали — /task (начать заново).",
+                {"force_reply": True,
+                 "input_field_placeholder": "Кондиционер BORK AC-3001"})
         if action == "time_now" and st.step == "awaiting_time":
             store.set_time(chat_id, None)
             return WizardReply("📎 Пришлите фото (одно, на все позиции) "

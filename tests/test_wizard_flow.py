@@ -270,3 +270,17 @@ def test_manual_button_works_from_any_step(tmp_path):
     r = handle_callback("1", "wizard:manual")
     assert "азвание" in r.text                            # просит название, не ошибку
     assert store.snapshot("1").step == "awaiting_manual_name"
+
+
+def test_manual_prompts_use_force_reply(tmp_path):
+    # UX 2026-07-09: «нажимаю Свой товар и вылазит снова то же» — запрос названия
+    # выглядел как ошибка (❌ Отмена); теперь force_reply открывает поле ввода
+    start, handle_text, _, handle_callback, _, store = _flow(tmp_path)
+    start("1")
+    r = handle_callback("1", "wizard:manual")
+    assert r.markup.get("force_reply") is True
+    assert "BORK" in r.markup.get("input_field_placeholder", "")
+    assert "ответным сообщением" in r.text                # прямая инструкция
+    r = handle_text("1", "Кондиционер BORK AC-3001")
+    assert r.markup.get("force_reply") is True            # и на шаге цены
+    assert r.markup.get("input_field_placeholder") == "45990"
