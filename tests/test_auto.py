@@ -2,7 +2,7 @@ from datetime import date, datetime
 import pytest
 from content_factory.orchestrator.auto import (
     auto_command, auto_enabled, effective_auto_tasks, materialize_auto_tasks,
-    maybe_materialize, set_auto_enabled)
+    maybe_materialize, resolve_cats, set_auto_enabled)
 from content_factory.orchestrator.queue import TaskQueue
 from content_factory.orchestrator.tasks import Task
 
@@ -170,3 +170,37 @@ def test_maybe_materialize_uses_override(tmp_path):
     assert len(tasks) == 1
     slots = [s for s in q.all_slots() if s.status == "pending"]
     assert [(s.due_at, s.count) for s in slots] == [("2026-07-02 11:00", 4)]
+
+
+CATALOG = {2: "Бытовые сплит-системы", 6: "Полупромышленные сплит-системы",
+           7: "Мобильные кондиционеры", 26: "Тепловые пушки"}
+
+
+def test_resolve_cats_words_and_numbers():
+    # владелец 2026-07-09: «хочу писать словами, а не id»
+    ids, unknown = resolve_cats("мобильные кондиционеры, 26", CATALOG)
+    assert ids == [7, 26] and unknown == []
+    ids, unknown = resolve_cats("сплит-системы", CATALOG)
+    assert ids == [2, 6]                                   # с окончаниями, все матчи
+    ids, unknown = resolve_cats("чайник", CATALOG)
+    assert ids == [] and unknown == ["чайник"]             # нет в БД склада
+
+
+def test_auto_command_cats_by_words(tmp_path):
+    db = tmp_path / "s.db"
+    q = TaskQueue(tmp_path / "q.db")
+    txt = auto_command("cats тепловые пушки", CFG, q, db, datetime(2026, 7, 2, 8, 0),
+                       catalog_fn=lambda: CATALOG)
+    assert "Тепловые пушки" in txt
+    assert effective_auto_tasks(db, CFG)[0]["filter"] == {"categories": [26]}
+    txt = auto_command("cats чайник", CFG, q, db, datetime(2026, 7, 2, 8, 0),
+                       catalog_fn=lambda: CATALOG)
+    assert "❌" in txt and "чайник" in txt                 # что не понято — сказано
+
+
+def test_auto_edit_reply_includes_schedule(tmp_path):
+    # UX 2026-07-09: после правки сразу видно итоговое расписание
+    db = tmp_path / "s.db"
+    q = TaskQueue(tmp_path / "q.db")
+    txt = auto_command("times 20:30", CFG, q, db, datetime(2026, 7, 2, 8, 0))
+    assert "20:30" in txt and "Расписание" in txt

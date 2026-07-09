@@ -110,7 +110,29 @@ def _override_id(base: dict) -> str:
     return f"custom{zlib.crc32(sig.encode()) % 10000:04d}"
 
 
-def _auto_edit(verb: str, val: str, auto_cfgs: list, queue, db) -> str:
+def resolve_cats(text: str, catalog: dict[int, str] | None) -> tuple[list[int], list[str]]:
+    """Слова/числа владельца → id категорий БД («мобильные кондиционеры» → [7]).
+    Термины через запятую; слово матчится вхождением основы (без окончания)
+    в название категории. Возвращает (ids, нераспознанные термины)."""
+    ids: list[int] = []
+    unknown: list[str] = []
+    for term in [t.strip() for t in text.split(",") if t.strip()]:
+        if term.isdigit():
+            ids.append(int(term))
+            continue
+        words = [w for w in re.findall(r"[а-яёa-z]+", term.lower()) if len(w) > 2]
+        stems = [w[:max(4, len(w) - 2)] for w in words]
+        found = [cid for cid, title in (catalog or {}).items()
+                 if stems and all(s in title.lower() for s in stems)]
+        if found:
+            ids.extend(found)
+        else:
+            unknown.append(term)
+    return sorted(set(ids)), unknown
+
+
+def _auto_edit(verb: str, val: str, auto_cfgs: list, queue, db,
+               catalog_fn=None) -> str:
     """Редактор расписания (/auto times|count|cats <значение>): override поверх
     yaml — одна настраиваемая задача, недостающее наследуется из yaml."""
     ov = _load_auto_override(db)
@@ -140,12 +162,21 @@ def _auto_edit(verb: str, val: str, auto_cfgs: list, queue, db) -> str:
             return "❌ количество — целое число ≥ 1, напр.: /auto count 3"
         base["count"] = int(val.strip())
         msg = f"🔢 серий на слот: {base['count']}"
-    else:                                          # cats
-        nums = re.findall(r"\d+", val)
-        if not nums:
-            return "❌ категории — id через запятую, напр.: /auto cats 2,6,7"
-        base["filter"] = {"categories": [int(n) for n in nums]}
-        msg = "📦 категории: " + ", ".join(nums)
+    else:                                          # cats — слова или числа
+        catalog = catalog_fn() if catalog_fn else None
+        ids, unknown = resolve_cats(val, catalog)
+        if unknown and catalog:
+            top = sorted(catalog.values())
+            return (f"❌ не нашёл на складе: {', '.join(unknown)}.\n"
+                    f"Категории склада: {', '.join(top[:14])}…\n"
+                    f"Пишите словами или id: /auto cats сплит-системы, мобильные")
+        if not ids:
+            return ("❌ категории — слова или id через запятую, "
+                    "напр.: /auto cats сплит-системы, мобильные кондиционеры")
+        base["filter"] = {"categories": ids}
+        names = (", ".join(f"{catalog.get(i, i)} ({i})" for i in ids)
+                 if catalog else ", ".join(map(str, ids)))
+        msg = "📦 категории: " + names
     base["id"] = _override_id(base)
     _save_auto_override(db, [base])
     n = queue.cancel_auto()                        # старое расписание — долой
@@ -153,17 +184,24 @@ def _auto_edit(verb: str, val: str, auto_cfgs: list, queue, db) -> str:
             f"(≤5 мин, если автомат включён). Сброс к yaml: /auto reset")
 
 
-def auto_command(arg: str | None, auto_cfgs: list, queue, db, now: datetime) -> str:
+def auto_command(arg: str | None, auto_cfgs: list, queue, db, now: datetime,
+                 catalog_fn=None) -> str:
     """Ответ на /auto [on|off|times …|count …|cats …|reset]. Чистая логика
-    (now/queue/db инжектятся — бот собирает замыкание). Иначе → статус."""
+    (now/queue/db/catalog_fn инжектятся — бот собирает замыкание). Иначе → статус.
+    После правки расписания в ответ дописывается итоговый статус (UX 2026-07-09:
+    «непонятно, что получилось»)."""
     head, _, tail = (arg or "").partition(" ")
     if head == "reset":
         _save_auto_override(db, None)
         n = queue.cancel_auto()
         return (f"↩️ расписание автомата — снова из config.yaml "
-                f"(старых слотов отменено: {n})")
+                f"(старых слотов отменено: {n})\n\n"
+                + auto_command(None, auto_cfgs, queue, db, now))
     if head in ("times", "count", "cats"):
-        return _auto_edit(head, tail, auto_cfgs, queue, db)
+        out = _auto_edit(head, tail, auto_cfgs, queue, db, catalog_fn)
+        if out.startswith("❌"):
+            return out
+        return out + "\n\n" + auto_command(None, auto_cfgs, queue, db, now)
     if arg == "off":
         set_auto_enabled(db, False)
         n = queue.cancel_auto()

@@ -259,3 +259,14 @@ def test_manual_product_bad_price_reasks(tmp_path):
     r = handle_text("1", "дорого")
     assert "❌" in r.text                                  # не число — переспросить
     assert store.snapshot("1").step == "awaiting_manual_price"
+
+
+def test_manual_button_works_from_any_step(tmp_path):
+    # «сразу летит ошибка» (2026-07-09): кнопка «Свой товар» жалась на шаге
+    # списка → «неожиданное действие»; теперь стартует ветку с любого шага
+    start, handle_text, _, handle_callback, _, store = _flow(tmp_path)
+    start("1")
+    handle_text("1", "телевизоры")                        # шаг awaiting_pick
+    r = handle_callback("1", "wizard:manual")
+    assert "азвание" in r.text                            # просит название, не ошибку
+    assert store.snapshot("1").step == "awaiting_manual_name"

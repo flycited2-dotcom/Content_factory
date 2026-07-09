@@ -281,7 +281,10 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
             except (ValueError, IndexError):
                 return WizardReply("❌ категория устарела — напишите текстом")
             return _autolist(chat_id, category)
-        if action == "manual" and st.step == "awaiting_category":
+        if action == "manual":
+            # «Свой товар» стартует с ЛЮБОГО шага (грабля 2026-07-09: на шаге
+            # списка кнопка падала в «неожиданное действие») — начинаем заново
+            store.start(chat_id)
             store.to_manual(chat_id)
             return WizardReply("📦 Название товара одной строкой "
                                "(напр.: Кондиционер BORK AC-3001).", _CANCEL_KB)

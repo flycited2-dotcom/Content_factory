@@ -518,8 +518,28 @@ def main():
     markup_fn = make_markup_fn(prices_dir, cfg.state.db)
 
     # /auto: выключатель автомата (флаг в state-БД, слоты в общей очереди q)
+    def cats_catalog_fn():
+        """id→название категорий склада (для /auto cats словами). БД недоступна
+        (локальный запуск без туннеля) → None: резолв только по числам."""
+        try:
+            import psycopg2
+            conn = psycopg2.connect(
+                host=config("DB_HOST", "localhost"), port=config("DB_PORT", "5432"),
+                dbname=config("DB_NAME"), user=config("DB_USER"),
+                password=config("DB_PASSWORD"), connect_timeout=5)
+            cur = conn.cursor()
+            cur.execute("SELECT c.id, c.title FROM catalog_category c "
+                        "JOIN catalog_product p ON p.category_id = c.id "
+                        "GROUP BY c.id, c.title")
+            rows = dict(cur.fetchall())
+            conn.close()
+            return rows
+        except Exception:                          # noqa: BLE001 — мягкий фолбэк
+            return None
+
     def auto_fn(arg):
-        return auto_command(arg, cfg.auto_tasks, q, cfg.state.db, datetime.now())
+        return auto_command(arg, cfg.auto_tasks, q, cfg.state.db, datetime.now(),
+                            catalog_fn=cats_catalog_fn)
 
     def auto_state_fn():
         return auto_enabled(cfg.state.db) if cfg.auto_tasks else None
@@ -649,7 +669,8 @@ def main():
                     prompts = {
                         "times": ("🕐 Времена слотов через запятую", "09:00, 13:00, 18:00"),
                         "count": ("🔢 Сколько серий на слот — число", "2"),
-                        "cats": ("📦 Категории (id) через запятую", "2, 6, 7")}
+                        "cats": ("📦 Категории склада словами (или id) через запятую",
+                                 "сплит-системы, мобильные кондиционеры")}
                     label, ph = prompts.get(what, ("Значение", ""))
                     chat_a = str((cq.get("message") or {}).get("chat", {}).get("id", ""))
                     # ответ владельца станет «/auto times …» (паттерн кнопки price:)
