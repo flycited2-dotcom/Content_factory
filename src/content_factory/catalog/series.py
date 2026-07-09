@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from content_factory.models import Offer
-from content_factory.content.sizing import size_from_btu
+from content_factory.content.sizing import size_for
 
 # Хладагент-маркеры (R32/R410A/R290/R22/R134a) — варианты-близнецы серии (напр. Paramount и
 # Paramount R32 — те же кондиционеры, та же цена). Убираем их и скобки/билингву при группировке,
@@ -60,7 +60,7 @@ def series_key(o: Offer) -> str:
 
 
 def _msize(o: Offer) -> int:
-    return size_from_btu(o.btu_calc, o.category_id) or 0
+    return size_for(o.source, o.model, o.btu_calc, o.category_id) or 0
 
 
 def group_by_series(offers: list[Offer]) -> list[SeriesGroup]:

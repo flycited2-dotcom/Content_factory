@@ -1,0 +1,113 @@
+# Ручной маппинг «код в номенклатуре поставщика → типоразмер BTU» (sizing.size_for).
+# ЗАПОЛНЯЙ btu_true ЗДЕСЬ (7/9/12/18/24…): пусто/0 = код игнорируется (ревизия и т.п.).
+# Пока значения пусты — работает старое поведение (btu_calc из БД).
+
+breeze:
+  '05': {btu_now: 7, n: 6, btu_true: }  # ⚠️ разнобой: {9: 1, 7: 2, 12: 1, 10: 1, 13: 1}
+      # напр.: Инверторная сплит-система серии SMART DC Inverter (R32) AS-0
+  '06': {btu_now: 18, n: 1, btu_true: }
+      # напр.: Классическая сплит-система серии SENSEI 2025 RAC-SN55HP.D06 
+  '07': {btu_now: 7, n: 17, btu_true: }  # ⚠️ разнобой: {7: 15, 9: 2}
+      # напр.: Инверторная сплит-система серии CITY 2.0 DC Inverter AS-07UW
+  '09': {btu_now: 9, n: 6, btu_true: }  # ⚠️ разнобой: {0: 2, 9: 4}
+      # напр.: Внутренний блок настенного типа для мульти-сплит систем сери
+  '10': {btu_now: 9, n: 5, btu_true: }  # ⚠️ разнобой: {9: 3, 0: 1, 10: 1}
+      # напр.: Бытовая сплит-система серии BLACK CRYSTAL Classic A AS-10HW4
+  '12': {btu_now: 12, n: 13, btu_true: }  # ⚠️ разнобой: {0: 2, 12: 9, 13: 1, 10: 1}
+      # напр.: Внутренний блок мульти-сплит систем настенного типа серии AR
+  '17': {btu_now: 0, n: 1, btu_true: }
+      # напр.: Наружный блок мульти-сплит системы серии MULTI GAMMA EU ERP 
+  '18': {btu_now: 18, n: 13, btu_true: }  # ⚠️ разнобой: {0: 2, 16: 1, 18: 8, 7: 2}
+      # напр.: Внутренние блоки канального типа серии FREE Match DC Inverte
+  '20': {btu_now: 7, n: 4, btu_true: }
+      # напр.: Классическая сплит-система серии KAGAMI RAC-KM20HP.D01 (комп
+  '21': {btu_now: 7, n: 6, btu_true: }
+      # напр.: Инверторная сплит-система серии JETPRO Inverter XGI-JP21RHA 
+  '22': {btu_now: 7, n: 9, btu_true: }
+      # напр.: Инверторная сплит-система серии GLORIA INVERTER RCI-GL22HN (
+  '24': {btu_now: 24, n: 11, btu_true: }  # ⚠️ разнобой: {22: 2, 7: 1, 24: 3, 48: 1, 60: 1, 25: 3}
+      # напр.: Инверторная сплит-система серии CYCLONE DC Inverter ZAC-I/CN
+  '25': {btu_now: 7, n: 9, btu_true: }  # ⚠️ разнобой: {7: 4, 9: 3, 10: 2}
+      # напр.: Инверторная сплит-система серии DAIJIN Inverter RAC-I-DA25HP
+  '27': {btu_now: 10, n: 1, btu_true: }
+      # напр.: Инверторная сплит-система серии JETPRO Inverter XGI-JP27RHA 
+  '28': {btu_now: 9, n: 6, btu_true: }
+      # напр.: Инверторная сплит-система серии ATTICA NERO Inverter RCI-AN2
+  '29': {btu_now: 10, n: 1, btu_true: }
+      # напр.: Мобильный кондиционер cерии CROCUS MAC-CS29CON01
+  '30': {btu_now: 10, n: 4, btu_true: }  # ⚠️ разнобой: {0: 1, 10: 2, 30: 1}
+      # напр.: Внутренние блоки настенного типа серии SHOGUN ORIGAMI KODO I
+  '35': {btu_now: 12, n: 19, btu_true: }  # ⚠️ разнобой: {0: 2, 12: 15, 13: 2}
+      # напр.: Внутренний блок мульти-сплит систем настенного типа серии X-
+  '36': {btu_now: 32, n: 4, btu_true: }  # ⚠️ разнобой: {32: 2, 36: 1, 35: 1}
+      # напр.: Инверторная сплит-система напольно-потолочного типа серии HE
+  '40': {btu_now: 13, n: 3, btu_true: }  # ⚠️ разнобой: {13: 1, 14: 1, 0: 1}
+      # напр.: Инверторная сплит-система серии ROYAL SUPREMO NERO FULL DC E
+  '48': {btu_now: 48, n: 1, btu_true: }
+      # напр.: Классическая сплит-система кассетного типа серии HARD ZAC-HR
+  '50': {btu_now: 18, n: 5, btu_true: }  # ⚠️ разнобой: {0: 1, 18: 2, 16: 2}
+      # напр.: Внутренний блок мульти-сплит систем настенного типа серии X-
+  '55': {btu_now: 18, n: 9, btu_true: }  # ⚠️ разнобой: {18: 8, 0: 1}
+      # напр.: Инверторная сплит-система серии GLORIA INVERTER RCI-GLE55HN 
+  '60': {btu_now: 60, n: 1, btu_true: }
+      # напр.: Классическая сплит-система кассетного типа серии HARD ZAC-HR
+  '65': {btu_now: 20, n: 1, btu_true: }
+      # напр.: Классическая сплит-система серии DAIJIN RAC-DA65HP.D01 (комп
+  '70': {btu_now: 24, n: 5, btu_true: }  # ⚠️ разнобой: {24: 3, 25: 1, 22: 1}
+      # напр.: Инверторная сплит-система серии SKY Inverter XGI-SKY70RHA (к
+  '75': {btu_now: 25, n: 3, btu_true: }  # ⚠️ разнобой: {25: 2, 26: 1}
+      # напр.: Инверторная сплит-система серии PERFETTO DC EU Inverter 2025
+  '80': {btu_now: 0, n: 1, btu_true: }
+      # напр.: Наружный блок серии ORIGAMI KODO Inverter RAM-I-3OK80HP.02/U
+  '90': {btu_now: 30, n: 1, btu_true: }
+      # напр.: Классическая сплит-система повышенной мощности серии GRANDE 
+
+daichi:
+  '07': {btu_now: 10, n: 3, btu_true: }  # ⚠️ разнобой: {7: 1, 10: 2}
+      # напр.: Axioma ASX07H1R/ASB07H1R Серия H R32
+  '09': {btu_now: 9, n: 4, btu_true: }  # ⚠️ разнобой: {9: 3, 10: 1}
+      # напр.: Axioma ASX09H1R/ASB09H1R Серия H R32
+  '12': {btu_now: 12, n: 4, btu_true: }  # ⚠️ разнобой: {12: 3, 13: 1}
+      # напр.: Axioma ASX12H1R/ASB12H1R Серия H R32
+  '18': {btu_now: 18, n: 2, btu_true: }  # ⚠️ разнобой: {18: 1, 20: 1}
+      # напр.: Axioma ASX18H1R/ASB18H1R Серия H R32
+  '20': {btu_now: 7, n: 4, btu_true: }
+      # напр.: Daichi A20AVQ1_UNL_A/A20FV1_UNL_A Альфа 1_UNL_A (Alpha 1_UNL
+  '21': {btu_now: 7, n: 5, btu_true: }  # ⚠️ разнобой: {7: 3, 10: 2}
+      # напр.: Kentatsu KSGA21HFAN1/KSRA21HFAN1 Канами (Kanami)
+  '25': {btu_now: 9, n: 6, btu_true: }  # ⚠️ разнобой: {9: 5, 7: 1}
+      # напр.: AKAI ASITA25HW/ASOTA25HW Асита (Asita)
+  '26': {btu_now: 9, n: 5, btu_true: }  # ⚠️ разнобой: {9: 4, 7: 1}
+      # напр.: Kentatsu KSGA26HFRN1/KSRA26HFRN1 Канами R32 (Kanami R32)
+  '35': {btu_now: 12, n: 8, btu_true: }  # ⚠️ разнобой: {12: 6, 13: 2}
+      # напр.: Daichi A35AVQ2_UNL/A35FV2_UNL Альфа 2 Unl (Alpha 2 Unl)
+  '50': {btu_now: 18, n: 1, btu_true: }
+      # напр.: Daikin FTYN50L/RYN50L FTYN
+  '53': {btu_now: 18, n: 3, btu_true: }
+      # напр.: Kentatsu KSGA53HFRN1/KSRA53HFRN1 Канами R32 (Kanami R32)
+  '70': {btu_now: 24, n: 2, btu_true: }  # ⚠️ разнобой: {24: 1, 27: 1}
+      # напр.: Kentatsu KSGA70HZRN1W/KSRA70HZRN1 Канами Инвертор Wi-Fi (Kan
+
+rusklimat:
+  '06': {btu_now: 7, n: 1, btu_true: }
+      # напр.: Сплит-система SHUFT TOR SFTM-06HN8_V2 комплект
+  '07': {btu_now: 7, n: 8, btu_true: }
+      # напр.: Кондиционер мобильный Ballu Aura BPAC-07 CP/N1_24Y
+  '08': {btu_now: 7, n: 1, btu_true: }
+      # напр.: Сплит-система инверторного типа Ballu Odyssey Pro DC BSOI-08
+  '09': {btu_now: 9, n: 12, btu_true: }  # ⚠️ разнобой: {10: 1, 9: 6, 7: 5}
+      # напр.: Кондиционер мобильный Ballu Orbis BPAC-09 OR/N6
+  '10': {btu_now: 7, n: 5, btu_true: }  # ⚠️ разнобой: {7: 4, 10: 1}
+      # напр.: Сплит-система инверторного типа Ballu BSPI-10HN8/BL/EU компл
+  '12': {btu_now: 12, n: 11, btu_true: }  # ⚠️ разнобой: {12: 7, 7: 4}
+      # напр.: Сплит-система AC ELECTRIC PRO ACEM-12HN8 комплект
+  '13': {btu_now: 7, n: 2, btu_true: }
+      # напр.: Сплит-система инверторного типа Ballu BSPI-13HN8/BL/EU компл
+  '18': {btu_now: 7, n: 2, btu_true: }  # ⚠️ разнобой: {7: 1, 18: 1}
+      # напр.: Сплит-система Ballu Olympio Edge BSO-18HN8_22Y комплект
+  '20': {btu_now: 20, n: 1, btu_true: }
+      # напр.: Кондиционер мобильный Ballu Smart Pro BPAC-20 CE_20Y
+  '23': {btu_now: 24, n: 1, btu_true: }
+      # напр.: Комплект Ballu Machine BLCI_CF-24HN8/EU_23Y инверторной спли
+  '24': {btu_now: 24, n: 2, btu_true: }  # ⚠️ разнобой: {24: 1, 7: 1}
+      # напр.: Комплект Ballu Machine BLCI_CF-24HN8/EU_23Y инверторной спли

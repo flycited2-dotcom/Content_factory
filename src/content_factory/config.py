@@ -7,6 +7,7 @@ import yaml
 from content_factory.pricing.pricing import PricingConfig
 from content_factory.content.cards import CardConfig
 from content_factory.content.descriptions import load_descriptions
+from content_factory.content.sizing import load_power_map, set_power_map
 from content_factory.ingest.normalize import CatalogFilter
 
 
@@ -100,6 +101,12 @@ def load_config(path: str | Path) -> AppConfig:
     manifest = cc.get("descriptions_manifest", "")
     # путь к манифесту — относительно директории конфига
     descriptions = load_descriptions(path.parent / manifest) if manifest else {}
+
+    # power_map: ручной маппинг «код номенклатуры → типоразмер» (см. sizing.size_for).
+    # Ставим в реестр процесса здесь — все раннеры проходят через load_config.
+    pm_name = cc.get("power_map", "power_map.yaml")
+    pm_path = path.parent / pm_name
+    set_power_map(load_power_map(pm_path) if pm_path.exists() else {})
     content = ContentConfig(caption_max=cc.get("caption_max", 1024),
                             stop_words=cc.get("stop_words", []) or [],
                             descriptions=descriptions)

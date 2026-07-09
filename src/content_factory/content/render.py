@@ -5,7 +5,7 @@
 просто не выводятся. Поддержан ручной override на серию (manifest)."""
 from __future__ import annotations
 import re
-from content_factory.content.sizing import size_from_btu
+from content_factory.content.sizing import size_for
 from content_factory.catalog.series import series_key
 from content_factory.content.specs import build_specs_for_card
 
@@ -78,7 +78,7 @@ def _power_line(f: dict) -> str:
     if kw:
         parts.append(f"{_trim(kw)} кВт")
     if not parts:
-        size = size_from_btu(f["btu"], f["category_id"])
+        size = size_for(f["source"], f["model_title"], f["btu"], f["category_id"])
         if size:
             parts.append(f"{size}000 BTU")
             if area is None and _AREA_BY_SIZE.get(size):
@@ -121,8 +121,12 @@ def _series_header(f: dict, in_stock) -> str:
 def _series_lines(in_stock) -> list[str]:
     """Строки линейки: «▫️ 07 · 22 390 ₽ · 17 шт.» (мощность · цена · остаток)."""
     out = []
-    for m, p in sorted(in_stock, key=lambda t: t[0].btu_calc or 0):
-        size = size_from_btu(m.btu_calc, m.category_id)
+    def _sz(m):
+        return size_for(m.source, m.model, m.btu_calc, m.category_id)
+
+    # сортируем по исправленному размеру (btu_calc в БД местами хаотичен)
+    for m, p in sorted(in_stock, key=lambda t: (_sz(t[0]) or 0, t[0].btu_calc or 0)):
+        size = _sz(m)
         bits = [f"{size:02d}" if size else (m.model or "?")[:24]]
         if p:
             bits.append(_money(p))
