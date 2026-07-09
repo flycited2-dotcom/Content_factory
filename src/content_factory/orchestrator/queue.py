@@ -77,6 +77,24 @@ class TaskQueue:
                             "WHERE task_id=? AND status='pending'", (task_id,))
             return cur.rowcount
 
+    def cancel_auto(self) -> int:
+        """Отменить все pending АВТО-слоты (task_id с префиксом auto- — соглашение
+        materialize_auto_tasks). Ручные задачи не трогаются. Возвращает их число."""
+        with self._c() as c:
+            cur = c.execute("UPDATE slots SET status='cancelled' "
+                            "WHERE task_id LIKE 'auto-%' AND status='pending'")
+            return cur.rowcount
+
+    def uncancel_auto(self, after: str) -> int:
+        """Вернуть отменённые авто-слоты с БУДУЩИМ временем в pending (после /auto on
+        прошедшие слоты не должны исполниться «догоном» залпом). after — "YYYY-MM-DD HH:MM",
+        сравнение лексикографическое (как в due)."""
+        with self._c() as c:
+            cur = c.execute("UPDATE slots SET status='pending' "
+                            "WHERE task_id LIKE 'auto-%' AND status='cancelled' AND due_at>?",
+                            (after,))
+            return cur.rowcount
+
     def all_slots(self) -> list[Slot]:
         with self._c() as c:
             rows = c.execute(

@@ -58,3 +58,30 @@ def test_slot_carries_filter_and_flags(tmp_path):
     s = q.due("2026-06-26 10:00")[0]
     assert s.filter == {"categories": [2], "source": "breeze"}
     assert s.confirm is True and s.mode == "mcp" and s.channel == "@chan" and s.count == 10
+
+
+def test_cancel_auto_only_touches_auto_pending(tmp_path):
+    q = TaskQueue(tmp_path / "q.db")
+    q.add(_task(id="auto-am-2026-07-09"))
+    q.add(_task(id="manual-1"))
+    q.mark_done("auto-am-2026-07-09", "2026-06-26 10:00")   # done не трогаем
+    n = q.cancel_auto()
+    assert n == 1                                           # только pending авто-слот
+    st = {(s.task_id, s.due_at): s.status for s in q.all_slots()}
+    assert st[("auto-am-2026-07-09", "2026-06-26 10:00")] == "done"
+    assert st[("auto-am-2026-07-09", "2026-06-26 14:00")] == "cancelled"
+    assert st[("manual-1", "2026-06-26 10:00")] == "pending"
+
+
+def test_uncancel_auto_only_future_auto(tmp_path):
+    q = TaskQueue(tmp_path / "q.db")
+    q.add(_task(id="auto-am-2026-06-26"))
+    q.add(_task(id="manual-1"))
+    q.cancel("manual-1")
+    q.cancel_auto()
+    n = q.uncancel_auto("2026-06-26 12:00")                 # 10:00 уже прошло
+    assert n == 1
+    st = {(s.task_id, s.due_at): s.status for s in q.all_slots()}
+    assert st[("auto-am-2026-06-26", "2026-06-26 10:00")] == "cancelled"  # прошлое не воскресло
+    assert st[("auto-am-2026-06-26", "2026-06-26 14:00")] == "pending"
+    assert st[("manual-1", "2026-06-26 10:00")] == "cancelled"            # ручной не трогаем
