@@ -8,11 +8,13 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from datetime import datetime
 from pathlib import Path
 import httpx
 from decouple import config
 
 from content_factory.config import load_config
+from content_factory.orchestrator.auto import auto_command, auto_enabled
 from content_factory.publish.telegram import publish_post, PublishState, TG_API
 from content_factory.publish.orders import OrderLinks, order_markup
 from content_factory.bot.order_dialog import OrderDialogStore
@@ -472,6 +474,13 @@ def main():
                              cfg.telegram.parse_mode, links, http=http)
     sources_fn = make_sources_fn(prices_dir)
     markup_fn = make_markup_fn(prices_dir)
+
+    # /auto: выключатель автомата (флаг в state-БД, слоты в общей очереди q)
+    def auto_fn(arg):
+        return auto_command(arg, cfg.auto_tasks, q, cfg.state.db, datetime.now())
+
+    def auto_state_fn():
+        return auto_enabled(cfg.state.db) if cfg.auto_tasks else None
     wizard_start, wizard_text, wizard_photo, wizard_callback = _make_wizard(
         cfg, owner, prices_dir, http, excel_fn)
 
@@ -732,7 +741,8 @@ def main():
                                    publish_state=ps, regen_fn=regen_fn, make_fn=make_fn,
                                    find_fn=find_fn, pick_fn=pick_fn, excel_fn=excel_fn,
                                    price_fn=price_fn, sources_fn=sources_fn,
-                                   markup_fn=markup_fn)
+                                   markup_fn=markup_fn, auto_fn=auto_fn,
+                                   auto_state_fn=auto_state_fn)
             data = {"chat_id": chat, "text": reply}
             if text.strip().startswith("/excel"):      # кнопки отмены активных задач
                 markup = excel_cancel_markup(cfg.state.db, links)
