@@ -1,8 +1,9 @@
 from datetime import date
 import pytest
 from content_factory.orchestrator.auto import (
-    auto_enabled, materialize_auto_tasks, set_auto_enabled)
+    auto_enabled, materialize_auto_tasks, maybe_materialize, set_auto_enabled)
 from content_factory.orchestrator.queue import TaskQueue
+from content_factory.orchestrator.tasks import Task
 
 CFG = [{"id": "ac", "filter": {"categories": [2]}, "count": 2, "times": ["10:00", "14:00"]}]
 
@@ -54,6 +55,28 @@ def test_set_auto_enabled_roundtrip(tmp_path):
     assert auto_enabled(db) is True
     set_auto_enabled(db, False)
     assert auto_enabled(db) is False
+
+
+def test_maybe_materialize_off_cancels_auto_keeps_manual(tmp_path):
+    # флаг не выставлен = ВЫКЛ: не материализуем И отменяем уже созданные авто-слоты
+    q = TaskQueue(tmp_path / "q.db")
+    materialize_auto_tasks(CFG, date(2026, 7, 2), q)         # авто-слоты уже в очереди
+    q.add(Task(id="manual-1", filter={}, count=1, mode="mcp",
+               schedule=["2026-07-02 12:00"], channel="", confirm=True))
+    tasks = maybe_materialize(CFG, date(2026, 7, 2), q, tmp_path / "s.db")
+    assert tasks == []
+    st = {s.task_id: s.status for s in q.all_slots()}
+    assert st["manual-1"] == "pending"                       # ручные неприкосновенны
+    assert st["auto-ac-2026-07-02"] == "cancelled"
+
+
+def test_maybe_materialize_on_materializes(tmp_path):
+    db = tmp_path / "s.db"
+    set_auto_enabled(db, True)
+    q = TaskQueue(tmp_path / "q.db")
+    tasks = maybe_materialize(CFG, date(2026, 7, 2), q, db)
+    assert [t.id for t in tasks] == ["auto-ac-2026-07-02"]
+    assert len(q.all_slots()) == 2
 
 
 def test_materialize_invalid_config_raises(tmp_path):

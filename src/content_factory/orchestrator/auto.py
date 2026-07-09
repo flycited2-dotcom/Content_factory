@@ -33,6 +33,16 @@ def materialize_auto_tasks(auto_cfgs: list, today: date, queue) -> list[Task]:
     return tasks
 
 
+def maybe_materialize(auto_cfgs: list, today: date, queue, db) -> list[Task]:
+    """Материализация с учётом выключателя (/auto). ВЫКЛ → не создавать слоты
+    И отменить уже созданные pending auto-* (страховка на каждом тике: даже
+    сегодняшние не исполнятся). Ручные задачи (/plan, /task) не трогаются."""
+    if not auto_enabled(db):
+        queue.cancel_auto()
+        return []
+    return materialize_auto_tasks(auto_cfgs, today, queue)
+
+
 def _settings_c(db) -> sqlite3.Connection:
     """Соединение с таблицей settings (key-value) в state-БД. Создаёт при первом
     обращении — как остальные сторы (CREATE TABLE IF NOT EXISTS)."""

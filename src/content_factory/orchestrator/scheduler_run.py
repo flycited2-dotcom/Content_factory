@@ -20,7 +20,7 @@ from content_factory.publish.orders import OrderLinks, order_markup
 from content_factory.orchestrator.queue import TaskQueue
 from content_factory.orchestrator.confirm_store import ConfirmStore
 from content_factory.orchestrator.plans import load_plans_into_queue
-from content_factory.orchestrator.auto import materialize_auto_tasks
+from content_factory.orchestrator.auto import maybe_materialize
 from content_factory.orchestrator.scheduler import PipelineContext, run_due
 
 
@@ -90,7 +90,7 @@ def main():
     q = TaskQueue(cfg.state.db)
     if Path("tasks").is_dir():
         load_plans_into_queue("tasks", q)
-    materialize_auto_tasks(cfg.auto_tasks, date.today(), q)   # полный автомат: слоты на сегодня
+    maybe_materialize(cfg.auto_tasks, date.today(), q, cfg.state.db)   # автомат с выключателем /auto
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     if not q.due(now):
