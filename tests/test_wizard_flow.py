@@ -153,7 +153,9 @@ def test_scheduled_time_skips_photo_and_sets_due_at(tmp_path):
     assert "запланировано" in r.text
 
     es = ExcelStore(tmp_path / "state.db")
-    assert es.by_status("new") == []                   # до срока тик не видит
+    # часы инжектим (NOW), иначе тест ломается, как только реальный день > due
+    assert es.by_status("new", now=NOW.timestamp()) == []   # до срока тик не видит
+    assert len(es.by_status("new", now=NOW.timestamp() + 86400)) == 1  # после срока — виден
     import sqlite3
     with sqlite3.connect(tmp_path / "state.db") as c:
         due = c.execute("SELECT due_at FROM excel_items").fetchone()[0]

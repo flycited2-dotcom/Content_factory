@@ -71,11 +71,12 @@ class ExcelStore:
         with self._c() as c:
             return {r[0] for r in c.execute("SELECT key FROM excel_items").fetchall()}
 
-    def by_status(self, status: str) -> list[ExcelItem]:
+    def by_status(self, status: str, now: float | None = None) -> list[ExcelItem]:
         # new с due_at в будущем скрыты от тика (расписание /task); остальные
-        # статусы расписание не фильтрует — товар уже в работе
+        # статусы расписание не фильтрует — товар уже в работе.
+        # now — инжект часов для тестов, по умолчанию реальное время
         due_filter = " AND (due_at IS NULL OR due_at <= ?)" if status == "new" else ""
-        args = (status, time.time()) if status == "new" else (status,)
+        args = (status, now if now is not None else time.time()) if status == "new" else (status,)
         with self._c() as c:
             rows = c.execute("SELECT key, brand, model, name, price, status, research_job, "
                              f"card_job, tries, error FROM excel_items WHERE status=?{due_filter} "
