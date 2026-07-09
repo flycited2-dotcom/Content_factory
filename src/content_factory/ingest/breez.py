@@ -124,3 +124,12 @@ def base_lookup(base_map: dict) -> Callable[[str | None], Decimal | None]:
         v = base_map.get(str(nc)) if nc else None
         return Decimal(str(v)) if v is not None else None
     return lookup
+
+
+def live_base_lookup(base_url: str | None = None, auth_header: str | None = None,
+                     http: httpx.Client | None = None) -> Callable[[str | None], Decimal | None]:
+    """Свежий фетч + лукап одной строкой — общий для раннеров (scheduler_run,
+    cards_run, channel_sync_run): все конвейеры должны считать Бриз от одного опта,
+    иначе синк перезапишет цены планировщика розницей."""
+    return base_lookup(fetch_breez_base_by_nc(base_url=base_url, auth_header=auth_header,
+                                              http=http))

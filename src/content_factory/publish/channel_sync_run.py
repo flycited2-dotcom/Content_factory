@@ -37,8 +37,10 @@ def main():
     raw = fetch_raw_products(dsn, cfg.source.warehouse,
                              cfg.source.catalog.report_category_ids,
                              cfg.source.catalog.exclude_title_patterns)
+    # опт Бриза тем же лукапом, что планировщик — иначе синк перепишет цены розницей
+    from content_factory.ingest.breez import live_base_lookup
     offers = collect_offers(raw, Path(config("JAC_STOCK_JSON", "")), cfg.source.catalog,
-                            lambda nc: None)
+                            live_base_lookup())
     groups = group_by_series(offers)
 
     from content_factory.ingest.breez import fetch_breez_utp_by_nc

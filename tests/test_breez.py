@@ -1,7 +1,7 @@
 import httpx
 from content_factory.ingest.breez import (
-    _extract_base, _parse_leftovers, _parse_products_utp,
-    base_lookup, fetch_breez_base_by_nc, fetch_breez_utp_by_nc)
+    _extract_base, _parse_leftovers, _parse_products_utp, base_lookup,
+    fetch_breez_base_by_nc, fetch_breez_utp_by_nc, live_base_lookup)
 
 
 def test_parse_products_utp():
@@ -93,3 +93,10 @@ def test_base_lookup_converts_to_decimal():
     assert lookup("НС-2") == Decimal("24550.5")
     assert lookup("НС-нет") is None
     assert lookup(None) is None
+
+
+def test_live_base_lookup_without_creds_gives_none():
+    # общий «живой» лукап для раннеров (scheduler/cards/sync): без кредов —
+    # пустая карта → None → фолбэк на цену из БД, конвейеры не падают
+    lookup = live_base_lookup(base_url="", auth_header="")
+    assert lookup("НС-1") is None

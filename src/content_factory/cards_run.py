@@ -17,7 +17,7 @@ from content_factory.catalog.series import group_by_series
 from content_factory.cards_pipeline import FotogenConfig, CardJobStore, run_once
 from content_factory.content.cards import build_modes_map
 from content_factory.content.specs import build_specs_for_card
-from content_factory.ingest.breez import fetch_breez_utp_by_nc
+from content_factory.ingest.breez import fetch_breez_utp_by_nc, live_base_lookup
 
 
 def main():
@@ -28,7 +28,7 @@ def main():
                              cfg.source.catalog.report_category_ids,
                              cfg.source.catalog.exclude_title_patterns)
     offers = collect_offers(raw, Path(config("JAC_STOCK_JSON", "")), cfg.source.catalog,
-                            lambda nc: None)
+                            live_base_lookup())   # опт Бриза — как в планировщике/синке
     groups = group_by_series(offers)
     # Авто-выбор стиля карточки по категории товара (детерминированно, без ИИ): ручной
     # per-series override (card_modes.json) — высший приоритет, иначе карта cards.modes_by_category.
