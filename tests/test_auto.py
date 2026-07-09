@@ -1,8 +1,8 @@
 from datetime import date, datetime
 import pytest
 from content_factory.orchestrator.auto import (
-    auto_command, auto_enabled, materialize_auto_tasks, maybe_materialize,
-    set_auto_enabled)
+    auto_command, auto_enabled, effective_auto_tasks, materialize_auto_tasks,
+    maybe_materialize, set_auto_enabled)
 from content_factory.orchestrator.queue import TaskQueue
 from content_factory.orchestrator.tasks import Task
 
@@ -129,3 +129,44 @@ def test_materialize_invalid_config_raises(tmp_path):
         materialize_auto_tasks([{"count": 1, "times": ["09:00"]}], date(2026, 7, 2), q)
     with pytest.raises(ValueError, match="count"):
         materialize_auto_tasks([{"id": "x", "times": ["09:00"]}], date(2026, 7, 2), q)
+
+
+def test_effective_auto_tasks_override_and_reset(tmp_path):
+    # п.5 (2026-07-09): полный контроль автомата из бота — override поверх yaml
+    db = tmp_path / "s.db"
+    assert effective_auto_tasks(db, CFG) == CFG            # нет override — yaml
+    auto_command("times 09:00, 13:30", CFG, TaskQueue(tmp_path / "q.db"), db,
+                 datetime(2026, 7, 2, 8, 0))
+    eff = effective_auto_tasks(db, CFG)
+    assert len(eff) == 1 and eff[0]["times"] == ["09:00", "13:30"]
+    assert eff[0]["filter"] == CFG[0]["filter"]            # категории унаследованы
+    assert eff[0]["count"] == CFG[0]["count"]
+    auto_command("reset", CFG, TaskQueue(tmp_path / "q.db"), db,
+                 datetime(2026, 7, 2, 8, 0))
+    assert effective_auto_tasks(db, CFG) == CFG
+
+
+def test_auto_command_edit_count_and_cats(tmp_path):
+    db = tmp_path / "s.db"
+    q = TaskQueue(tmp_path / "q.db")
+    txt = auto_command("count 3", CFG, q, db, datetime(2026, 7, 2, 8, 0))
+    assert "3" in txt
+    txt = auto_command("cats 2,6,7", CFG, q, db, datetime(2026, 7, 2, 8, 0))
+    assert "2, 6, 7" in txt or "2,6,7" in txt
+    eff = effective_auto_tasks(db, CFG)
+    assert eff[0]["count"] == 3
+    assert eff[0]["filter"] == {"categories": [2, 6, 7]}
+    assert "❌" in auto_command("times ерунда", CFG, q, db, datetime(2026, 7, 2, 8, 0))
+    assert "❌" in auto_command("count ноль", CFG, q, db, datetime(2026, 7, 2, 8, 0))
+
+
+def test_maybe_materialize_uses_override(tmp_path):
+    db = tmp_path / "s.db"
+    q = TaskQueue(tmp_path / "q.db")
+    set_auto_enabled(db, True)
+    auto_command("times 11:00", CFG, q, db, datetime(2026, 7, 2, 8, 0))
+    auto_command("count 4", CFG, q, db, datetime(2026, 7, 2, 8, 0))
+    tasks = maybe_materialize(CFG, date(2026, 7, 2), q, db)
+    assert len(tasks) == 1
+    slots = [s for s in q.all_slots() if s.status == "pending"]
+    assert [(s.due_at, s.count) for s in slots] == [("2026-07-02 11:00", 4)]

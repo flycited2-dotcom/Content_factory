@@ -447,14 +447,18 @@ def _make_wizard(cfg, owner, prices_dir, http, excel_fn):
 
 
 def auto_markup(enabled: bool) -> dict:
-    """Кнопка-переключатель под ответами /auto (владелец просил кнопки вкл/выкл,
-    2026-07-09, а не текстовые команды). Одна контекстная кнопка: показываем
-    противоположное действие."""
-    if enabled:
-        return {"inline_keyboard": [[
-            {"text": "⏸ Выключить авто-контент", "callback_data": "auto:off"}]]}
-    return {"inline_keyboard": [[
-        {"text": "▶️ Включить авто-контент", "callback_data": "auto:on"}]]}
+    """Кнопки под ответами /auto (владелец 2026-07-09: кнопки, не команды):
+    контекстный вкл/выкл + редактор расписания (время/кол-во/категории/сброс)."""
+    toggle = ({"text": "⏸ Выключить авто-контент", "callback_data": "auto:off"}
+              if enabled else
+              {"text": "▶️ Включить авто-контент", "callback_data": "auto:on"})
+    return {"inline_keyboard": [
+        [toggle],
+        [{"text": "🕐 Время", "callback_data": "auto:ask:times"},
+         {"text": "🔢 Кол-во", "callback_data": "auto:ask:count"},
+         {"text": "📦 Категории", "callback_data": "auto:ask:cats"}],
+        [{"text": "↩️ Сброс расписания к yaml", "callback_data": "auto:reset"}],
+    ]}
 
 
 def setup_bot_commands(http, token: str, owner: str) -> None:
@@ -640,7 +644,24 @@ def main():
                     except httpx.HTTPError:
                         pass
                     continue
-                if data_cq.startswith("auto:"):        # кнопки вкл/выкл автомата
+                if data_cq.startswith("auto:ask:"):    # редактор — спросить значение
+                    what = data_cq.rsplit(":", 1)[1]
+                    prompts = {
+                        "times": ("🕐 Времена слотов через запятую", "09:00, 13:00, 18:00"),
+                        "count": ("🔢 Сколько серий на слот — число", "2"),
+                        "cats": ("📦 Категории (id) через запятую", "2, 6, 7")}
+                    label, ph = prompts.get(what, ("Значение", ""))
+                    chat_a = str((cq.get("message") or {}).get("chat", {}).get("id", ""))
+                    # ответ владельца станет «/auto times …» (паттерн кнопки price:)
+                    pending.set(owner or chat_a, f"/auto {what}")
+                    try:
+                        http.post(f"{TG_API}/bot{token}/answerCallbackQuery",
+                                  data={"callback_query_id": cq.get("id")})
+                    except httpx.HTTPError:
+                        pass
+                    _send_force_reply(owner or chat_a, f"{label}?", ph)
+                    continue
+                if data_cq.startswith("auto:"):        # кнопки вкл/выкл/сброс автомата
                     reply = auto_fn(data_cq.split(":", 1)[1])
                     chat_a = str((cq.get("message") or {}).get("chat", {}).get("id", ""))
                     d = {"chat_id": chat_a, "text": reply}

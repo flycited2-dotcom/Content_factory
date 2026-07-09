@@ -326,6 +326,10 @@ def test_auto_markup_toggle_button():
     assert on["callback_data"] == "auto:off" and "Выключить" in on["text"]
     off = botrun.auto_markup(False)["inline_keyboard"][0][0]
     assert off["callback_data"] == "auto:on" and "Включить" in off["text"]
+    # п.5: полный контроль — кнопки времени/количества/категорий и сброса
+    flat = str(botrun.auto_markup(True))
+    for cb in ("auto:ask:times", "auto:ask:count", "auto:ask:cats", "auto:reset"):
+        assert cb in flat
 
 
 def test_markup_fn_db_sources_and_listing(tmp_path):

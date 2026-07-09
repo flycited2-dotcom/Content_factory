@@ -321,10 +321,11 @@ def handle_command(text: str, queue, today: date | None = None, held_provider=No
         return (f"✅ Задача {t.id}: {t.count} серий/слот, слотов {len(t.schedule)}, "
                 f"режим {t.mode}{extra}")
     if cmd.startswith("/auto"):
-        # выключатель авто-контента: /auto [on|off]; логика — orchestrator/auto.py
+        # выключатель и редактор авто-контента: /auto [on|off|times …|count …|
+        # cats …|reset]; логика — orchestrator/auto.py
         if not auto_fn:
             return "❌ авто-контент недоступен"
-        return auto_fn(parts[1].lower() if len(parts) > 1 else None)
+        return auto_fn(" ".join(parts[1:]).lower() if len(parts) > 1 else None)
     if cmd.startswith("/status"):
         return _status(queue, auto_state_fn)
     if cmd.startswith("/cancel"):
