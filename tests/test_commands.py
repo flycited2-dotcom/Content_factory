@@ -343,3 +343,27 @@ def test_handle_excel_retry_passes_arg(tmp_path):
 
     reply = handle_command("/excel retry", q, excel_fn=excel_fn)
     assert got["arg"] == "retry" and "🔁" in reply
+
+
+def test_auto_routed_to_auto_fn(tmp_path):
+    q = TaskQueue(tmp_path / "q.db")
+    calls = []
+    out = handle_command("/auto off", q, auto_fn=lambda a: calls.append(a) or "OK")
+    assert out == "OK" and calls == ["off"]
+    out = handle_command("/auto", q, auto_fn=lambda a: f"arg={a}")
+    assert out == "arg=None"
+
+
+def test_auto_unavailable_without_fn(tmp_path):
+    q = TaskQueue(tmp_path / "q.db")
+    assert "недоступен" in handle_command("/auto", q)
+
+
+def test_status_shows_auto_line(tmp_path):
+    q = TaskQueue(tmp_path / "q.db")
+    out = handle_command("/status", q, auto_state_fn=lambda: False)
+    assert "🤖" in out and "/auto on" in out                 # выключен → как включить
+    out = handle_command("/status", q, auto_state_fn=lambda: True)
+    assert "включён" in out and "/auto off" in out
+    out = handle_command("/status", q)                       # авто не настроено — строки нет
+    assert "🤖" not in out
