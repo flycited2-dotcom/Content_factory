@@ -30,6 +30,8 @@ _CONFIRM_KB = {"inline_keyboard": [[
     {"text": "❌ Отмена", "callback_data": "wizard:cancel"}]]}
 _STATUS_KB = {"inline_keyboard": [[
     {"text": "📊 Статус", "callback_data": "wizard:status"}]]}
+_CANCEL_KB = {"inline_keyboard": [[
+    {"text": "❌ Отмена", "callback_data": "wizard:cancel"}]]}
 _TIME_KB = {"inline_keyboard": [[
     {"text": "🚀 Сейчас", "callback_data": "wizard:time_now"}],
     [{"text": "❌ Отмена", "callback_data": "wizard:cancel"}]]}
@@ -111,7 +113,7 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
                             for n, c in enumerate(cands, 1))
         return WizardReply(f"🔎 «{category}» — найдено {len(cands)}:\n{listing}\n\n"
                            f"Какие взять? Номера через пробел (напр.: 1 3 5) "
-                           f"или «все».")
+                           f"или «все».", _CANCEL_KB)
 
     def _time_prompt() -> WizardReply:
         return WizardReply("⏰ Когда выгружать? «🚀 Сейчас» — или напишите время: "
@@ -133,6 +135,11 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
         if st is None:
             return None                                    # не в мастере
         text = (text or "").strip()
+        if text.startswith("/"):
+            # команды (/auto /status /make …) проходят СКВОЗЬ визард к обработчику,
+            # диалог не сбрасывается (грабля 2026-07-09: бот залип в awaiting_pick
+            # и жрал все команды ответом «не понял номера»)
+            return None
 
         if st.step == "awaiting_category":
             if not text:
@@ -165,7 +172,8 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
                 cands = st.candidates or []
                 picked = [cands[i - 1] for i in nums if 1 <= i <= len(cands)]
             if not picked:
-                return WizardReply("❌ не понял номера — напр.: 1 3 5, или «все»")
+                return WizardReply("❌ не понял номера — напр.: 1 3 5, или «все»",
+                                   _CANCEL_KB)
             store.set_pick(chat_id, picked)
             return _time_prompt()
 
@@ -181,7 +189,8 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
             store.set_utp(chat_id, text or None)
             return _confirm_prompt(store.snapshot(chat_id))
 
-        return WizardReply("❌ сейчас жду не текст — см. предыдущее сообщение")
+        return WizardReply("❌ сейчас жду не текст — см. предыдущее сообщение",
+                           _CANCEL_KB)
 
     def handle_photo(chat_id: str, photo_bytes: bytes) -> WizardReply | None:
         st = store.snapshot(chat_id)

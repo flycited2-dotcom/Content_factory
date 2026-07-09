@@ -202,3 +202,24 @@ def test_cancel_any_step(tmp_path):
     r = handle_callback("1", "wizard:cancel")
     assert "отменено" in r.text.lower()
     assert store.snapshot("1") is None
+
+
+def test_commands_pass_through_wizard(tmp_path):
+    # ГРАБЛЯ 2026-07-09: бот залип в awaiting_pick и жрал /auto /status /make —
+    # команды должны проходить СКВОЗЬ визард (не сбрасывая диалог)
+    start, handle_text, _, handle_callback, _, store = _flow(tmp_path)
+    start("1")
+    handle_text("1", "телевизоры")
+    assert handle_text("1", "/auto") is None
+    assert handle_text("1", "/status") is None
+    assert store.snapshot("1").step == "awaiting_pick"     # диалог не сброшен
+
+
+def test_autolist_and_bad_pick_have_cancel_button(tmp_path):
+    # выход из залипшего шага — кнопкой, а не магическим словом
+    start, handle_text, _, _, _, store = _flow(tmp_path)
+    start("1")
+    r = handle_text("1", "телевизоры")
+    assert "wizard:cancel" in str(r.markup)
+    r = handle_text("1", "ерунда без номеров")
+    assert "wizard:cancel" in str(r.markup)
