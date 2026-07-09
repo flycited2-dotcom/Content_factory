@@ -338,3 +338,33 @@ def test_confirm_offers_redo_photo_and_utp(tmp_path):
     assert store.snapshot("1").step == "awaiting_utp"
     handle_text("1", "Тихий, экономичный")
     assert store.snapshot("1").utp_text == "Тихий, экономичный"
+
+
+def test_confirm_submit_failure_keeps_item_out_of_research(tmp_path):
+    # ГРАБЛЯ 2026-07-09: add_items шёл ДО submit_card; падение сабмита оставляло
+    # товар в status=new → excel-тик гнал его в research с ЧУЖИМ фото ChatGPT
+    def boom(brand, model, utp, photo):
+        raise RuntimeError("api down")
+    start, handle_text, handle_photo, handle_callback, calls, store = _flow(
+        tmp_path, submit_card=None)
+    # подменяем submit на падающий через обвязку _flow нельзя — собираем заново
+    from content_factory.bot.wizard import WizardStore
+    from content_factory.bot.wizard_flow import make_wizard_flow
+    from content_factory.orchestrator.excel_pipeline import ExcelStore
+    prices = tmp_path / "prices"                    # прайс уже создан _flow
+    store2 = WizardStore(tmp_path / "wizard2.db")
+    start2, htext2, hphoto2, hcb2 = make_wizard_flow(
+        tmp_path / "state2.db", prices, store2, boom,
+        lambda cid, b: str(tmp_path / "p.jpg"), excel_fn=lambda: "S")
+    (tmp_path / "p.jpg").write_bytes(b"IMG")
+    start2("1")
+    htext2("1", "телевизоры")
+    htext2("1", "1")
+    hcb2("1", "wizard:time_now")
+    hphoto2("1", b"IMG")
+    hcb2("1", "wizard:skip_utp")
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError):
+        hcb2("1", "wizard:confirm")                # _wizard_safe ловит выше, в боте
+    es = ExcelStore(tmp_path / "state2.db")
+    assert es.by_status("new") == []               # товар НЕ утёк в research-путь

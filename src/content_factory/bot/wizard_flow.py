@@ -257,13 +257,19 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
                 return WizardReply("📎 Фото потерялось (файл не найден) — "
                                    "пришлите фото заново или пропустите.",
                                    _SKIP_PHOTO_KB)
-        excel_store.add_items(rows, due_at=st.due_at)
-        n_override = 0
+        # Сабмит карточек ДО записи в конвейер: падение сабмита не должно
+        # оставлять товар в status=new — иначе excel-тик утащит его в research
+        # с чужим фото ChatGPT (грабля 2026-07-09, ларь Hyundai CH1002)
+        jobs: list[tuple[str, int]] = []
         if photo is not None:
             for key, brand, model, name, price in rows:
-                job = submit_card(brand, model, st.utp_text or "", str(photo))
-                excel_store.update(key, status="card", card_job=job, tries=0)
-                n_override += 1
+                jobs.append((key, submit_card(brand, model, st.utp_text or "",
+                                              str(photo))))
+        excel_store.add_items(rows, due_at=st.due_at)
+        n_override = 0
+        for key, job in jobs:
+            excel_store.update(key, status="card", card_job=job, tries=0)
+            n_override += 1
         store.cancel(chat_id)
         if n_override:
             mode = "карточка сразу, минуя research (своё фото)"
