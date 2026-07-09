@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 
 from content_factory.bot.commands import parse_due_at
 from content_factory.ingest.excel_price import (
@@ -240,11 +241,21 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
             store.cancel(chat_id)
             return WizardReply("❌ ни одна позиция не подтвердилась "
                                "(возможно, уже в работе)")
+        photo = None
+        if st.photo_path and st.due_at is None:            # override только «сейчас»
+            # resolve: отн. путь → от CWD бота (грабля 2026-07-09: card_submit
+            # клеил его с output_dir агента → FileNotFoundError → crash-loop бота)
+            photo = Path(st.photo_path).resolve()
+            if not photo.exists():
+                store.set_time(chat_id, None)              # назад на шаг фото
+                return WizardReply("📎 Фото потерялось (файл не найден) — "
+                                   "пришлите фото заново или пропустите.",
+                                   _SKIP_PHOTO_KB)
         excel_store.add_items(rows, due_at=st.due_at)
         n_override = 0
-        if st.photo_path and st.due_at is None:            # override только «сейчас»
+        if photo is not None:
             for key, brand, model, name, price in rows:
-                job = submit_card(brand, model, st.utp_text or "", st.photo_path)
+                job = submit_card(brand, model, st.utp_text or "", str(photo))
                 excel_store.update(key, status="card", card_job=job, tries=0)
                 n_override += 1
         store.cancel(chat_id)

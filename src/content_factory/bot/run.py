@@ -439,7 +439,7 @@ def _make_wizard(cfg, owner, prices_dir, http, excel_fn):
         photos_dir.mkdir(parents=True, exist_ok=True)
         p = photos_dir / f"wizard_{chat_id}_{int(time.time() * 1000)}.jpg"
         p.write_bytes(photo_bytes)
-        return str(p)
+        return str(p.resolve())    # абсолютный: отн. путь клеился с чужим каталогом
 
     store = WizardStore(cfg.state.db)
     return make_wizard_flow(cfg.state.db, prices_dir, store, submit_card, save_photo,
@@ -546,6 +546,20 @@ def main():
     wizard_start, wizard_text, wizard_photo, wizard_callback = _make_wizard(
         cfg, owner, prices_dir, http, excel_fn)
 
+    def _wizard_safe(fn, *args):
+        """Визард не должен ронять бота одним апдейтом: crash-loop 2026-07-09 —
+        FileNotFoundError на confirm валил main(), systemd рестартил, offset не
+        сдвигался и тот же callback падал снова (31 рестарт). Ошибка → трейс в
+        журнал + мягкий ответ владельцу."""
+        try:
+            return fn(*args)
+        except Exception:                              # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+            from content_factory.bot.wizard_flow import WizardReply
+            return WizardReply("⚠️ внутренняя ошибка — попробуйте ещё раз "
+                               "(детали в журнале cf-bot)")
+
     def _send_wizard_reply(chat_id, wr):
         data = {"chat_id": chat_id, "text": wr.text}
         if wr.markup:
@@ -627,7 +641,7 @@ def main():
                     continue
                 if (cq.get("data") or "").startswith("wizard:"):
                     chat_w = str((cq.get("message") or {}).get("chat", {}).get("id", ""))
-                    wr = wizard_callback(chat_w, cq.get("data"))
+                    wr = _wizard_safe(wizard_callback, chat_w, cq.get("data"))
                     try:
                         http.post(f"{TG_API}/bot{token}/answerCallbackQuery",
                                   data={"callback_query_id": cq.get("id"), "text": wr.text[:180]})
@@ -802,19 +816,19 @@ def main():
                 continue
             # /task — старт визарда постановки задачи кнопками
             if text.strip() == "/task":
-                _send_wizard_reply(chat, wizard_start(chat))
+                _send_wizard_reply(chat, _wizard_safe(wizard_start, chat))
                 continue
             # фото в визарде (шаг «приложить фото» — последний элемент = крупнее всех)
             photos = msg.get("photo") or []
             if photos:
                 data = download_telegram_file(http, token, photos[-1].get("file_id"))
-                wr = wizard_photo(chat, data) if data is not None else None
+                wr = _wizard_safe(wizard_photo, chat, data) if data is not None else None
                 if wr is not None:
                     _send_wizard_reply(chat, wr)
                     continue
             # текстовый шаг визарда (категория/список/УТП) — если диалог активен
             if text:
-                wr = wizard_text(chat, text)
+                wr = _wizard_safe(wizard_text, chat, text)
                 if wr is not None:
                     _send_wizard_reply(chat, wr)
                     continue

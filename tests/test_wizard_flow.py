@@ -284,3 +284,34 @@ def test_manual_prompts_use_force_reply(tmp_path):
     r = handle_text("1", "Кондиционер BORK AC-3001")
     assert r.markup.get("force_reply") is True            # и на шаге цены
     assert r.markup.get("input_field_placeholder") == "45990"
+
+
+def test_confirm_resolves_relative_photo_path(tmp_path, monkeypatch):
+    # ГРАБЛЯ 2026-07-09 (crash-loop cf-bot, 31 рестарт): photo_path хранился
+    # относительным, card_submit клеил его с output_dir агента → FileNotFoundError
+    start, handle_text, _, handle_callback, calls, store = _flow(tmp_path)
+    start("1")
+    handle_text("1", "телевизоры")
+    handle_text("1", "1")
+    handle_callback("1", "wizard:time_now")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "rel.jpg").write_bytes(b"IMG")
+    store.set_photo("1", "rel.jpg")                       # относительный путь
+    handle_callback("1", "wizard:skip_utp")
+    r = handle_callback("1", "wizard:confirm")
+    assert "поставлено" in r.text
+    assert calls and str(tmp_path / "rel.jpg") == calls[0][3]   # абсолютизирован
+
+
+def test_confirm_missing_photo_reasks_instead_of_crash(tmp_path):
+    start, handle_text, _, handle_callback, calls, store = _flow(tmp_path)
+    start("1")
+    handle_text("1", "телевизоры")
+    handle_text("1", "1")
+    handle_callback("1", "wizard:time_now")
+    store.set_photo("1", str(tmp_path / "нет_такого.jpg"))
+    handle_callback("1", "wizard:skip_utp")
+    r = handle_callback("1", "wizard:confirm")
+    assert "фото" in r.text.lower() and "заново" in r.text      # мягкий ответ
+    assert calls == []                                    # submit_card не дёргали
+    assert store.snapshot("1").step == "awaiting_photo"   # вернулись на шаг фото
