@@ -244,9 +244,12 @@ def handle_command(text: str, queue, today: date | None = None, held_provider=No
         return sources_fn() if sources_fn else "❌ источники недоступны"
 
     if cmd.startswith("/markup"):
-        # /markup <слот> <±число>: наценка источника (минус = скидка)
+        # /markup <слот> <±число>: наценка источника (минус = скидка);
+        # без аргументов — обзор текущих наценок
         if not markup_fn:
             return "❌ наценки недоступны"
+        if len(parts) == 1:
+            return markup_fn("", None)
         try:
             pct = float(parts[-1].replace(",", "."))
         except (ValueError, IndexError):

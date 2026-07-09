@@ -250,11 +250,37 @@ def make_sources_fn(prices_dir):
     return sources_fn
 
 
-def make_markup_fn(prices_dir):
+_DB_MARKUP_SOURCES = ("breeze", "rusklimat", "daichi", "jac")
+
+
+def make_markup_fn(prices_dir, state_db=None):
     """markup_fn(slot, pct) — наценка/скидка источника (владелец пишет число
-    со знаком: +5 наценка, -7 скидка, 0 убрать)."""
-    def markup_fn(slot: str, pct: float) -> str:
+    со знаком: +5 наценка, -7 скидка, 0 убрать). Слот: excel-прайс (файл),
+    БД-источник (breeze/rusklimat/daichi/jac) или '*' — дефолт всех БД-источников.
+    pct=None — обзор текущих наценок (п.7 владельца 2026-07-09)."""
+    def markup_fn(slot: str, pct: float | None) -> str:
         from content_factory.ingest.excel_price import set_markup
+        from content_factory.pricing.overrides import (markup_overrides,
+                                                       set_markup_override)
+        if pct is None:                                # обзор
+            ov = markup_overrides(state_db) if state_db else {}
+            lines = ["💹 Наценки БД-источников (поверх config.yaml):"]
+            if ov:
+                lines += [f"— {s}: {'+' if p > 0 else ''}{p:g}%"
+                          for s, p in sorted(ov.items())]
+            else:
+                lines.append("— переопределений нет (действует yaml)")
+            lines.append("Менять: /markup breeze -3 · /markup * 8 · 0 — убрать.\n"
+                         "Прайсы: /markup <слот из /sources> <±число>")
+            return "\n".join(lines)
+        s = slot.strip().lower()
+        if state_db and (s in _DB_MARKUP_SOURCES or s == "*"):
+            set_markup_override(state_db, s, pct if pct else None)
+            name = "БД-источников (дефолт *)" if s == "*" else f"«{s}»"
+            sign = f"{'+' if pct > 0 else ''}{pct:g}%"
+            return (f"💹 наценка {name}: {sign} — применится со следующего тика "
+                    f"(посты и синк)" if pct
+                    else f"💹 наценка {name} убрана — действует yaml")
         if not (Path(prices_dir) / f"{slot}.xlsx").exists():
             return f"❌ нет такого источника: {slot} (см. /sources)"
         set_markup(prices_dir, slot, pct)
@@ -485,7 +511,7 @@ def main():
     price_fn = make_price_fn(cfg.state.db, token, review_channel,
                              cfg.telegram.parse_mode, links, http=http)
     sources_fn = make_sources_fn(prices_dir)
-    markup_fn = make_markup_fn(prices_dir)
+    markup_fn = make_markup_fn(prices_dir, cfg.state.db)
 
     # /auto: выключатель автомата (флаг в state-БД, слоты в общей очереди q)
     def auto_fn(arg):

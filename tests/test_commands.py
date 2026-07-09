@@ -367,3 +367,9 @@ def test_status_shows_auto_line(tmp_path):
     assert "включён" in out and "/auto off" in out
     out = handle_command("/status", q)                       # авто не настроено — строки нет
     assert "🤖" not in out
+
+
+def test_markup_command_no_args_lists(tmp_path):
+    q = TaskQueue(tmp_path / "q.db")
+    out = handle_command("/markup", q, markup_fn=lambda s, p: f"LIST|{s}|{p}")
+    assert out == "LIST||None"

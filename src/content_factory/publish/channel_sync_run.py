@@ -45,9 +45,12 @@ def main():
 
     from content_factory.ingest.breez import fetch_breez_utp_by_nc
     utp_map = fetch_breez_utp_by_nc()
+    # наценки из бота — тот же расчёт, что в планировщике, иначе синк перепишет цены
+    from content_factory.pricing.overrides import apply_overrides, markup_overrides
+    pricing_cfg = apply_overrides(cfg.pricing, markup_overrides(cfg.state.db))
 
     def price_fn(g):
-        pr = compute_price(g.representative, cfg.pricing)
+        pr = compute_price(g.representative, pricing_cfg)
         return pr.price if pr.ok else None
 
     def caption_fn(g, price):
@@ -57,7 +60,7 @@ def main():
         member_prices = []
         for m in g.members:
             if (m.stock or 0) > 0:
-                pr = compute_price(m, cfg.pricing)
+                pr = compute_price(m, pricing_cfg)
                 member_prices.append((m, pr.price if pr.ok else None))
         return render_caption(g, price, cfg.content, utp_raw=utp_raw,
                               member_prices=member_prices)

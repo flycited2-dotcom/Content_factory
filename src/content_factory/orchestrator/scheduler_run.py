@@ -77,8 +77,12 @@ def build_context(cfg, token: str, owner_chat: str, pub_state: PublishState,
         # анти-дубль: опубликованные + висящие на ревью/отклонённые (regen не блокируется)
         return pub_state.published_keys() | confirm_store.blocked_keys()
 
+    # наценки из бота (/markup breeze -3, /markup * 8) — поверх yaml
+    from content_factory.pricing.overrides import apply_overrides, markup_overrides
+    pricing_cfg = apply_overrides(cfg.pricing, markup_overrides(cfg.state.db))
+
     return PipelineContext(
-        cards_dir=cfg.cards.dir, pricing_cfg=cfg.pricing, content_cfg=cfg.content,
+        cards_dir=cfg.cards.dir, pricing_cfg=pricing_cfg, content_cfg=cfg.content,
         review_cfg=cfg.review, stop_words=cfg.content.stop_words,
         require_card=cfg.cards.require_for_publish, default_mode=cfg.default_card_mode,
         published_keys=taken_keys, publish=publish,

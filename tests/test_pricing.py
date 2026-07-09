@@ -41,3 +41,27 @@ def test_rule_override_by_category():
                         rules=[{"match": {"category_id": 7}, "markup_pct": 30}])
     r = compute_price(_offer(Decimal("10000"), category_id=7), cfg)
     assert r.markup_pct == 30 and r.price == 13090   # 10000*1.30=13000 → 13090
+
+
+def test_apply_overrides_source_and_default():
+    # п.7 (2026-07-09): наценка на все виды товара из бота — overrides поверх yaml
+    from content_factory.pricing.overrides import apply_overrides
+    cfg = PricingConfig(default_markup_pct=5,
+                        rules=[{"match": {"source": "jac"}, "markup_pct": 7}])
+    out = apply_overrides(cfg, {"breeze": -3, "*": 10})
+    assert compute_price(_offer(Decimal("10000"), source="breeze"), out).markup_pct == -3
+    assert compute_price(_offer(Decimal("10000"), source="jac"), out).markup_pct == 7
+    assert compute_price(_offer(Decimal("10000"), source="daichi"), out).markup_pct == 10
+    same = apply_overrides(cfg, {})                        # пусто — конфиг как был
+    assert same.default_markup_pct == 5 and same.rules == cfg.rules
+
+
+def test_markup_overrides_roundtrip(tmp_path):
+    from content_factory.pricing.overrides import markup_overrides, set_markup_override
+    db = tmp_path / "s.db"
+    assert markup_overrides(db) == {}
+    set_markup_override(db, "breeze", -3)
+    set_markup_override(db, "*", 8)
+    assert markup_overrides(db) == {"breeze": -3.0, "*": 8.0}
+    set_markup_override(db, "breeze", None)                # убрать
+    assert markup_overrides(db) == {"*": 8.0}

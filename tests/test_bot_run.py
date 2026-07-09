@@ -326,3 +326,17 @@ def test_auto_markup_toggle_button():
     assert on["callback_data"] == "auto:off" and "Выключить" in on["text"]
     off = botrun.auto_markup(False)["inline_keyboard"][0][0]
     assert off["callback_data"] == "auto:on" and "Включить" in off["text"]
+
+
+def test_markup_fn_db_sources_and_listing(tmp_path):
+    # п.7 (2026-07-09): наценка на ВСЕ виды товара — БД-источники и '*' из бота
+    fn = botrun.make_markup_fn(tmp_path / "prices", state_db=tmp_path / "s.db")
+    assert "breeze" in fn("breeze", -3)
+    assert "8" in fn("*", 8)
+    from content_factory.pricing.overrides import markup_overrides
+    assert markup_overrides(tmp_path / "s.db") == {"breeze": -3.0, "*": 8.0}
+    out = fn("", None)                                     # обзор
+    assert "breeze" in out and "-3" in out
+    assert "❌" in fn("noexist", 5)                        # ни БД-источник, ни xlsx
+    fn("breeze", 0)                                        # 0 = убрать (как в excel)
+    assert markup_overrides(tmp_path / "s.db") == {"*": 8.0}
