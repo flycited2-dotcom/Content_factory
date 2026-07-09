@@ -5,7 +5,8 @@
 confirm по умолчанию ВКЛ — всё идёт через ревью-канал владельца."""
 from __future__ import annotations
 import sqlite3
-from datetime import date
+from collections import Counter
+from datetime import date, datetime
 from pathlib import Path
 from content_factory.orchestrator.tasks import Task
 
@@ -65,3 +66,38 @@ def set_auto_enabled(db, on: bool) -> None:
     with _settings_c(db) as c:
         c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('auto_enabled', ?)",
                   ("1" if on else "0",))
+
+
+def auto_command(arg: str | None, auto_cfgs: list, queue, db, now: datetime) -> str:
+    """Ответ на /auto [on|off]. Чистая логика (now/queue/db инжектятся —
+    бот собирает замыкание). Любой другой аргумент → статус."""
+    if arg == "off":
+        set_auto_enabled(db, False)
+        n = queue.cancel_auto()
+        return f"⏸ Авто-контент выключен. Отменено слотов: {n}.\nВключить: /auto on"
+    if arg == "on":
+        if not auto_cfgs:
+            return "❌ в config.yaml нет auto_tasks — включать нечего"
+        set_auto_enabled(db, True)
+        n = queue.uncancel_auto(now.strftime("%Y-%m-%d %H:%M"))
+        return (f"▶️ Авто-контент включён. Сегодня ещё слотов: {n} "
+                f"(новые дни создаст планировщик).\nВыключить: /auto off")
+
+    on = auto_enabled(db)
+    lines = ["▶️ Авто-контент: ВКЛЮЧЁН" if on else "⏸ Авто-контент: ВЫКЛЮЧЕН"]
+    if auto_cfgs:
+        per_day = sum(len(d.get("times") or []) * int(d.get("count") or 0)
+                      for d in auto_cfgs)
+        lines.append(f"Расписание ({per_day} серий/день):")
+        for d in auto_cfgs:
+            lines.append(f"— {d.get('id')}: {', '.join(d.get('times') or [])} "
+                         f"× {d.get('count')}")
+    else:
+        lines.append("В config.yaml нет auto_tasks.")
+    today = now.strftime("%Y-%m-%d")
+    cnt = Counter(s.status for s in queue.all_slots()
+                  if s.task_id.startswith("auto-") and s.due_at.startswith(today))
+    if cnt:
+        lines.append("Сегодня: " + ", ".join(f"{k} {v}" for k, v in sorted(cnt.items())))
+    lines.append("Выключить: /auto off" if on else "Включить: /auto on")
+    return "\n".join(lines)

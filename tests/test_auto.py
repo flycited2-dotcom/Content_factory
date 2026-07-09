@@ -1,7 +1,8 @@
-from datetime import date
+from datetime import date, datetime
 import pytest
 from content_factory.orchestrator.auto import (
-    auto_enabled, materialize_auto_tasks, maybe_materialize, set_auto_enabled)
+    auto_command, auto_enabled, materialize_auto_tasks, maybe_materialize,
+    set_auto_enabled)
 from content_factory.orchestrator.queue import TaskQueue
 from content_factory.orchestrator.tasks import Task
 
@@ -77,6 +78,47 @@ def test_maybe_materialize_on_materializes(tmp_path):
     tasks = maybe_materialize(CFG, date(2026, 7, 2), q, db)
     assert [t.id for t in tasks] == ["auto-ac-2026-07-02"]
     assert len(q.all_slots()) == 2
+
+
+def _q_with_auto(tmp_path):
+    q = TaskQueue(tmp_path / "q.db")
+    materialize_auto_tasks(CFG, date(2026, 7, 2), q)
+    return q
+
+
+def test_auto_command_status_off_by_default(tmp_path):
+    q = _q_with_auto(tmp_path)
+    txt = auto_command(None, CFG, q, tmp_path / "s.db", datetime(2026, 7, 2, 9, 0))
+    assert "ВЫКЛЮЧЕН" in txt and "/auto on" in txt
+    assert "ac: 10:00, 14:00 × 2" in txt                    # расписание из конфига
+    assert "pending 2" in txt                               # слоты сегодня
+
+
+def test_auto_command_off_flags_and_cancels(tmp_path):
+    q = _q_with_auto(tmp_path)
+    db = tmp_path / "s.db"
+    set_auto_enabled(db, True)
+    txt = auto_command("off", CFG, q, db, datetime(2026, 7, 2, 9, 0))
+    assert "выключен" in txt and "Отменено слотов: 2" in txt
+    assert auto_enabled(db) is False
+    assert all(s.status == "cancelled" for s in q.all_slots())
+
+
+def test_auto_command_on_resurrects_only_future(tmp_path):
+    q = _q_with_auto(tmp_path)
+    db = tmp_path / "s.db"
+    auto_command("off", CFG, q, db, datetime(2026, 7, 2, 9, 0))
+    txt = auto_command("on", CFG, q, db, datetime(2026, 7, 2, 12, 0))   # 10:00 уже прошло
+    assert "включён" in txt and "Сегодня ещё слотов: 1" in txt
+    assert auto_enabled(db) is True
+    st = {s.due_at: s.status for s in q.all_slots()}
+    assert st == {"2026-07-02 10:00": "cancelled", "2026-07-02 14:00": "pending"}
+
+
+def test_auto_command_on_without_config(tmp_path):
+    q = TaskQueue(tmp_path / "q.db")
+    txt = auto_command("on", [], q, tmp_path / "s.db", datetime(2026, 7, 2, 9, 0))
+    assert "❌" in txt                                       # включать нечего
 
 
 def test_materialize_invalid_config_raises(tmp_path):
