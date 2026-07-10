@@ -136,7 +136,13 @@ def main():
             _alert(f"⚠️ Превью «{item.name[:60]}» не отправилось: {res.error}")
         return bool(res.ok)
 
+    # Дозревшие отложенные позиции снимаем ДО тика (после — уже research);
+    # владелец должен видеть старт «задачи к 9:00», а не тишину (2026-07-10)
+    starting = store.due_scheduled()
     stats = tick(store, submit_research, read_job, submit_card, preview)
+    if starting:
+        _alert(f"⏳ Стартовала отложенная генерация: {len(starting)} позиций — "
+               f"превью будут приходить по мере готовности. Статус: /excel")
     if stats["failed"]:
         fails = "\n".join(f"— {i.name[:60]}: {i.error}" for i in store.by_status("failed")[-5:])
         _alert(f"❌ Выпали из конвейера прайса ({stats['failed']}):\n{fails}")

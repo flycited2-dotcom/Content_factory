@@ -83,6 +83,27 @@ class ExcelStore:
                              "ORDER BY ts", args).fetchall()
         return [self._row(r) for r in rows]
 
+    def _sched_rows(self, cmp: str, now: float | None) -> list[dict]:
+        with self._c() as c:
+            rows = c.execute("SELECT brand, model, name, due_at FROM excel_items "
+                             "WHERE status='new' AND due_at IS NOT NULL "
+                             f"AND due_at {cmp} ? ORDER BY due_at",
+                             (now if now is not None else time.time(),)).fetchall()
+        return [{"brand": r[0], "model": r[1], "name": r[2], "due_at": r[3]}
+                for r in rows]
+
+    def scheduled(self, now: float | None = None) -> list[dict]:
+        """new-позиции с due_at в будущем (расписание /task) — для /excel:
+        by_status('new') их прячет от тика, и в статусе они были невидимы
+        («полный вакуум информации», жалоба 2026-07-10)."""
+        return self._sched_rows(">", now)
+
+    def due_scheduled(self, now: float | None = None) -> list[dict]:
+        """Дозревшие отложенные new-позиции — их заберёт ближайший тик; excel_run
+        по этому списку шлёт владельцу «стартовала отложенная генерация» (после
+        тика они уже research → алерт одноразовый)."""
+        return self._sched_rows("<=", now)
+
     def update(self, key: str, **fields) -> None:
         sets = ", ".join(f"{k}=?" for k in fields)
         with self._c() as c:

@@ -145,3 +145,29 @@ def test_preview_caption_escapes_html():
     assert "<VT-7032" not in cap and "&lt;VT-7032 BN&gt;" in cap
     assert "<blockquote>💎 <b>995 ₽</b></blockquote>" in cap
     assert "&lt;стекло&gt;" in cap
+
+
+# ── видимость расписания (жалоба 2026-07-10: «полный вакуум информации» —
+# запланированные /task-позиции невидимы в /excel, by_status('new') их прячет) ──
+def test_scheduled_returns_future_items_sorted(tmp_path):
+    from content_factory.orchestrator.excel_pipeline import ExcelStore
+    es = ExcelStore(tmp_path / "s.db")
+    es.add_items([("excel|a|1", "A", "1", "Товар A1", 100)], due_at=2000.0)
+    es.add_items([("excel|b|2", "B", "2", "Товар B2", 200)], due_at=1500.0)
+    es.add_items([("excel|c|3", "C", "3", "Товар C3", 300)])          # без расписания
+    sched = es.scheduled(now=1000.0)
+    assert [s["brand"] for s in sched] == ["B", "A"]                  # по due_at
+    assert sched[0]["due_at"] == 1500.0
+    assert es.scheduled(now=2500.0) == []                             # все дозрели
+
+
+def test_due_scheduled_returns_matured_only(tmp_path):
+    from content_factory.orchestrator.excel_pipeline import ExcelStore
+    es = ExcelStore(tmp_path / "s.db")
+    es.add_items([("excel|a|1", "A", "1", "Товар A1", 100)], due_at=2000.0)
+    es.add_items([("excel|b|2", "B", "2", "Товар B2", 200)], due_at=1500.0)
+    es.add_items([("excel|c|3", "C", "3", "Товар C3", 300)])          # без расписания
+    due = es.due_scheduled(now=1600.0)
+    assert [d["brand"] for d in due] == ["B"]                         # дозрел только B
+    es.update("excel|b|2", status="research")                         # тик забрал
+    assert es.due_scheduled(now=1600.0) == []                         # алерт одноразовый

@@ -344,3 +344,17 @@ def test_markup_fn_db_sources_and_listing(tmp_path):
     assert "❌" in fn("noexist", 5)                        # ни БД-источник, ни xlsx
     fn("breeze", 0)                                        # 0 = убрать (как в excel)
     assert markup_overrides(tmp_path / "s.db") == {"*": 8.0}
+
+
+def test_excel_fn_shows_scheduled_items_with_start_time(tmp_path):
+    # «полный вакуум информации» (2026-07-10): /task-позиции с due_at в будущем
+    # были невидимы в /excel — by_status('new') их прячет от тика
+    from content_factory.orchestrator.excel_pipeline import ExcelStore
+    import time as _t
+    es = ExcelStore(tmp_path / "state.db")
+    es.add_items([("excel|midea|x", "Midea", "X", "СВЧ Midea X", 7000)],
+                 due_at=_t.time() + 7200)
+    _, _, excel_fn = botrun.make_find_pick_fns(tmp_path / "state.db", tmp_path)
+    text = excel_fn()
+    assert "Запланировано: 1" in text
+    assert "старт" in text

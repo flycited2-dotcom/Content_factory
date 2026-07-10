@@ -174,6 +174,12 @@ def make_find_pick_fns(state_db, prices_dir):
         lines = [f"Конвейер прайса: 🆕 {counts['new']} · 🔎 research {counts['research']} · "
                  f"🎨 card {counts['card']} · 👀 превью {counts['preview']} · "
                  f"❌ failed {counts['failed']}"]
+        # отложенные /task-позиции by_status('new') прячет от тика — без этой
+        # строки они невидимы в статусе («вакуум информации», 2026-07-10)
+        sched = store.scheduled()
+        if sched:
+            first = datetime.fromtimestamp(sched[0]["due_at"]).strftime("%d.%m %H:%M")
+            lines.append(f"⏰ Запланировано: {len(sched)} (старт генерации {first})")
         # секции с разделителями, ошибки — первой строкой (многострочные Call log
         # Playwright сливали статус в нечитаемую простыню — жалоба 2026-07-07)
         for s, mark, title in (("research", "🔎", "На research"),
