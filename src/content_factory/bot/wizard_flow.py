@@ -137,6 +137,10 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
                 [{"text": "📎 Фото заново", "callback_data": "wizard:redo_photo"},
                  {"text": "📝 УТП заново", "callback_data": "wizard:redo_utp"}],
                 *_CONFIRM_KB["inline_keyboard"]]
+        if st.candidates:                  # наценка/скидка партии на лету
+            kb["inline_keyboard"] = [
+                [{"text": "💹 Наценка партии", "callback_data": "wizard:markup"}],
+                *kb["inline_keyboard"]]
         return WizardReply(
             f"Категория: {st.category or '—'}\nПозиций: {n}\nВыгрузка: {when}\n"
             f"Фото: {photo} · УТП: {utp}\n\nПодтвердить постановку в очередь?",
@@ -196,6 +200,22 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
             key = "manual|" + re.sub(r"\s+", " ", name.lower()).strip()[:80]
             store.set_pick(chat_id, [(key, "", name, name, int(digits))])
             return _time_prompt()
+
+        if st.step == "awaiting_markup":
+            # ±проценты для всей партии: -10 скидка, +5 наценка (…90 сохраняем)
+            from content_factory.pricing.pricing import round_up_90
+            try:
+                pct = float(text.replace(",", ".").replace("%", ""))
+            except ValueError:
+                return WizardReply("❌ только число со знаком: -10 скидка, "
+                                   "+5 наценка", _CANCEL_KB)
+            cands = [(k, b, m, n, round_up_90(p * (1 + pct / 100)))
+                     for k, b, m, n, p in (tuple(c) for c in st.candidates or [])]
+            store.update_prices(chat_id, cands)
+            sign = f"{'+' if pct > 0 else ''}{pct:g}%"
+            reply = _confirm_prompt(store.snapshot(chat_id))
+            return WizardReply(f"💹 применено {sign} ко всей партии.\n\n" + reply.text,
+                               reply.markup)
 
         if st.step == "awaiting_pick":
             if text.lower() in ("все", "всё", "all"):
@@ -330,6 +350,11 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
         if action == "skip_utp" and st.step == "awaiting_utp":
             store.set_utp(chat_id, None)
             return _confirm_prompt(store.snapshot(chat_id))
+        if action == "markup" and st.step == "awaiting_confirm":
+            store.to_markup(chat_id)
+            return WizardReply("💹 Наценка/скидка на всю партию — ответным "
+                               "сообщением, число со знаком: -10 скидка, +5 наценка.",
+                               {"force_reply": True, "input_field_placeholder": "-5"})
         if action == "redo_photo" and st.step == "awaiting_confirm":
             store.set_time(chat_id, None)              # назад на шаг фото («сейчас»)
             return WizardReply("📎 Пришлите новое фото (заменит прежнее) "

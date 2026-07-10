@@ -368,3 +368,35 @@ def test_confirm_submit_failure_keeps_item_out_of_research(tmp_path):
         hcb2("1", "wizard:confirm")                # _wizard_safe ловит выше, в боте
     es = ExcelStore(tmp_path / "state2.db")
     assert es.by_status("new") == []               # товар НЕ утёк в research-путь
+
+
+def test_batch_markup_from_confirm(tmp_path):
+    # владелец 2026-07-09: «не было выбора наценки/скидки при постановке —
+    # хочу чтобы карточка летела сразу интересная»
+    start, handle_text, _, handle_callback, _, store = _flow(tmp_path)
+    start("1")
+    handle_text("1", "телевизоры")
+    handle_text("1", "1")                                 # MIU H32 · 8650 ₽
+    r = handle_text("1", "завтра 9:00")
+    assert "wizard:markup" in str(r.markup)               # кнопка на подтверждении
+    r = handle_callback("1", "wizard:markup")
+    assert r.markup.get("force_reply") is True            # ввод ±числа
+    r = handle_text("1", "-10")
+    assert "Подтвердить" in r.text                        # снова подтверждение
+    (_, _, _, _, price), = store.snapshot("1").candidates
+    assert price == 7790                                  # 8650 × 0.9 → …90
+    assert store.snapshot("1").step == "awaiting_confirm"
+    r = handle_text("1", "ещё раз")                       # мусор на шаге confirm
+    assert "жду не текст" in r.text
+
+
+def test_batch_markup_bad_input_reasks(tmp_path):
+    start, handle_text, _, handle_callback, _, store = _flow(tmp_path)
+    start("1")
+    handle_text("1", "телевизоры")
+    handle_text("1", "все")
+    handle_text("1", "завтра 9:00")
+    handle_callback("1", "wizard:markup")
+    r = handle_text("1", "дорого")
+    assert "❌" in r.text
+    assert store.snapshot("1").step == "awaiting_markup"

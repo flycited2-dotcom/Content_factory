@@ -12,7 +12,7 @@ from pathlib import Path
 
 STEPS = ("awaiting_category", "awaiting_pick", "awaiting_list", "awaiting_time",
          "awaiting_photo", "awaiting_utp", "awaiting_confirm",
-         "awaiting_manual_name", "awaiting_manual_price")
+         "awaiting_manual_name", "awaiting_manual_price", "awaiting_markup")
 
 
 @dataclass
@@ -69,6 +69,19 @@ class WizardStore:
         with self._c() as c:
             c.execute("UPDATE wizard_state SET candidates_json=?, step=? WHERE chat_id=?",
                       (json.dumps(picked, ensure_ascii=False), "awaiting_time", chat_id))
+
+    def to_markup(self, chat_id: str) -> None:
+        """Кнопка «💹 Наценка партии» на подтверждении — ждём ±проценты."""
+        with self._c() as c:
+            c.execute("UPDATE wizard_state SET step=? WHERE chat_id=?",
+                      ("awaiting_markup", chat_id))
+
+    def update_prices(self, chat_id: str, candidates: list) -> None:
+        """Пересчитанные цены партии → обратно на подтверждение."""
+        with self._c() as c:
+            c.execute("UPDATE wizard_state SET candidates_json=?, step=? WHERE chat_id=?",
+                      (json.dumps(candidates, ensure_ascii=False),
+                       "awaiting_confirm", chat_id))
 
     def to_manual(self, chat_id: str) -> None:
         """Ветка «свой товар» (не из прайсов/остатков) — ждём название."""
