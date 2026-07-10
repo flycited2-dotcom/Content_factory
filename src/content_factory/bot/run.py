@@ -45,10 +45,12 @@ def make_regen_fn(card_jobs_db, state_db):
     """regen_fn(awaiting) → убрать карточку для перегенерации: удалить файл и запись
     CardJobStore (ключ store = имя файла карточки без расширения). После этого серия
     снова «без карточки» — cf-cards пересабмитит её агенту на ближайшем тике.
-    Excel-товар (ключ excel|*) дополнительно возвращается в status='new' — иначе
-    он оставался в preview, а excel-тик пересобирает только new/research/card,
-    и перегенерация не происходила НИКОГДА (грабля 2026-07-06); research возьмётся
-    из кэша (research_cache), так что сразу пойдёт новая карточка."""
+    Товар конвейера дополнительно возвращается в status='new' — иначе он оставался
+    в preview, а excel-тик пересобирает только new/research/card, и перегенерация
+    не происходила НИКОГДА (грабля 2026-07-06 для excel|*; 2026-07-10 та же — для
+    manual|*, поэтому UPDATE без фильтра по префиксу: ключей серий в excel_items
+    нет, для них запрос — no-op); research возьмётся из кэша (research_cache),
+    так что сразу пойдёт новая карточка."""
     def regen_fn(a) -> bool:
         p = Path(a.card_path or "")
         try:
@@ -60,13 +62,12 @@ def make_regen_fn(card_jobs_db, state_db):
                 c.execute("DELETE FROM card_jobs WHERE key=?", (p.stem,))
         except sqlite3.OperationalError:
             pass                                   # store ещё не создан — нечего чистить
-        if (a.key or "").startswith("excel|"):
-            try:
-                with sqlite3.connect(state_db) as c:
-                    c.execute("UPDATE excel_items SET status='new', research_job=NULL, "
-                              "card_job=NULL, tries=0 WHERE key=?", (a.key,))
-            except sqlite3.OperationalError:
-                pass                               # таблицы ещё нет — не excel-путь
+        try:
+            with sqlite3.connect(state_db) as c:
+                c.execute("UPDATE excel_items SET status='new', research_job=NULL, "
+                          "card_job=NULL, tries=0 WHERE key=?", (a.key or "",))
+        except sqlite3.OperationalError:
+            pass                                   # таблицы ещё нет — не excel-путь
         return True
     return regen_fn
 

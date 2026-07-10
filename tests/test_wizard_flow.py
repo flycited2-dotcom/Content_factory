@@ -150,7 +150,8 @@ def test_scheduled_time_skips_photo_and_sets_due_at(tmp_path):
     r = handle_text("1", "завтра 9:00")                # расписание текстом
     assert "Подтвердить" in r.text and "08.07 09:00" in r.text   # фото/УТП пропущены
     r = handle_callback("1", "wizard:confirm")
-    assert "запланировано" in r.text
+    assert "фото к 08.07 09:00" in r.text              # срок владельца
+    assert "генерация с" in r.text                     # старт с упреждением
 
     es = ExcelStore(tmp_path / "state.db")
     # часы инжектим (NOW), иначе тест ломается, как только реальный день > due
@@ -159,7 +160,8 @@ def test_scheduled_time_skips_photo_and_sets_due_at(tmp_path):
     import sqlite3
     with sqlite3.connect(tmp_path / "state.db") as c:
         due = c.execute("SELECT due_at FROM excel_items").fetchone()[0]
-    assert due == datetime(2026, 7, 8, 9, 0).timestamp()
+    # тик стартует с упреждением (час на 1 позицию), чтобы фото были К сроку
+    assert due == datetime(2026, 7, 8, 8, 0).timestamp()
 
 
 def test_manual_multiline_list_still_works(tmp_path):
