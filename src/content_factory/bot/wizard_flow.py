@@ -292,6 +292,15 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
             for key, brand, model, name, price in rows:
                 jobs.append((key, submit_card(brand, model, st.utp_text or "",
                                               str(photo))))
+        # УТП владельца — в research_cache (source='manual', research его не
+        # перезапишет): превью строит «Ключевые особенности» из кэша, и для
+        # ручного товара со своим УТП подпись выходила ПУСТОЙ (2026-07-10,
+        # сплит Daicond — на карточке УТП есть, в подписи нет)
+        if st.utp_text:
+            for key, brand, model, name, price in rows:
+                excel_store.cache_put(
+                    f"{brand.strip().lower()}|{model.strip().lower()}",
+                    st.utp_text, None, source="manual")
         start_at = None
         if st.due_at is not None:
             lead = max(TASK_LEAD_SECONDS, _LEAD_PER_ITEM_SECONDS * len(rows))

@@ -76,3 +76,42 @@ def test_regen_resets_manual_item_to_new(tmp_path):
         "SELECT status, due_at FROM excel_items").fetchone()
     assert status == "new"
     assert not card.exists()
+
+
+def test_manual_item_with_own_utp_fills_preview_cache(tmp_path):
+    """Свой товар с СВОИМ фото и УТП: УТП уходил только агенту (на карточку),
+    а research_cache оставался пуст → превью строило «Ключевые особенности»
+    из кэша и подпись выходила ПУСТОЙ (2026-07-10, сплит Daicond)."""
+    start, handle_text, handle_photo, handle_callback, calls, _ = _flow(tmp_path)
+    start("1")
+    handle_callback("1", "wizard:manual")
+    handle_text("1", "Сплит-система Daicond серии ODYS, DN-OS09NW")
+    handle_text("1", "12550")
+    handle_callback("1", "wizard:time_now")
+    handle_photo("1", b"IMG")
+    handle_text("1", "✓ Wi-Fi\n✓ Режим TURBO")          # свой УТП
+    handle_callback("1", "wizard:confirm")
+    assert calls, "карточка должна уйти агенту (фото-override)"
+
+    es = ExcelStore(tmp_path / "state.db")
+    cached = es.cache_get("|сплит-система daicond серии odys, dn-os09nw")
+    assert cached is not None, "УТП владельца должен лечь в research_cache"
+    assert "TURBO" in cached[0]
+
+
+def test_regen_works_after_reject(tmp_path):
+    """«Отклонить» не должен хоронить перегенерацию: 🔄 по отклонённому превью
+    обязан вернуть товар в конвейер (кейс ларя Hyundai, 2026-07-10)."""
+    from content_factory.bot import commands as cmds
+    from content_factory.orchestrator.confirm_store import ConfirmStore
+    cs = ConfirmStore(tmp_path / "s.db")
+    key = "manual|морозильный ларь hyundai ch1002"
+    cs.add(key, "@chan", str(tmp_path / "card.png"), "cap")
+    cs.mark(key, "rejected")
+
+    regen_calls = []
+    out = cmds.handle_command(f"/regen {key}", queue=None,
+                              confirm_store=cs, regen_fn=lambda a: regen_calls.append(a.key))
+    assert "перегенерации" in out
+    assert regen_calls == [key]
+    assert cs.get(key).status == "regen"
