@@ -85,7 +85,9 @@ def test_survives_reopening_same_db(tmp_path):
 
 
 def test_migrates_old_table_without_new_columns(tmp_path):
-    # прод-таблица wizard_state существует без candidates_json/due_at — ALTER
+    # прод-таблица wizard_state существует без candidates_json/due_at/ts — ALTER
+    # не падает; строка БЕЗ ts = брошенный до миграции диалог → протух (2026-07-10),
+    # а новый диалог в мигрированной таблице работает штатно
     import sqlite3
     db = tmp_path / "w.db"
     with sqlite3.connect(db) as c:
@@ -93,6 +95,8 @@ def test_migrates_old_table_without_new_columns(tmp_path):
                   "category TEXT, lines_json TEXT, photo_path TEXT, utp_text TEXT)")
         c.execute("INSERT INTO wizard_state(chat_id, step) VALUES('1', 'awaiting_category')")
     s = WizardStore(db)
+    assert s.snapshot("1") is None                     # legacy-строка протухла
+    s.start("1")
     st = s.snapshot("1")
     assert st.step == "awaiting_category" and st.due_at is None
 
