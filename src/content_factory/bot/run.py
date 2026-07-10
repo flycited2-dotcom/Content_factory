@@ -199,21 +199,22 @@ def make_price_fn(state_db, token: str, review_channel: str, parse_mode: str,
                   links, http=None):
     """price_fn(key, new_price) — ручная цена для превью на подтверждении
     (кнопка «💰 Изменить цену», запрос владельца 2026-07-07: акции на единичный
-    товар). Подпись обновляется, статус сбрасывается в pending, свежее превью
-    пересылается в ревью-канал со штатными кнопками. Только excel|* — у серий
-    кондиционеров цены линейкой, их не трогаем."""
+    товар; 2026-07-09 — и для серий БД: заголовочная цена задаёт коэффициент,
+    линейка сдвигается пропорционально). Подпись обновляется, статус сбрасывается
+    в pending, свежее превью пересылается в ревью-канал со штатными кнопками."""
     from content_factory.orchestrator.confirm_store import ConfirmStore
     from content_factory.orchestrator.excel_run import (
-        replace_price_in_caption, preview_markup, _money)
+        replace_price_in_caption, scale_prices_in_caption, preview_markup, _money)
 
     def price_fn(key: str, new_price: int) -> str:
-        if not key.startswith("excel|"):
-            return "❌ смена цены доступна только товарам из прайса (не сериям)"
         cs = ConfirmStore(state_db)
         a = cs.get(key)
         if a is None:
             return f"❌ нет превью на подтверждении: {key}"
-        caption = replace_price_in_caption(a.caption, new_price)
+        if key.startswith("excel|"):                     # единичный товар — одна цена
+            caption = replace_price_in_caption(a.caption, new_price)
+        else:                                            # серия — вся линейка ×k
+            caption = scale_prices_in_caption(a.caption, new_price)
         cs.add(key, a.channel, a.card_path, caption)     # upsert → снова pending
         kb = json.dumps(preview_markup(links.code_for(key)), ensure_ascii=False)
         res = publish_post(token, review_channel, a.card_path,

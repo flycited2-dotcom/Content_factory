@@ -49,6 +49,28 @@ def replace_price_in_caption(caption: str, new_price: int) -> str:
         f"<blockquote>💎 <b>{_money(new_price)}</b></blockquote>", caption)
 
 
+_ANY_PRICE_RE = re.compile(r"(\d[\d\s]*)\s*₽")
+_HEAD_PRICE_RE = re.compile(r"<blockquote>💎 <b>(?:от )?([\d\s]+)\s*₽</b></blockquote>")
+
+
+def scale_prices_in_caption(caption: str, new_price: int) -> str:
+    """Ручная цена для СЕРИИ (авто-превью, запрос владельца 2026-07-09): новая
+    заголовочная цена задаёт коэффициент, ВСЯ линейка «Модели и цены» сдвигается
+    пропорционально (окончания …90 сохраняются) — иначе «от X» разъедется с
+    линейкой. Нет заголовка/линейки — обычная замена одной цены."""
+    from content_factory.pricing.pricing import round_up_90
+    m = _HEAD_PRICE_RE.search(caption)
+    old_head = int(re.sub(r"\s", "", m.group(1))) if m else 0
+    if not old_head:
+        return replace_price_in_caption(caption, new_price)
+    k = new_price / old_head
+
+    def _sub(pm):
+        val = int(re.sub(r"\s", "", pm.group(1)))
+        return f"{_money(round_up_90(val * k))}"
+    return _ANY_PRICE_RE.sub(_sub, caption)
+
+
 def preview_markup(code: str) -> dict:
     """Кнопки превью excel-товара: публикация/отклонение/перегенерация + ручная
     цена. Общая для excel_run (первичное превью) и bot (переотправка после

@@ -57,21 +57,14 @@ def build_context(cfg, token: str, owner_chat: str, pub_state: PublishState,
         confirm_store.add(group.key, channel, card, caption)
         if not (token and review_to):
             return
-        # Превью в ревью-канал (или личку) с inline-кнопками ✅/❌/🔄 (тап вместо печати ключа).
-        ad, rd = f"approve:{group.key}", f"reject:{group.key}"
-        rg = f"regen:{group.key}"
-        if all(len(x.encode()) <= 64 for x in (ad, rd, rg)):    # лимит callback_data Telegram
-            kb = json.dumps({"inline_keyboard": [
-                [{"text": "✅ Опубликовать", "callback_data": ad},
-                 {"text": "❌ Отклонить", "callback_data": rd}],
-                [{"text": "🔄 Перегенерировать карточку", "callback_data": rg}]]},
-                ensure_ascii=False)
-            publish_post(token, review_to, card, f"{caption}\n\n— на подтверждение —",
-                         http=http, parse_mode=cfg.telegram.parse_mode, reply_markup=kb)
-        else:                                                   # длинный ключ → текстовый фолбэк
-            preview = f"{caption}\n\n— Подтвердить: /approve {group.key}\n— Отклонить: /reject {group.key}"
-            publish_post(token, review_to, card, preview, http=http,
-                         parse_mode=cfg.telegram.parse_mode)
+        # Превью в ревью-канал: общий preview_markup (✅/❌/🔄/💰 — владелец 2026-07-09:
+        # в авто-превью не было «Изменить цену»). Код через OrderLinks ≤64 байт всегда.
+        from content_factory.orchestrator.excel_run import preview_markup
+        from content_factory.publish.orders import OrderLinks
+        code = OrderLinks(cfg.state.db).code_for(group.key)
+        kb = json.dumps(preview_markup(code), ensure_ascii=False)
+        publish_post(token, review_to, card, f"{caption}\n\n— на подтверждение —",
+                     http=http, parse_mode=cfg.telegram.parse_mode, reply_markup=kb)
 
     def taken_keys():
         # анти-дубль: опубликованные + висящие на ревью/отклонённые (regen не блокируется)
