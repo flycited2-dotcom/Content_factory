@@ -46,8 +46,9 @@ def make_manual_photo_fn(state_db, links, confirm_store, regen_fn, photos_dir):
             return f"❌ позиции «{key}» нет в конвейере"
 
         photos_dir.mkdir(parents=True, exist_ok=True)
-        p = photos_dir / f"manual_{code}.jpg"
-        p.write_bytes(photo_bytes)
+        p = (photos_dir / f"manual_{code}.jpg").resolve()
+        p.write_bytes(photo_bytes)   # путь АБСОЛЮТНЫЙ: card_submit склеивает
+                                     # относительные с output_dir фотоагента
 
         cached = store.cache_get(_cache_key(item))
         utp = (cached[0] if cached else "") or ""
