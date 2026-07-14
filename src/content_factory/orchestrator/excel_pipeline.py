@@ -71,6 +71,13 @@ class ExcelStore:
         with self._c() as c:
             return {r[0] for r in c.execute("SELECT key FROM excel_items").fetchall()}
 
+    def get(self, key: str) -> ExcelItem | None:
+        with self._c() as c:
+            r = c.execute("SELECT key, brand, model, name, price, status, research_job, "
+                          "card_job, tries, error FROM excel_items WHERE key=?",
+                          (key,)).fetchone()
+        return self._row(r) if r else None
+
     def by_status(self, status: str, now: float | None = None) -> list[ExcelItem]:
         # new с due_at в будущем скрыты от тика (расписание /task); остальные
         # статусы расписание не фильтрует — товар уже в работе.

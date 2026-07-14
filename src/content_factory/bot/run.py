@@ -22,6 +22,7 @@ from content_factory.bot.order_flow import make_order_flow
 from content_factory.orchestrator.queue import TaskQueue
 from content_factory.orchestrator.confirm_store import ConfirmStore
 from content_factory.bot.commands import handle_command, handle_callback
+from content_factory.bot.manual_photo import make_manual_photo_fn
 from content_factory.bot.voice import transcribe_voice_bytes
 from content_factory.bot.cmd_input import (
     bare_arg_command, prompt_for, resolve_reply, PendingCmdStore)
@@ -514,6 +515,9 @@ def main():
     publish_fn = make_publish_fn(token, cfg.telegram.parse_mode, ps,
                                  order_bot=cfg.telegram.order_bot, links=links)
     regen_fn = make_regen_fn(cfg.state.card_jobs_db, cfg.state.db)
+    # фото ответом на превью → ручное фото товара (кэш manual) + перегенерация
+    manual_photo_fn = make_manual_photo_fn(
+        cfg.state.db, links, cs, regen_fn, Path(cfg.state.db).parent / "manual_photos")
     prices_dir = Path(cfg.state.db).parent / "prices"
     make_fn = make_make_fn(cfg.state.db, prices_dir)
     find_fn, pick_fn, excel_fn = make_find_pick_fns(cfg.state.db, prices_dir)
@@ -826,10 +830,19 @@ def main():
             if text.strip() == "/task":
                 _send_wizard_reply(chat, _wizard_safe(wizard_start, chat))
                 continue
-            # фото в визарде (шаг «приложить фото» — последний элемент = крупнее всех)
+            # фото в боте: ответ на превью = ручное фото товара (перегенерация
+            # карточки с реальным видом); иначе — шаг визарда «приложить фото»
             photos = msg.get("photo") or []
             if photos:
                 data = download_telegram_file(http, token, photos[-1].get("file_id"))
+                mp = manual_photo_fn(msg, data) if data is not None else None
+                if mp is not None:
+                    try:
+                        http.post(f"{TG_API}/bot{token}/sendMessage",
+                                  data={"chat_id": chat, "text": mp})
+                    except httpx.HTTPError:
+                        pass
+                    continue
                 wr = _wizard_safe(wizard_photo, chat, data) if data is not None else None
                 if wr is not None:
                     _send_wizard_reply(chat, wr)
