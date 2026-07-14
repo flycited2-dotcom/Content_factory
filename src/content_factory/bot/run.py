@@ -824,25 +824,32 @@ def main():
                 if r is not None:
                     _send_order_reply(chat, r)
                     continue
+            # Фото-ответ на превью = ручное фото товара — ДО фильтра «только личка»:
+            # превью живут в review-группе (chat != owner), поэтому проверяем
+            # АВТОРСТВО (from.id == owner), а не чат (грабля 2026-07-14: владелец
+            # ответил фото в review-группе — бот молча отсёк сообщение).
+            photos = msg.get("photo") or []
+            sender = str((msg.get("from") or {}).get("id", ""))
+            if photos and (not owner or sender == owner or chat == owner):
+                data = download_telegram_file(http, token, photos[-1].get("file_id"))
+                mp = manual_photo_fn(msg, data) if data is not None else None
+                if mp is not None:
+                    try:
+                        http.post(f"{TG_API}/bot{token}/sendMessage",
+                                  data={"chat_id": chat, "text": mp,
+                                        "reply_to_message_id": msg.get("message_id")})
+                    except httpx.HTTPError:
+                        pass
+                    continue
             if owner and chat != owner:                    # только владелец управляет ботом
                 continue
             # /task — старт визарда постановки задачи кнопками
             if text.strip() == "/task":
                 _send_wizard_reply(chat, _wizard_safe(wizard_start, chat))
                 continue
-            # фото в боте: ответ на превью = ручное фото товара (перегенерация
-            # карточки с реальным видом); иначе — шаг визарда «приложить фото»
-            photos = msg.get("photo") or []
+            # фото без reply на превью — шаг визарда «приложить фото»
             if photos:
                 data = download_telegram_file(http, token, photos[-1].get("file_id"))
-                mp = manual_photo_fn(msg, data) if data is not None else None
-                if mp is not None:
-                    try:
-                        http.post(f"{TG_API}/bot{token}/sendMessage",
-                                  data={"chat_id": chat, "text": mp})
-                    except httpx.HTTPError:
-                        pass
-                    continue
                 wr = _wizard_safe(wizard_photo, chat, data) if data is not None else None
                 if wr is not None:
                     _send_wizard_reply(chat, wr)
