@@ -9,18 +9,35 @@ from content_factory.cards_pipeline import (
 )
 
 
-def test_wake_agent_sets_start_flag_for_all_machines(tmp_path):
-    # бродкаст на все ключи (агент теперь на 2 машинах с адресными флагами:
-    # ноут слушает только agent_command_laptop — глобальный ключ его не будил)
+def test_wake_agent_sets_wake_flag_for_all_machines(tmp_path):
+    # бродкаст на все ключи, но команда 'wake' (не 'start'): вотчдог поднимает
+    # только упавшие running-дорожки, ручной стоп владельца не перебивается
+    # («жму стоп — он поднимает», 2026-07-15)
     db = str(tmp_path / "q.db")
     sqlite3.connect(db).close()
     wake_agent(db)
     con = sqlite3.connect(db)
     flags = dict(con.execute("SELECT key, value FROM flags").fetchall())
     con.close()
-    assert flags == {"agent_command": "start",
-                     "agent_command_laptop": "start",
-                     "agent_command_desktop": "start"}
+    assert flags == {"agent_command": "wake",
+                     "agent_command_laptop": "wake",
+                     "agent_command_desktop": "wake"}
+
+
+def test_wake_agent_does_not_clobber_pending_owner_command(tmp_path):
+    # владелец нажал «Стоп», вотчдог ещё не прочитал флаг — авто-wake не должен
+    # затереть команду (иначе стоп теряется в гонке)
+    db = str(tmp_path / "q.db")
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE flags (key TEXT PRIMARY KEY, value TEXT)")
+    con.execute("INSERT INTO flags VALUES ('agent_command_desktop', 'stop')")
+    con.commit(); con.close()
+    wake_agent(db)
+    con = sqlite3.connect(db)
+    flags = dict(con.execute("SELECT key, value FROM flags").fetchall())
+    con.close()
+    assert flags["agent_command_desktop"] == "stop"       # не затёрт
+    assert flags["agent_command_laptop"] == "wake"        # остальные — wake
 
 
 def _make_queue_db(tmp_path, rows):

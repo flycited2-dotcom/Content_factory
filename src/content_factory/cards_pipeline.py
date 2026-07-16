@@ -67,15 +67,16 @@ def _query_jobs(queue_db: str, input_filenames: list[str], status: str) -> dict[
 
 
 def wake_agent(queue_db: str) -> None:
-    """Сигнал WatchDog на локальных ПК: запустить агента (он обработает очередь).
-    Тот же механизм, что кнопка «🚀 Запустить агента». Бродкаст на ВСЕ ключи:
-    ноут слушает только agent_command_laptop (адресные флаги 2026-07-05) —
-    один глобальный ключ его не будил, очередь могла ждать агента вечно."""
+    """Автопробуждение вотчдогов при постановке задач. Бродкаст на ВСЕ ключи
+    (ноут слушает только agent_command_laptop, 2026-07-05). Команда 'wake', НЕ
+    'start': вотчдог поднимает только упавшие running-дорожки — ручной стоп
+    владельца не перебивается (2026-07-15). OR IGNORE: если владелец уже нажал
+    кнопку и её команда ждёт чтения — не затирать (гонка со стопом)."""
     con = sqlite3.connect(queue_db, timeout=10)
     try:
         con.execute("CREATE TABLE IF NOT EXISTS flags (key TEXT PRIMARY KEY, value TEXT)")
         for key in ("agent_command", "agent_command_laptop", "agent_command_desktop"):
-            con.execute("INSERT OR REPLACE INTO flags (key, value) VALUES (?, 'start')",
+            con.execute("INSERT OR IGNORE INTO flags (key, value) VALUES (?, 'wake')",
                         (key,))
         con.commit()
     finally:
