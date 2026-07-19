@@ -1,7 +1,8 @@
-# Деплой Контент-завода (VPS 213.109.202.45)
+# Деплой Контент-завода (VPS 212.116.115.150)
 
-Сервер: HestiaCP/Docker, тот же VPS, что avito-bridge и фотоагент (ritualb2b на `127.0.0.1:8765`).
-Целевой каталог: `/opt/content-factory`. SSH: `ssh -i ~/.ssh/climat_simf_deploy root@213.109.202.45`.
+Сервер: тот же VPS, что фотоагент (ritualb2b на `127.0.0.1:8765`); переезд 2026-07-19 —
+старый 213.109.202.45 выключен (сервисы там disabled, не чинить).
+Целевой каталог: `/opt/content-factory`. SSH: `ssh -i ~/.ssh/id_ritualb2b_claude root@212.116.115.150`.
 Деструктив/внешнее (systemd, реальная отправка в канал) — с подтверждения владельца.
 
 ## 0. Предпосылки
@@ -14,8 +15,8 @@
 ```bash
 cd content-factory
 tar -czf /tmp/cf.tgz src config deploy pyproject.toml requirements.txt
-ssh -i ~/.ssh/climat_simf_deploy root@213.109.202.45 'mkdir -p /opt/content-factory && cat > /tmp/cf.tgz' < /tmp/cf.tgz
-ssh -i ~/.ssh/climat_simf_deploy root@213.109.202.45 'cd /opt/content-factory && tar -xzf /tmp/cf.tgz'
+ssh -i ~/.ssh/id_ritualb2b_claude root@212.116.115.150 'mkdir -p /opt/content-factory && cat > /tmp/cf.tgz' < /tmp/cf.tgz
+ssh -i ~/.ssh/id_ritualb2b_claude root@212.116.115.150 'cd /opt/content-factory && tar -xzf /tmp/cf.tgz'
 ```
 (Проверять, что `/tmp/cf.tgz` существует локально — иначе цепочка с `&&` прервётся до `tar -xzf`.)
 
