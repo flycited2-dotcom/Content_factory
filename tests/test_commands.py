@@ -359,6 +359,22 @@ def test_auto_unavailable_without_fn(tmp_path):
     assert "недоступен" in handle_command("/auto", q)
 
 
+def test_generation_routed_to_master_switch(tmp_path):
+    q = TaskQueue(tmp_path / "q.db")
+    calls = []
+    out = handle_command(
+        "/generation off", q,
+        generation_fn=lambda arg: calls.append(arg) or "MASTER OFF",
+    )
+    assert out == "MASTER OFF" and calls == ["off"]
+
+
+def test_status_shows_generation_master_switch(tmp_path):
+    q = TaskQueue(tmp_path / "q.db")
+    out = handle_command("/status", q, generation_state_fn=lambda: False)
+    assert "Генерация" in out and "/generation on" in out
+
+
 def test_status_shows_auto_line(tmp_path):
     q = TaskQueue(tmp_path / "q.db")
     out = handle_command("/status", q, auto_state_fn=lambda: False)

@@ -24,6 +24,7 @@ HELP = ("Команды:\n"
         "/plan <N> <категория> <завтра|сегодня|ДАТА> <ЧЧ:ММ[,ЧЧ:ММ]> "
         "[mode=] [source=] [cat=] [confirm] [channel=] [id=]\n"
         "/status — что в очереди   /cancel <id> — отменить\n"
+        "/generation — МАСТЕР генерации, /generation on|off — включить/выключить\n"
         "/auto — авто-контент: статус, /auto on|off — включить/выключить\n"
         "/pending — посты на подтверждении   /approve <key> — опубликовать   "
         "/reject <key> — отклонить   /regen <key> — перегенерировать карточку   "
@@ -102,11 +103,15 @@ def parse_plan(text: str, today: date | None = None, keyword_filters: dict | Non
                 channel=channel, confirm=confirm)
 
 
-def _status(queue, auto_state_fn=None) -> str:
+def _status(queue, auto_state_fn=None, generation_state_fn=None) -> str:
     """Ожидающие задачи — поимённо, выполненные — одной сводкой: раньше done-слоты
     прошлых дней перечислялись бесконечной простынёй (жалоба владельца 2026-07-07).
     auto_state_fn() -> bool | None — строка автомата (None = авто не настроено)."""
-    def _with_auto(body: str) -> str:
+    def _with_switches(body: str) -> str:
+        generation_on = generation_state_fn() if generation_state_fn else None
+        if generation_on is not None:
+            body += ("\n🎛 Генерация: ▶️ включена (/generation off)" if generation_on
+                     else "\n🎛 Генерация: ⏸ выключена (/generation on)")
         auto_on = auto_state_fn() if auto_state_fn else None
         if auto_on is not None:
             body += ("\n🤖 Авто-контент: ▶️ включён (/auto off)" if auto_on
@@ -115,7 +120,7 @@ def _status(queue, auto_state_fn=None) -> str:
 
     slots = queue.all_slots()
     if not slots:
-        return _with_auto("Очередь пуста.")
+        return _with_switches("Очередь пуста.")
     by_task: dict[str, Counter] = {}
     for s in slots:
         by_task.setdefault(s.task_id, Counter())[s.status] += 1
@@ -131,7 +136,7 @@ def _status(queue, auto_state_fn=None) -> str:
     if done_slots:
         lines.append(f"✅ Выполнено: {done_tasks} задач ({done_slots} слотов) — "
                      f"свёрнуто, детали в журнале превью")
-    return _with_auto("\n".join(lines) if lines else "Очередь пуста.")
+    return _with_switches("\n".join(lines) if lines else "Очередь пуста.")
 
 
 def parse_due_at(text: str, now) -> float | None:
@@ -198,7 +203,8 @@ def handle_command(text: str, queue, today: date | None = None, held_provider=No
                    confirm_store=None, publish_fn=None, publish_state=None,
                    regen_fn=None, make_fn=None, find_fn=None, pick_fn=None,
                    excel_fn=None, price_fn=None, sources_fn=None, markup_fn=None,
-                   auto_fn=None, auto_state_fn=None) -> str:
+                   auto_fn=None, auto_state_fn=None,
+                   generation_fn=None, generation_state_fn=None) -> str:
     """Маршрутизация команды → действие → текст ответа владельцу.
     confirm_store/publish_fn/publish_state нужны для confirm-пилота (/approve, /reject, /pending).
     publish_fn(awaiting) -> PublishResult публикует подтверждённый пост в канал.
@@ -320,6 +326,10 @@ def handle_command(text: str, queue, today: date | None = None, held_provider=No
         extra = ", подтверждение ВКЛ" if t.confirm else ""
         return (f"✅ Задача {t.id}: {t.count} серий/слот, слотов {len(t.schedule)}, "
                 f"режим {t.mode}{extra}")
+    if cmd.startswith("/generation"):
+        if not generation_fn:
+            return "❌ мастер-рубильник генерации недоступен"
+        return generation_fn(" ".join(parts[1:]).lower() if len(parts) > 1 else None)
     if cmd.startswith("/auto"):
         # выключатель и редактор авто-контента: /auto [on|off|times …|count …|
         # cats …|reset]; логика — orchestrator/auto.py
@@ -327,7 +337,7 @@ def handle_command(text: str, queue, today: date | None = None, held_provider=No
             return "❌ авто-контент недоступен"
         return auto_fn(" ".join(parts[1:]).lower() if len(parts) > 1 else None)
     if cmd.startswith("/status"):
-        return _status(queue, auto_state_fn)
+        return _status(queue, auto_state_fn, generation_state_fn)
     if cmd.startswith("/cancel"):
         parts = text.split()
         if len(parts) < 2:

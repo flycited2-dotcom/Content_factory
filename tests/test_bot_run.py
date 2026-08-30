@@ -315,6 +315,7 @@ def test_setup_bot_commands_includes_auto():
     path, owner_body = reqs[0]
     assert path == "/botTOK/setMyCommands"
     assert '"command": "auto"' in owner_body           # выключатель автомата в меню
+    assert '"command": "generation"' in owner_body     # мастер-рубильник генерации
     assert '"command": "status"' in owner_body
     _, default_body = reqs[1]
     assert "commands=[]" in default_body               # у клиентов меню пустое
@@ -330,6 +331,13 @@ def test_auto_markup_toggle_button():
     flat = str(botrun.auto_markup(True))
     for cb in ("auto:ask:times", "auto:ask:count", "auto:ask:cats", "auto:reset"):
         assert cb in flat
+
+
+def test_generation_markup_toggle_button():
+    on = botrun.generation_markup(True)["inline_keyboard"][0][0]
+    assert on["callback_data"] == "generation:off" and "Выключить" in on["text"]
+    off = botrun.generation_markup(False)["inline_keyboard"][0][0]
+    assert off["callback_data"] == "generation:on" and "Включить" in off["text"]
 
 
 def test_markup_fn_db_sources_and_listing(tmp_path):

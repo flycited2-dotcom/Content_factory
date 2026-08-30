@@ -22,6 +22,7 @@ from content_factory.orchestrator.confirm_store import ConfirmStore
 from content_factory.orchestrator.card_submit import make_card_submitter, slug as _slug
 from content_factory.publish.orders import OrderLinks
 from content_factory.publish.telegram import publish_post, send_message
+from content_factory.orchestrator.generation import generation_enabled
 
 DIVIDER = "═" * 26
 
@@ -84,6 +85,9 @@ def preview_markup(code: str) -> dict:
 
 def main():
     cfg = load_config(Path("config/config.yaml"))
+    if not generation_enabled(cfg.state.db):
+        print("excel: generation disabled by master switch")
+        return
     store = ExcelStore(cfg.state.db)
     api = config("FOTOGEN_API_URL", cfg.fotogen.api_url).rstrip("/")
     headers = {"x-agent-token": config("FOTOGEN_API_TOKEN")}

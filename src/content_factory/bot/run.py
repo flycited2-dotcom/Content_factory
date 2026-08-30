@@ -470,6 +470,14 @@ def auto_markup(enabled: bool) -> dict:
     ]}
 
 
+def generation_markup(enabled: bool) -> dict:
+    """Одна крупная кнопка мастер-рубильника под /generation и /status."""
+    toggle = ({"text": "⏸ Выключить генерацию", "callback_data": "generation:off"}
+              if enabled else
+              {"text": "▶️ Включить генерацию", "callback_data": "generation:on"})
+    return {"inline_keyboard": [[toggle]]}
+
+
 def setup_bot_commands(http, token: str, owner: str) -> None:
     """setMyCommands: управляющее меню (/task /make /find …) видит ТОЛЬКО владелец
     (scope chat). У всех остальных — клиентов, пришедших по кнопке «Заказать» —
@@ -484,6 +492,7 @@ def setup_bot_commands(http, token: str, owner: str) -> None:
         {"command": "excel", "description": "Статус конвейера прайса"},
         {"command": "pending", "description": "Посты на подтверждении"},
         {"command": "status", "description": "Что в очереди"},
+        {"command": "generation", "description": "МАСТЕР генерации: статус, вкл/выкл"},
         {"command": "auto", "description": "Авто-контент: статус, вкл/выкл"},
     ]
     try:
@@ -528,6 +537,18 @@ def main():
                              cfg.telegram.parse_mode, links, http=http)
     sources_fn = make_sources_fn(prices_dir)
     markup_fn = make_markup_fn(prices_dir, cfg.state.db)
+
+    from content_factory.orchestrator.generation import (
+        generation_command, generation_enabled,
+    )
+
+    def generation_fn(arg):
+        return generation_command(
+            arg, cfg.state.db, cfg.state.card_jobs_db, config("FOTOGEN_QUEUE_DB")
+        )
+
+    def generation_state_fn():
+        return generation_enabled(cfg.state.db)
 
     # /auto: выключатель автомата (флаг в state-БД, слоты в общей очереди q)
     def cats_catalog_fn():
@@ -653,6 +674,18 @@ def main():
                     continue
                 if (cq.get("data") or "").startswith("wizard:"):
                     chat_w = str((cq.get("message") or {}).get("chat", {}).get("id", ""))
+                    if cq.get("data") == "wizard:confirm" and not generation_state_fn():
+                        try:
+                            http.post(f"{TG_API}/bot{token}/answerCallbackQuery",
+                                      data={"callback_query_id": cq.get("id"),
+                                            "text": "Генерация выключена"})
+                            http.post(f"{TG_API}/bot{token}/sendMessage",
+                                      data={"chat_id": chat_w,
+                                            "text": "⏸ Мастер-генерация выключена. "
+                                                    "Сначала: /generation on"})
+                        except httpx.HTTPError:
+                            pass
+                        continue
                     wr = _wizard_safe(wizard_callback, chat_w, cq.get("data"))
                     try:
                         http.post(f"{TG_API}/bot{token}/answerCallbackQuery",
@@ -718,6 +751,19 @@ def main():
                     try:
                         http.post(f"{TG_API}/bot{token}/answerCallbackQuery",
                                   data={"callback_query_id": cq.get("id"), "text": reply[:180]})
+                        http.post(f"{TG_API}/bot{token}/sendMessage", data=d)
+                    except httpx.HTTPError:
+                        pass
+                    continue
+                if data_cq.startswith("generation:"):
+                    reply = generation_fn(data_cq.split(":", 1)[1])
+                    chat_g = str((cq.get("message") or {}).get("chat", {}).get("id", ""))
+                    d = {"chat_id": chat_g, "text": reply,
+                         "reply_markup": json.dumps(
+                             generation_markup(generation_state_fn()), ensure_ascii=False)}
+                    try:
+                        http.post(f"{TG_API}/bot{token}/answerCallbackQuery",
+                                  data={"callback_query_id": cq.get("id")})
                         http.post(f"{TG_API}/bot{token}/sendMessage", data=d)
                     except httpx.HTTPError:
                         pass
@@ -845,6 +891,15 @@ def main():
                 continue
             # /task — старт визарда постановки задачи кнопками
             if text.strip() == "/task":
+                if not generation_state_fn():
+                    try:
+                        http.post(f"{TG_API}/bot{token}/sendMessage",
+                                  data={"chat_id": chat,
+                                        "text": "⏸ Мастер-генерация выключена. "
+                                                "Сначала: /generation on"})
+                    except httpx.HTTPError:
+                        pass
+                    continue
                 _send_wizard_reply(chat, _wizard_safe(wizard_start, chat))
                 continue
             # фото без reply на превью — шаг визарда «приложить фото»
@@ -878,7 +933,9 @@ def main():
                                    find_fn=find_fn, pick_fn=pick_fn, excel_fn=excel_fn,
                                    price_fn=price_fn, sources_fn=sources_fn,
                                    markup_fn=markup_fn, auto_fn=auto_fn,
-                                   auto_state_fn=auto_state_fn)
+                                   auto_state_fn=auto_state_fn,
+                                   generation_fn=generation_fn,
+                                   generation_state_fn=generation_state_fn)
             data = {"chat_id": chat, "text": reply}
             if text.strip().startswith("/excel"):      # кнопки отмены активных задач
                 markup = excel_cancel_markup(cfg.state.db, links)
@@ -888,6 +945,9 @@ def main():
                 st_a = auto_state_fn()
                 if st_a is not None:
                     data["reply_markup"] = json.dumps(auto_markup(st_a), ensure_ascii=False)
+            if text.strip().startswith("/generation"):
+                data["reply_markup"] = json.dumps(
+                    generation_markup(generation_state_fn()), ensure_ascii=False)
             try:
                 http.post(f"{TG_API}/bot{token}/sendMessage", data=data)
             except httpx.HTTPError:

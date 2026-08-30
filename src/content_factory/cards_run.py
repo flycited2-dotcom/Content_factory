@@ -18,10 +18,14 @@ from content_factory.cards_pipeline import FotogenConfig, CardJobStore, run_once
 from content_factory.content.cards import build_modes_map
 from content_factory.content.specs import build_specs_for_card
 from content_factory.ingest.breez import fetch_breez_utp_by_nc, live_base_lookup
+from content_factory.orchestrator.generation import generation_enabled
 
 
 def main():
     cfg = load_config(Path("config/config.yaml"))
+    if not generation_enabled(cfg.state.db):
+        print("cards: generation disabled by master switch")
+        return
     dsn = {"host": config("DB_HOST", "localhost"), "port": config("DB_PORT", "5432"),
            "dbname": config("DB_NAME"), "user": config("DB_USER"), "password": config("DB_PASSWORD")}
     raw = fetch_raw_products(dsn, cfg.source.warehouse,
