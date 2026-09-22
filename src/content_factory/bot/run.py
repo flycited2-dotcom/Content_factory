@@ -125,7 +125,36 @@ def make_make_fn(state_db, prices_dir):
     return make_fn
 
 
-def make_find_pick_fns(state_db, prices_dir):
+def ready_price_publication_line(status_file) -> str | None:
+    """Explain the last Avito handoff without claiming that a card was published."""
+    path = Path(status_file)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "📤 Avito: статус передачи пока недоступен"
+    if data.get("status") == "deferred":
+        return "📤 Avito: другой издатель сейчас обновляет XML; повторим по таймеру."
+    content = data.get("content") or {}
+    status = content.get("status")
+    feed_size = (data.get("update") or {}).get("after")
+    feed_note = f" XML: {feed_size} объявлений." if isinstance(feed_size, int) else ""
+    if status == "waiting_active_upload":
+        return "📤 Avito: ждём завершения текущей загрузки; новые карточки пока в очереди." + feed_note
+    if status == "waiting_previous_batch":
+        return "📤 Avito: ждём постатейный отчёт по предыдущей партии." + feed_note
+    if status == "committed":
+        count = len(content.get("added") or [])
+        return f"📤 Avito: {count} добавлено в XML; ждём штатной загрузки и отчёта." + feed_note
+    if status == "no_ready_candidates":
+        return "📤 Avito: проверенных кандидатов для следующей партии пока нет." + feed_note
+    if status == "credentials_unavailable":
+        return "⚠️ Avito: нет доступа к API для проверки публикации." + feed_note
+    return None
+
+
+def make_find_pick_fns(state_db, prices_dir, publication_status_path=None):
     """/find <фраза> — нумерованный список кандидатов из прайса;
     /pick 1 3 5 — поставить выбранные в конвейер; /excel — статус конвейера."""
     from content_factory.ingest.excel_price import (
@@ -204,6 +233,12 @@ def make_find_pick_fns(state_db, prices_dir):
             f"❌ ошибки {len(auto['failed'])}",
             "Готовые карточки сохраняются прямо для Avito и в этот чат не присылаются.",
         ]
+        publication_path = publication_status_path or config(
+            "READY_PRICE_PUBLICATION_STATUS",
+            default="/opt/avito-bridge/state/ready-price/last-run.json")
+        publication_line = ready_price_publication_line(publication_path)
+        if publication_line:
+            lines.append(publication_line)
         if any(manual[s] for s in statuses):
             lines += [
                 "━" * 22,
@@ -564,7 +599,11 @@ def main():
     make_fn = make_make_fn(cfg.state.db, prices_dir)
     find_fn, pick_fn, excel_fn = make_find_pick_fns(cfg.state.db, prices_dir)
     cancel_excel_fn = make_cancel_excel_fn(cfg.state.db, config("FOTOGEN_QUEUE_DB"))
-    http = httpx.Client(timeout=40)
+    # Связь VPS→Telegram рвётся: ~30% соединений не устанавливаются (2026-09-22).
+    # connect=40с замораживал однопоточного бота на 40с и терял ответ — короткий
+    # connect + повтор соединения (retries) даёт ответ за секунды.
+    http = httpx.Client(timeout=httpx.Timeout(40, connect=4),
+                        transport=httpx.HTTPTransport(retries=3))
     review_channel = config("TELEGRAM_REVIEW_CHANNEL_ID", cfg.telegram.review_channel_id)
     price_fn = make_price_fn(cfg.state.db, token, review_channel,
                              cfg.telegram.parse_mode, links, http=http)
