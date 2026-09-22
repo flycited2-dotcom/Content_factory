@@ -149,9 +149,31 @@ def parse_price_xlsx(path) -> list[PriceItem]:
         ws = wb[sheet]
         candidates = (_parse_table(ws), _parse_generic(ws), _parse_1c_blocks(ws))
         got = max(candidates, key=len)
+        _borrow_sections(got, candidates)
         items.extend(got)
     wb.close()
     return items
+
+
+_MAX_SECTION_LEN = 70   # длиннее — это примечание из шапки прайса, а не раздел
+
+
+def _borrow_sections(got: list[PriceItem], candidates) -> None:
+    """Самый полный разбор листа может не видеть разделов: у БытТехОпт generic даёт
+    на ~85 строк больше, чем разбор блоками 1С, но без разделов — и с правки
+    2026-08-24 из /task пропали 132 категории. Подтягиваем раздел по названию
+    товара из разбора, где разделы есть (≥3 разных — иначе это шапка, не дерево)."""
+    if any((i.section or "").strip() for i in got):
+        return
+    for cand in candidates:
+        secs = {(i.section or "").strip() for i in cand} - {""}
+        if cand is got or len(secs) < 3:
+            continue
+        by_name = {i.name: i.section for i in cand if (i.section or "").strip()}
+        for i in got:
+            if not (i.section or "").strip() and i.name in by_name:
+                i.section = by_name[i.name]
+        return
 
 
 _SLUG_RE = re.compile(r"[^a-z0-9а-яё]+")
@@ -204,7 +226,35 @@ def _apply_markup(items: list[PriceItem], pct: float) -> list[PriceItem]:
     return items
 
 
-def load_price_slots(prices_dir) -> list[tuple[str, list[PriceItem]]]:
+def _tg_path(prices_dir) -> Path:
+    return Path(prices_dir) / "telegram_sources.json"
+
+
+def tg_disabled(prices_dir) -> set:
+    """Прайсы, выключенные для ручной генерации в Telegram (/task /find /make).
+    Avito/витрина (private_price_catalog) видят ВСЕ прайсы — фильтр только тут
+    (запрос владельца 2026-09-22: шины/инструмент Бринэкса не нужны в канале)."""
+    import json
+    p = _tg_path(prices_dir)
+    if not p.exists():
+        return set()
+    try:
+        return set(json.loads(p.read_text(encoding="utf-8")).get("disabled") or [])
+    except (OSError, ValueError):
+        return set()
+
+
+def set_tg_enabled(prices_dir, slot: str, on: bool) -> None:
+    import json
+    off = tg_disabled(prices_dir)
+    (off.discard if on else off.add)(slot)
+    _tg_path(prices_dir).write_text(
+        json.dumps({"disabled": sorted(off)}, ensure_ascii=False, indent=1),
+        encoding="utf-8")
+
+
+def load_price_slots(prices_dir, for_telegram: bool = False
+                     ) -> list[tuple[str, list[PriceItem]]]:
     """Активные прайсы: ручные прайсы поставщиков «manual__*.xlsx» (все, приоритет)
     → legacy «manual.xlsx» → авто-забор из канала «channel.xlsx» → почта «mail.xlsx».
     Раздельные слоты — иначе один прайс молча перезаписывал бы другой (почта каждые
@@ -221,6 +271,9 @@ def load_price_slots(prices_dir) -> list[tuple[str, list[PriceItem]]]:
         p = pdir / f"{label}.xlsx"
         if p.exists():
             out.append((label, _apply_markup(parse_price_xlsx(p), markups.get(label, 0))))
+    if for_telegram:
+        off = tg_disabled(prices_dir)
+        out = [(lbl, its) for lbl, its in out if lbl not in off]
     return out
 
 
@@ -230,10 +283,11 @@ def top_sections(prices_dir, n: int | None = None) -> list[str]:
     большинство групп товаров (жалоба владельца 2026-07-07). n — опц. лимит."""
     from collections import Counter
     counts: Counter = Counter()
-    for _, items in load_price_slots(prices_dir):
+    for _, items in load_price_slots(prices_dir, for_telegram=True):
         for i in items:
-            if (i.section or "").strip():
-                counts[i.section.strip()] += 1
+            sec = (i.section or "").strip()
+            if sec and len(sec) <= _MAX_SECTION_LEN:
+                counts[sec] += 1
     return [s for s, _ in counts.most_common(n)]
 
 

@@ -95,7 +95,7 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
                 | ConfirmStore(state_db).blocked_keys() | excel_store.all_keys())
 
     def _price_items():
-        slots = load_price_slots(prices_dir)
+        slots = load_price_slots(prices_dir, for_telegram=True)
         return [i for _, its in slots for i in its]
 
     def start(chat_id: str) -> WizardReply:

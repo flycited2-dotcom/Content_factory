@@ -102,7 +102,7 @@ def make_make_fn(state_db, prices_dir):
             load_search_aliases)
         from content_factory.orchestrator.excel_pipeline import ExcelStore
         from content_factory.orchestrator.confirm_store import ConfirmStore
-        slots = load_price_slots(prices_dir)
+        slots = load_price_slots(prices_dir, for_telegram=True)
         if not slots:
             return "❌ прайс не загружен — пришлите .xlsx файлом в этот чат"
         items = [i for _, its in slots for i in its]      # свой прайс приоритетнее почтового
@@ -139,6 +139,8 @@ def ready_price_publication_line(status_file) -> str | None:
     content = data.get("content") or {}
     status = content.get("status")
     feed_size = (data.get("update") or {}).get("after")
+    if status == "committed" and isinstance(feed_size, int):
+        feed_size += len(content.get("added") or [])
     feed_note = f" XML: {feed_size} объявлений." if isinstance(feed_size, int) else ""
     if status == "waiting_active_upload":
         return "📤 Avito: ждём завершения текущей загрузки; новые карточки пока в очереди." + feed_note
@@ -173,7 +175,7 @@ def make_find_pick_fns(state_db, prices_dir, publication_status_path=None):
                   "key TEXT, brand TEXT, model TEXT, name TEXT, price INTEGER)")
 
     def find_fn(phrase):
-        slots = load_price_slots(prices_dir)
+        slots = load_price_slots(prices_dir, for_telegram=True)
         if not slots:
             return "❌ прайс не загружен — пришлите .xlsx файлом"
         items = [i for _, its in slots for i in its]      # свой прайс приоритетнее почтового
@@ -308,6 +310,28 @@ def make_price_fn(state_db, token: str, review_channel: str, parse_mode: str,
     return price_fn
 
 
+def sources_markup(prices_dir) -> dict:
+    """Кнопки /sources: «🟢 3» / «⚪ 3» — номер источника, тап переключает Telegram."""
+    from content_factory.ingest.excel_price import load_price_slots, tg_disabled
+    off = tg_disabled(prices_dir)
+    btns = [{"text": f"{'⚪' if lbl in off else '🟢'} {n}", "callback_data": f"srctg:{n}"}
+            for n, (lbl, _) in enumerate(load_price_slots(prices_dir), 1)]
+    return {"inline_keyboard": [btns[i:i + 4] for i in range(0, len(btns), 4)]}
+
+
+def toggle_tg_source(prices_dir, data: str) -> str:
+    from content_factory.ingest.excel_price import (load_price_slots, set_tg_enabled,
+                                                    tg_disabled)
+    try:
+        n = int(data.split(":", 1)[1])
+        label = [lbl for lbl, _ in load_price_slots(prices_dir)][n - 1]
+    except (ValueError, IndexError):
+        return "❌ источник не найден — откройте /sources заново"
+    on = label in tg_disabled(prices_dir)
+    set_tg_enabled(prices_dir, label, on)
+    return f"{'🟢 включён' if on else '⚪ выключен'} для Telegram: {label}"
+
+
 def make_sources_fn(prices_dir):
     """/sources — источники прайсов: имя, позиций, наценка, свежесть. Новый
     источник добавляется просто отправкой .xlsx файлом в чат (бот сам спросит
@@ -319,15 +343,19 @@ def make_sources_fn(prices_dir):
         if not slots:
             return ("❌ источников нет — пришлите .xlsx прайс файлом в этот чат, "
                     "он добавится источником")
+        from content_factory.ingest.excel_price import tg_disabled
         markups = get_markups(prices_dir)
-        lines = ["📦 Источники прайсов:"]
-        for label, items in slots:
+        off = tg_disabled(prices_dir)
+        lines = ["📦 Источники прайсов (🟢 — в /task и /find, ⚪ — только Avito):"]
+        for n, (label, items) in enumerate(slots, 1):
             pct = markups.get(label, 0)
             pct_s = f" · {'+' if pct > 0 else ''}{pct:g}%" if pct else ""
             p = Path(prices_dir) / f"{label}.xlsx"
             age_h = (_t.time() - p.stat().st_mtime) / 3600 if p.exists() else None
             age_s = f" · {age_h:.0f}ч назад" if age_h is not None else ""
-            lines.append(f"• {label}: {len(items)} поз.{pct_s}{age_s}")
+            mark = "⚪" if label in off else "🟢"
+            lines.append(f"{mark} {n}. {label}: {len(items)} поз.{pct_s}{age_s}")
+        lines.append("\nНажмите кнопку с номером — вкл/выкл прайс для Telegram.")
         lines.append("\n➕ Добавить: пришлите .xlsx файлом. "
                      "Наценка: /markup <слот> <±число>")
         return "\n".join(lines)
@@ -756,6 +784,21 @@ def main():
                     except httpx.HTTPError:
                         pass
                     continue
+                if (cq.get("data") or "").startswith("srctg:"):
+                    msg_s = cq.get("message") or {}
+                    note = toggle_tg_source(prices_dir, cq.get("data"))
+                    try:
+                        http.post(f"{TG_API}/bot{token}/answerCallbackQuery",
+                                  data={"callback_query_id": cq.get("id"), "text": note[:180]})
+                        http.post(f"{TG_API}/bot{token}/editMessageText", data={
+                            "chat_id": msg_s.get("chat", {}).get("id"),
+                            "message_id": msg_s.get("message_id"),
+                            "text": sources_fn(),
+                            "reply_markup": json.dumps(sources_markup(prices_dir),
+                                                       ensure_ascii=False)})
+                    except httpx.HTTPError:
+                        pass
+                    continue
                 if (cq.get("data") or "").startswith("wizard:"):
                     chat_w = str((cq.get("message") or {}).get("chat", {}).get("id", ""))
                     wr = _wizard_safe(wizard_callback, chat_w, cq.get("data"))
@@ -1048,6 +1091,8 @@ def main():
                 markup = excel_cancel_markup(cfg.state.db, links)
                 if markup:
                     data["reply_markup"] = json.dumps(markup, ensure_ascii=False)
+            if text.strip().startswith("/sources"):
+                data["reply_markup"] = json.dumps(sources_markup(prices_dir), ensure_ascii=False)
             if text.strip().startswith(("/auto", "/status")):   # кнопка вкл/выкл автомата
                 st_a = auto_state_fn()
                 if st_a is not None:
