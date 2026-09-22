@@ -153,12 +153,14 @@ def specs_text(attrs: dict, max_lines: int = 8) -> str:
 
 
 def _http_get(url: str) -> bytes:
+    if Path(str(url)).is_file():
+        return Path(str(url)).read_bytes()
     return httpx.get(url, headers={"User-Agent": "AvitoBridge/1.0"}, timeout=30).content
 
 
 def run_once(groups, cfg: FotogenConfig, store: CardJobStore,
              http: httpx.Client | None = None, fetch_photo=None,
-             specs_fn=None) -> tuple[int, int]:
+             specs_fn=None, reference_lookup=None, missing_photo=None) -> tuple[int, int]:
     """Один проход. Возвращает (submitted, published).
     specs_fn(group) -> текст ТТХ для агента (если задан) — иначе specs_text(rep.attrs).
     Через specs_fn отдаём агенту те же «ключевые особенности», что и в подписи."""
@@ -211,8 +213,11 @@ def run_once(groups, cfg: FotogenConfig, store: CardJobStore,
                 continue                       # исчерпали попытки — сдаёмся (не долбим агента)
             next_tries = tries + 1             # failed с запасом попыток → переотправляем
         rep = g.representative
-        photo_url = rep.photos[0] if rep.photos else None
+        photo_url = rep.photos[0] if rep.photos else (
+            reference_lookup(g) if reference_lookup else None)
         if not photo_url:
+            if missing_photo:
+                missing_photo(g)
             continue
         mode = (cfg.modes or {}).get(getattr(g, "key", None)) or cfg.mode
         specs = specs_fn(g) if specs_fn else specs_text(rep.attrs)

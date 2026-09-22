@@ -7,7 +7,10 @@ source:                          # источник контента (БД oasis
   exclude_title_patterns: ["%мульти%", "%зимн%", "%виброопор%"]
 
 pricing:
-  default_markup_pct: 5          # опт +5% → округление …90
+  # Для Breeze используем текущую розничную цену витрины; закупка из API нужна
+  # для аналитики, но не должна превращаться в другую публичную цену поста.
+  prefer_retail_ref: true
+  default_markup_pct: 5          # остальные поставщики: опт +5% → округление …90
   rounding: up_to_90
   min_margin_abs: 0
 

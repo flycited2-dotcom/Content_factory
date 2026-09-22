@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 import json
+import os
+import re
 import sqlite3
 import time
 from datetime import datetime
@@ -15,17 +17,31 @@ from decouple import config
 
 from content_factory.config import load_config
 from content_factory.orchestrator.auto import auto_command, auto_enabled
-from content_factory.publish.telegram import publish_post, PublishState, TG_API
+from content_factory.publish.telegram import edit_post_media, publish_post, PublishState, TG_API
 from content_factory.publish.orders import OrderLinks, order_markup
 from content_factory.bot.order_dialog import OrderDialogStore
 from content_factory.bot.order_flow import make_order_flow
 from content_factory.orchestrator.queue import TaskQueue
+from content_factory.orchestrator.vk_content_plan import (
+    VkContentPlanStore,
+    callback_markup,
+    format_vk_plan,
+    handle_plan_callback,
+    review_caption,
+)
 from content_factory.orchestrator.confirm_store import ConfirmStore
 from content_factory.bot.commands import handle_command, handle_callback
 from content_factory.bot.manual_photo import make_manual_photo_fn
 from content_factory.bot.voice import transcribe_voice_bytes
 from content_factory.bot.cmd_input import (
     bare_arg_command, prompt_for, resolve_reply, PendingCmdStore)
+
+
+def vk_plan_store_from_env() -> VkContentPlanStore:
+    """Открыть общую VK-очередь, используемую планировщиком и Telegram-пультом."""
+    return VkContentPlanStore(os.getenv(
+        "VK_PLAN_STATE_DB", "/opt/content-factory-vk/state/vk-plan.db"
+    ))
 
 
 def make_publish_fn(token: str, parse_mode: str, pub_state: PublishState, http=None,
@@ -36,6 +52,10 @@ def make_publish_fn(token: str, parse_mode: str, pub_state: PublishState, http=N
         markup = None
         if order_bot and links is not None:
             markup = order_markup(order_bot, links.code_for(a.key))
+        if str(a.channel).startswith("edit|"):
+            _, channel, message_id = str(a.channel).split("|", 2)
+            return edit_post_media(token, channel, int(message_id), a.card_path, a.caption,
+                                   http=http, parse_mode=parse_mode, reply_markup=markup)
         return publish_post(token, a.channel, a.card_path, a.caption, http=http,
                             parse_mode=parse_mode, key=a.key, state=pub_state, retries=2,
                             reply_markup=markup)
@@ -162,6 +182,7 @@ def make_find_pick_fns(state_db, prices_dir):
                 f"Конвейер: УТП+фото → карточка → превью сюда (тик ~10 мин). Статус: /excel")
 
     def excel_fn(arg: str | None = None):
+        from content_factory.orchestrator.card_submit import assigned_account
         store = ExcelStore(state_db)
         # /excel retry — вернуть failed в конвейер с чистого листа (2026-07-07)
         if arg in ("retry", "повтор", "повторить"):
@@ -170,11 +191,27 @@ def make_find_pick_fns(state_db, prices_dir):
                 return "✅ failed-позиций нет — повторять нечего"
             return (f"🔁 возвращено в конвейер: {n} (research заново, "
                     f"тик ~10 мин). Статус: /excel")
-        counts = {s: len(store.by_status(s))
-                  for s in ("new", "research", "card", "preview", "failed")}
-        lines = [f"Конвейер прайса: 🆕 {counts['new']} · 🔎 research {counts['research']} · "
-                 f"🎨 card {counts['card']} · 👀 превью {counts['preview']} · "
-                 f"❌ failed {counts['failed']}"]
+        statuses = ("new", "research", "card", "preview", "failed")
+        by_status = {s: store.by_status(s) for s in statuses}
+        auto = {s: [i for i in by_status[s] if i.key.startswith("ready-price|")]
+                for s in statuses}
+        manual = {s: [i for i in by_status[s] if not i.key.startswith("ready-price|")]
+                  for s in statuses}
+        lines = [
+            "Авито · автоматический конвейер:",
+            f"🆕 ждут {len(auto['new'])} · 🔎 ищется {len(auto['research'])} · "
+            f"🎨 рисуется {len(auto['card'])} · ✅ готово {len(auto['preview'])} · "
+            f"❌ ошибки {len(auto['failed'])}",
+            "Готовые карточки сохраняются прямо для Avito и в этот чат не присылаются.",
+        ]
+        if any(manual[s] for s in statuses):
+            lines += [
+                "━" * 22,
+                "Ручные задания с Telegram-превью:",
+                f"🆕 {len(manual['new'])} · 🔎 {len(manual['research'])} · "
+                f"🎨 {len(manual['card'])} · 👀 превью {len(manual['preview'])} · "
+                f"❌ {len(manual['failed'])}",
+            ]
         # отложенные /task-позиции by_status('new') прячет от тика — без этой
         # строки они невидимы в статусе («вакуум информации», 2026-07-10)
         sched = store.scheduled()
@@ -186,7 +223,7 @@ def make_find_pick_fns(state_db, prices_dir):
         for s, mark, title in (("research", "🔎", "На research"),
                                ("card", "🎨", "Рисуются карточки"),
                                ("failed", "❌", "Ошибки")):
-            items = store.by_status(s)[:5]
+            items = by_status[s][:5]
             if not items:
                 continue
             lines.append("━" * 22)
@@ -195,8 +232,11 @@ def make_find_pick_fns(state_db, prices_dir):
                 extra = ""
                 if s == "failed" and i.error:
                     extra = f" — {i.error.splitlines()[0][:70]}"
-                lines.append(f"• {i.brand} {i.model}{extra}".strip())
-        if counts["failed"]:
+                lane = assigned_account(
+                    i.brand, i.model,
+                    queue_db=config("FOTOGEN_QUEUE_DB", default="")).upper()
+                lines.append(f"• [{lane}] {i.brand} {i.model}{extra}".strip())
+        if by_status["failed"]:
             lines.append("↻ Вернуть ошибки в работу: /excel retry")
         return "\n".join(lines)
 
@@ -470,14 +510,6 @@ def auto_markup(enabled: bool) -> dict:
     ]}
 
 
-def generation_markup(enabled: bool) -> dict:
-    """Одна крупная кнопка мастер-рубильника под /generation и /status."""
-    toggle = ({"text": "⏸ Выключить генерацию", "callback_data": "generation:off"}
-              if enabled else
-              {"text": "▶️ Включить генерацию", "callback_data": "generation:on"})
-    return {"inline_keyboard": [[toggle]]}
-
-
 def setup_bot_commands(http, token: str, owner: str) -> None:
     """setMyCommands: управляющее меню (/task /make /find …) видит ТОЛЬКО владелец
     (scope chat). У всех остальных — клиентов, пришедших по кнопке «Заказать» —
@@ -492,7 +524,8 @@ def setup_bot_commands(http, token: str, owner: str) -> None:
         {"command": "excel", "description": "Статус конвейера прайса"},
         {"command": "pending", "description": "Посты на подтверждении"},
         {"command": "status", "description": "Что в очереди"},
-        {"command": "generation", "description": "МАСТЕР генерации: статус, вкл/выкл"},
+        {"command": "vkplan", "description": "Очередь и статусы публикаций VK"},
+        {"command": "vkpost", "description": "Открыть VK-пост вместе с фото"},
         {"command": "auto", "description": "Авто-контент: статус, вкл/выкл"},
     ]
     try:
@@ -538,18 +571,6 @@ def main():
     sources_fn = make_sources_fn(prices_dir)
     markup_fn = make_markup_fn(prices_dir, cfg.state.db)
 
-    from content_factory.orchestrator.generation import (
-        generation_command, generation_enabled,
-    )
-
-    def generation_fn(arg):
-        return generation_command(
-            arg, cfg.state.db, cfg.state.card_jobs_db, config("FOTOGEN_QUEUE_DB")
-        )
-
-    def generation_state_fn():
-        return generation_enabled(cfg.state.db)
-
     # /auto: выключатель автомата (флаг в state-БД, слоты в общей очереди q)
     def cats_catalog_fn():
         """id→название категорий склада (для /auto cats словами). БД недоступна
@@ -576,6 +597,30 @@ def main():
 
     def auto_state_fn():
         return auto_enabled(cfg.state.db) if cfg.auto_tasks else None
+
+    def vkplan_fn():
+        return format_vk_plan(
+            vk_plan_store_from_env(), now=datetime.now(),
+            owner_id=int(os.getenv("VK_OWNER_ID", "-241020718")),
+        )
+
+    def _send_vk_plan_preview(chat_id: str, raw_id: str) -> str:
+        try:
+            item_id = int(str(raw_id).strip().removeprefix("CF-VK-"))
+        except ValueError:
+            return "❌ формат: /vkpost 13"
+        item = vk_plan_store_from_env().get(item_id)
+        if item is None:
+            return "❌ материал VK-плана не найден"
+        if not item.card_path or not Path(item.card_path).is_file():
+            return f"❌ у CF-VK-{item.id:03d} пока нет готового изображения"
+        markup = callback_markup(item) if item.status == "review" else None
+        result = publish_post(
+            token, chat_id, item.card_path, review_caption(item),
+            http=http, reply_markup=markup, retries=1,
+        )
+        return (f"🖼 Открыт CF-VK-{item.id:03d} вместе с изображением."
+                if result.ok else f"❌ не удалось отправить фото: {result.error}")
     wizard_start, wizard_text, wizard_photo, wizard_callback = _make_wizard(
         cfg, owner, prices_dir, http, excel_fn)
 
@@ -674,18 +719,6 @@ def main():
                     continue
                 if (cq.get("data") or "").startswith("wizard:"):
                     chat_w = str((cq.get("message") or {}).get("chat", {}).get("id", ""))
-                    if cq.get("data") == "wizard:confirm" and not generation_state_fn():
-                        try:
-                            http.post(f"{TG_API}/bot{token}/answerCallbackQuery",
-                                      data={"callback_query_id": cq.get("id"),
-                                            "text": "Генерация выключена"})
-                            http.post(f"{TG_API}/bot{token}/sendMessage",
-                                      data={"chat_id": chat_w,
-                                            "text": "⏸ Мастер-генерация выключена. "
-                                                    "Сначала: /generation on"})
-                        except httpx.HTTPError:
-                            pass
-                        continue
                     wr = _wizard_safe(wizard_callback, chat_w, cq.get("data"))
                     try:
                         http.post(f"{TG_API}/bot{token}/answerCallbackQuery",
@@ -708,6 +741,36 @@ def main():
                     _send_force_reply(owner or chat_p,
                                       f"💰 Новая цена для «{key_p[:50]}»? Только число.",
                                       "напр.: 25990")
+                    continue
+                if data_cq.startswith("vkp:"):
+                    plan_store = vk_plan_store_from_env()
+                    edit_match = re.fullmatch(r"vkp:e:(\d+)", data_cq)
+                    if edit_match:
+                        item = plan_store.get(int(edit_match.group(1)))
+                        chat_v = str((cq.get("message") or {}).get("chat", {}).get("id", ""))
+                        if item is None or item.status not in {"review", "approved"}:
+                            reply = "Материал уже обработан"
+                        else:
+                            pending.set(owner or chat_v, f"/vkrevision {item.id}")
+                            reply = f"📝 Что изменить в CF-VK-{item.id:03d}?"
+                            _send_force_reply(
+                                owner or chat_v, reply,
+                                "например: мастер должен стоять на стремянке",
+                            )
+                        try:
+                            http.post(f"{TG_API}/bot{token}/answerCallbackQuery",
+                                      data={"callback_query_id": cq.get("id"),
+                                            "text": reply[:180]})
+                        except httpx.HTTPError:
+                            pass
+                        continue
+                    reply = handle_plan_callback(data_cq, plan_store)
+                    try:
+                        http.post(f"{TG_API}/bot{token}/answerCallbackQuery",
+                                  data={"callback_query_id": cq.get("id"), "text": reply[:180]})
+                    except httpx.HTTPError:
+                        pass
+                    finalize_preview(http, token, cq, reply)
                     continue
                 if data_cq.startswith("excancel:"):    # отмена задач excel-конвейера
                     target = data_cq.split(":", 1)[1]
@@ -751,19 +814,6 @@ def main():
                     try:
                         http.post(f"{TG_API}/bot{token}/answerCallbackQuery",
                                   data={"callback_query_id": cq.get("id"), "text": reply[:180]})
-                        http.post(f"{TG_API}/bot{token}/sendMessage", data=d)
-                    except httpx.HTTPError:
-                        pass
-                    continue
-                if data_cq.startswith("generation:"):
-                    reply = generation_fn(data_cq.split(":", 1)[1])
-                    chat_g = str((cq.get("message") or {}).get("chat", {}).get("id", ""))
-                    d = {"chat_id": chat_g, "text": reply,
-                         "reply_markup": json.dumps(
-                             generation_markup(generation_state_fn()), ensure_ascii=False)}
-                    try:
-                        http.post(f"{TG_API}/bot{token}/answerCallbackQuery",
-                                  data={"callback_query_id": cq.get("id")})
                         http.post(f"{TG_API}/bot{token}/sendMessage", data=d)
                     except httpx.HTTPError:
                         pass
@@ -891,15 +941,6 @@ def main():
                 continue
             # /task — старт визарда постановки задачи кнопками
             if text.strip() == "/task":
-                if not generation_state_fn():
-                    try:
-                        http.post(f"{TG_API}/bot{token}/sendMessage",
-                                  data={"chat_id": chat,
-                                        "text": "⏸ Мастер-генерация выключена. "
-                                                "Сначала: /generation on"})
-                    except httpx.HTTPError:
-                        pass
-                    continue
                 _send_wizard_reply(chat, _wizard_safe(wizard_start, chat))
                 continue
             # фото без reply на превью — шаг визарда «приложить фото»
@@ -928,14 +969,41 @@ def main():
                     text = reconstructed
             if not text:
                 continue
+            if text.lower().startswith("/vkrevision"):
+                parts_v = text.split(maxsplit=2)
+                if len(parts_v) < 3 or not parts_v[1].isdigit():
+                    reply = "❌ формат: /vkrevision 13 что именно изменить"
+                else:
+                    item_id = int(parts_v[1])
+                    store_v = vk_plan_store_from_env()
+                    item_v = store_v.get(item_id)
+                    reply = (
+                        f"🛠 CF-VK-{item_id:03d} возвращён на доработку: {parts_v[2]}"
+                        if store_v.request_revision(item_id, parts_v[2])
+                        else "Материал уже обработан или комментарий пуст"
+                    )
+                try:
+                    http.post(f"{TG_API}/bot{token}/sendMessage",
+                              data={"chat_id": chat, "text": reply})
+                except httpx.HTTPError:
+                    pass
+                continue
+            if text.lower().startswith("/vkpost"):
+                parts_v = text.split(maxsplit=1)
+                reply = (_send_vk_plan_preview(chat, parts_v[1])
+                         if len(parts_v) == 2 else "❌ формат: /vkpost 13")
+                try:
+                    http.post(f"{TG_API}/bot{token}/sendMessage",
+                              data={"chat_id": chat, "text": reply})
+                except httpx.HTTPError:
+                    pass
+                continue
             reply = handle_command(text, q, confirm_store=cs, publish_fn=publish_fn,
                                    publish_state=ps, regen_fn=regen_fn, make_fn=make_fn,
                                    find_fn=find_fn, pick_fn=pick_fn, excel_fn=excel_fn,
                                    price_fn=price_fn, sources_fn=sources_fn,
                                    markup_fn=markup_fn, auto_fn=auto_fn,
-                                   auto_state_fn=auto_state_fn,
-                                   generation_fn=generation_fn,
-                                   generation_state_fn=generation_state_fn)
+                                   auto_state_fn=auto_state_fn, vkplan_fn=vkplan_fn)
             data = {"chat_id": chat, "text": reply}
             if text.strip().startswith("/excel"):      # кнопки отмены активных задач
                 markup = excel_cancel_markup(cfg.state.db, links)
@@ -945,9 +1013,6 @@ def main():
                 st_a = auto_state_fn()
                 if st_a is not None:
                     data["reply_markup"] = json.dumps(auto_markup(st_a), ensure_ascii=False)
-            if text.strip().startswith("/generation"):
-                data["reply_markup"] = json.dumps(
-                    generation_markup(generation_state_fn()), ensure_ascii=False)
             try:
                 http.post(f"{TG_API}/bot{token}/sendMessage", data=data)
             except httpx.HTTPError:

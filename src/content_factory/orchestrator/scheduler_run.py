@@ -7,6 +7,7 @@ confirm/публикация). Карточки генерит ОТДЕЛЬНЫ�
 """
 from __future__ import annotations
 import json
+import os
 from datetime import date, datetime
 from pathlib import Path
 from decouple import config
@@ -83,7 +84,7 @@ def build_context(cfg, token: str, owner_chat: str, pub_state: PublishState,
 
 
 def main():
-    cfg = load_config(Path("config/config.yaml"))
+    cfg = load_config(Path(os.environ.get("CONTENT_FACTORY_CONFIG", "config/config.yaml")))
     q = TaskQueue(cfg.state.db)
     if Path("tasks").is_dir():
         load_plans_into_queue("tasks", q)
@@ -95,16 +96,23 @@ def main():
         return
 
     # каталог нужен только если есть что исполнять
-    dsn = {"host": config("DB_HOST", "localhost"), "port": config("DB_PORT", "5432"),
-           "dbname": config("DB_NAME"), "user": config("DB_USER"), "password": config("DB_PASSWORD")}
-    raw = fetch_raw_products(dsn, cfg.source.warehouse,
-                             cfg.source.catalog.report_category_ids,
-                             cfg.source.catalog.exclude_title_patterns)
-    # Опт Бриза: в БД сайта у Бриза РОЗНИЦА, опт отдаёт только /leftoversnew/.
-    # API недоступен → пустая карта → мягкий фолбэк на цену из БД (как раньше).
-    from content_factory.ingest.breez import live_base_lookup
-    offers = collect_offers(raw, Path(config("JAC_STOCK_JSON", "")), cfg.source.catalog,
-                            live_base_lookup())
+    if cfg.source.kind == "storefront_api":
+        from content_factory.ingest.storefront_api import collect_storefront_offers
+        token = config(cfg.source.token_env, "")
+        offers = collect_storefront_offers(cfg.source, token)
+    elif cfg.source.kind == "oasis":
+        dsn = {"host": config("DB_HOST", "localhost"), "port": config("DB_PORT", "5432"),
+               "dbname": config("DB_NAME"), "user": config("DB_USER"), "password": config("DB_PASSWORD")}
+        raw = fetch_raw_products(dsn, cfg.source.warehouse,
+                                 cfg.source.catalog.report_category_ids,
+                                 cfg.source.catalog.exclude_title_patterns)
+        # Опт Бриза: в БД сайта у Бриза РОЗНИЦА, опт отдаёт только /leftoversnew/.
+        # API недоступен → пустая карта → мягкий фолбэк на цену из БД (как раньше).
+        from content_factory.ingest.breez import live_base_lookup
+        offers = collect_offers(raw, Path(config("JAC_STOCK_JSON", "")), cfg.source.catalog,
+                                live_base_lookup())
+    else:
+        raise ValueError(f"Неизвестный source.kind: {cfg.source.kind}")
     groups = group_by_series(offers)
 
     # УТП Бриза (✓-фичи): тянем один раз; для не-breeze вернёт None (берётся из ТТХ/«Описание»)

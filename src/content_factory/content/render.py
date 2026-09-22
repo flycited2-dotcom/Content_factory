@@ -18,6 +18,9 @@ _AREA_BY_SIZE = {7: 20, 9: 25, 10: 28, 12: 35, 13: 38, 14: 40, 16: 45, 18: 50,
                  20: 55, 22: 60, 24: 70, 26: 75, 28: 80, 30: 85, 36: 100, 42: 120,
                  48: 140, 60: 170}
 _DIVIDER = "═" * 26
+# Тип техники в начале наименования: «Настенная сплит-система …», «Мобильный
+# кондиционер …». Не более трёх слов, чтобы не утащить в заголовок пол-названия.
+_TYPE_PREFIX_RE = re.compile(r"^([А-ЯЁ][а-яё]+(?:[- ][а-яё]+){0,2})")
 
 
 def _strip_stopwords(text: str, stop_words) -> str:
@@ -47,6 +50,73 @@ def _tech_rows(attrs_list) -> list[dict]:
         for t, v in (attrs or {}).items():
             rows.append({"title": t, "value": v})
     return rows
+
+
+def _storefront_features(f: dict) -> list[str]:
+    """Проверяемые B2C-характеристики стабилизатора из названия/API без домыслов."""
+    title = f.get("model_title") or ""
+    attrs = f.get("attrs") or {}
+    lines: list[str] = []
+    patterns = [
+        (r"(?<!\d)(\d[\d\s]*(?:[.,]\d+)?)\s*(кВА|ВА)(?![А-Яа-я])", "⚡ Мощность: {} {}"),
+        (r"(?<!\d)(\d[\d\s]*(?:[.,]\d+)?)\s*(кВт|Вт)(?![А-Яа-я])", "🔌 Активная мощность: {} {}"),
+        (r"(?<!\d)(\d+(?:[.,]\d+)?)\s*А(?![А-Яа-я])", "🔋 Ток: {} А"),
+        (r"КПД\s*(\d+(?:[.,]\d+)?)\s*%", "📈 КПД: {}%"),
+    ]
+    for pattern, template in patterns:
+        match = re.search(pattern, title, re.I)
+        if match:
+            values = [x.replace(" ", "") for x in match.groups() if x is not None]
+            lines.append(template.format(*values))
+    if re.search(r"циф\.?\s*индикац", title, re.I):
+        lines.append("🖥 Цифровая индикация напряжения")
+    voltage_lines: list[str] = []
+    title_range = re.search(
+        r"(?:вход\w*|вх\.?|рабоч\w*\s+диапазон|диапазон\s+вход\w*)"
+        r"[^0-9]{0,30}(\d{2,3})\s*[-–—]\s*(\d{2,3})\s*В",
+        title,
+        re.I,
+    )
+    if title_range:
+        voltage_lines.append(
+            f"🔌 Диапазон входного напряжения: {title_range.group(1)}–{title_range.group(2)} В"
+        )
+    for key, value in attrs.items():
+        key_lower = str(key).lower()
+        if ("напряж" not in key_lower or "диапазон" not in key_lower
+                or "выход" in key_lower or "output" in key_lower):
+            continue
+        match = re.search(r"(\d{2,3})\s*[-–—]\s*(\d{2,3})\s*В?", str(value), re.I)
+        if not match:
+            continue
+        label = "Расширенный диапазон входного напряжения" if any(
+            marker in key_lower for marker in ("расшир", "предель")
+        ) else "Рабочий диапазон входного напряжения"
+        voltage_lines.append(f"🔌 {label}: {match.group(1)}–{match.group(2)} В")
+    lines.extend(dict.fromkeys(voltage_lines))
+    warranty = next((str(v).strip() for k, v in attrs.items()
+                     if "гарант" in k.lower() and str(v).strip() not in {"", "0", "0.0"}), "")
+    if warranty:
+        if warranty.isdigit():
+            warranty += " мес."
+        lines.append(f"🛡 Гарантия: {warranty}")
+    delivery = attrs.get("Срок поставки, дней")
+    if delivery and str(delivery).strip() not in {"0", "0.0"}:
+        lines.append(f"🚚 Ориентировочный срок поставки: {delivery} дн.")
+    return list(dict.fromkeys(lines))[:8]
+
+
+def _render_storefront_caption(f: dict, price, cap_max: int) -> str:
+    # Название API уже содержит бренд; не дублируем его отдельным префиксом.
+    header_fields = dict(f)
+    header_fields["brand"] = ""
+    lines = [_header(header_fields, price), _DIVIDER]
+    features = _storefront_features(f)
+    if features:
+        lines += ["Основные характеристики:", *features, ""]
+    lines += ["Подберём модель под нагрузку и параметры вашей сети.",
+              "Заказ и консультация: Крым, Запорожская и Херсонская области."]
+    return "\n".join(lines).strip()[:cap_max].rstrip()
 
 
 def _extract(item) -> dict:
@@ -95,10 +165,10 @@ def _header(f: dict, price) -> str:
     head = f"{f['brand']} {f['model_title']}".strip()
     if price:
         tail = [f"<b>{_money(price)}</b>"]
-        if f["qty"]:
+        if f["qty"] and f.get("source") != "storefront":
             tail.append(f"{f['qty']} шт.")
         return head + "\n<blockquote>💎 " + " · ".join(tail) + "</blockquote>"
-    if f["qty"]:
+    if f["qty"] and f.get("source") != "storefront":
         return f"{head} — {f['qty']} шт."
     return head
 
@@ -111,7 +181,11 @@ def _series_header(f: dict, in_stock) -> str:
     if " серии " in mt:
         head = f"{f['brand']} {mt.split(' серии ')[0].strip()} серии {f['series']}".strip()
     else:
-        head = f"{f['brand']} {f['series']}".strip()
+        # Без слова «серии» заголовок схлопывался до «Бренд + код серии»: живой
+        # пост назывался «Axioma H», хотя тип техники был в наименовании.
+        kind = _TYPE_PREFIX_RE.match(mt.strip())
+        head = (f"{f['brand']} {kind.group(1)} серии {f['series']}".strip()
+                if kind and f["series"] else f"{f['brand']} {f['series']}".strip())
     prices = [p for _, p in in_stock if p]
     if prices:
         head += f"\n<blockquote>💎 <b>от {_money(min(prices))}</b></blockquote>"
@@ -130,7 +204,7 @@ def _series_lines(in_stock) -> list[str]:
         bits = [f"{size:02d}" if size else (m.model or "?")[:24]]
         if p:
             bits.append(_money(p))
-        if m.stock:
+        if m.stock and m.source != "storefront":
             bits.append(f"{m.stock} шт.")
         out.append("▫️ " + " · ".join(bits))
     return out
@@ -144,29 +218,34 @@ def render_caption(item, price, cfg, utp_raw=None, member_prices=None) -> str:
     серийной (заголовок «от X ₽» без артикула + строки мощность/цена/остаток)."""
     f = _extract(item)
     cap_max = getattr(cfg, "caption_max", 1024)
+    if f.get("source") == "storefront":
+        text = _render_storefront_caption(f, price, cap_max)
+        return _strip_stopwords(text, getattr(cfg, "stop_words", [])).strip()
     in_stock = [(m, p) for m, p in (member_prices or []) if (m.stock or 0) > 0]
     serial = len(in_stock) >= 2
     header = _series_header(f, in_stock) if serial else _header(f, price)
 
+    # Ручное описание заменяет собой буллеты ТТХ, но не живые цены: наличие и
+    # цена сверяются перед публикацией и не могут быть вытеснены готовым текстом.
     override = (getattr(cfg, "descriptions", None) or {}).get(f["key"])
+    lines = [header, _DIVIDER]
     if override:
-        text = f"{header}\n{_DIVIDER}\n{override.strip()}"
-    else:
+        lines += [override.strip(), ""]
+    if serial:
+        lines.append("Модели и цены:")
+        lines += _series_lines(in_stock)
+        lines.append("")
+    if not override:
         bullets = []
         power = _power_line(f)
         if power:
             bullets.append(f"❄️ {power}")
         bullets += build_specs_for_card(f["tech_rows"], f["brand"], f["series"], f["source"],
                                         utp_raw=utp_raw)
-        lines = [header, _DIVIDER]
-        if serial:
-            lines.append("Модели и цены:")
-            lines += _series_lines(in_stock)
-            lines.append("")
         if bullets:
             lines.append("Ключевые особенности:")
             lines += bullets
-        text = "\n".join(lines)
+    text = "\n".join(lines).rstrip()
 
     text = _strip_stopwords(text, getattr(cfg, "stop_words", [])).strip()
     if len(text) > cap_max:

@@ -69,7 +69,8 @@ def make_order_flow(store, links, pub_state):
         qty = st.qty or 1
         comment = st.comment or ""
         links.add_lead(int(user.get("id") or 0), user.get("username") or "",
-                       st.key, qty=qty, comment=comment, phone=phone)
+                       st.key, qty=qty, comment=comment, phone=phone,
+                       origin=st.origin, content_id=st.content_id)
         summary = item_summary(pub_state, st.key)
         store.cancel(chat_id)
         r = OrderReply(f"✅ Заявка принята! {summary.splitlines()[0]} — {qty} шт.\n"
@@ -84,11 +85,14 @@ def make_order_flow(store, links, pub_state):
         return r
 
     def start(chat_id, code, user) -> OrderReply:
-        key = links.key_for(code)
-        if not key:
+        attribution = links.attribution_for(code)
+        if not attribution:
             return OrderReply("К сожалению, товар не найден (возможно, пост устарел). "
                               "Напишите нам!")
-        store.start(chat_id, key)
+        key, origin, content_id = attribution
+        links.add_click(int(user.get("id") or 0), user.get("username") or "", key,
+                        origin=origin, content_id=content_id)
+        store.start(chat_id, key, origin=origin, content_id=content_id)
         return OrderReply(f"Вы выбрали:\n{item_summary(pub_state, key)}\n\n"
                           f"Сколько штук заказываете?", QTY_KB)
 

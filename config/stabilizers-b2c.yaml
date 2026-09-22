@@ -1,0 +1,85 @@
+# Изолированный полуавтоматический пилот стабилизаторов. Секрет API хранится только в .env.
+source:
+  kind: storefront_api
+  api_url: "https://climat-simf.ru/api/internal/tender-products"
+  token_env: "TENDER_SUPPLIER_API_TOKEN"
+  queries:
+    - "стабилизатор напряжения"
+    - "стабилизатор Ресанта"
+    - "стабилизатор Rucelf"
+    - "стабилизатор Powerman"
+  limit_per_query: 20
+  category_id: 10598
+  available_only: true
+  enrich_product_pages: true
+  timeout_seconds: 30
+
+pricing:
+  # Цена берётся из публичной карточки магазина, чтобы пост не расходился с сайтом.
+  prefer_retail_ref: true
+  default_markup_pct: 5
+  rounding: up_to_90
+  min_margin_abs: 0
+
+content:
+  caption_max: 1024
+  stop_words: ["скидка только сегодня", "лучшая цена", "гарантированно"]
+
+cards:
+  dir: "state/stabilizers/cards"
+  base_url: ""
+  # kbt = премиальная карточка по эталонам; исходное фото задаёт геометрию товара.
+  default_mode: kbt
+  require_for_publish: true
+  modes_by_category: {10598: kbt}
+  reference_dir: "state/stabilizer-product-references"
+  trusted_image_domains:
+    - "rucelf.com"
+    - "rucelf.ru"
+    - "rucrussia.ru"
+    - "dns-shop.ru"
+    - "vseinstrumenti.ru"
+
+fotogen:
+  api_url: "http://127.0.0.1:8765"
+  per_run: 2
+  max_pending: 4
+  max_total: 100000
+
+telegram:
+  channel_id: ""
+  test_channel_id: ""
+  review_channel_id: ""
+  order_bot: "Sendpr1ce_bot"
+  min_seconds_between_posts: 300
+  parse_mode: HTML
+
+vk:
+  # Целевая стена — бизнес-сообщество vk.ru/club241020718. Минус означает стену сообщества.
+  # Первый этап — только формирование payload/превью. Реальная публикация выключена.
+  enabled: true
+  app_id: 54732587
+  owner_id: -241020718
+  token_env: VK_ACCESS_TOKEN
+  redirect_uri: "https://climat-simf.ru/"
+  token_store: "state/vk-tokens.json"
+  # Базовый путь отдельных Open Graph-страниц: VK берёт фото и описание именно оттуда.
+  share_url: "https://climat-simf.ru/share/vk"
+  public_image_base_url: "https://splithome.ru/static/cf-cards"
+  api_version: "5.199"
+  dry_run: true
+
+# Намеренно пусто: никакой автоматической публикации до отдельного пилота и проверки владельцем.
+auto_tasks: []
+channel_sync: {enabled: false}
+
+review:
+  price_min: 1000
+  price_max: 1000000
+  require_specs: true
+  require_card: true
+  caption_max: 1024
+
+state:
+  db: "state/stabilizers/content_factory.db"
+  card_jobs_db: "state/stabilizers/card_jobs.db"

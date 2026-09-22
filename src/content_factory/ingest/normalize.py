@@ -41,10 +41,14 @@ def to_offer(raw: RawProduct, cost: Decimal | None) -> Offer:
             series = ps
         if pk and raw.source == "rusklimat":       # btu_calc у rusklimat недостоверен → берём из модель-кода
             btu = pk
+    # Для Breeze поле price_wholesale в нашей БД сайта фактически содержит
+    # публичную розничную цену. Закупку берём отдельно из leftoversnew API.
+    # Сохраняем обе цены: так публичный контент может строго совпадать с витриной.
+    retail_ref = raw.price_wholesale if raw.source == "breeze" else None
     return Offer(
         supplier_sku=f"{raw.source}:{raw.nc_code or raw.title}",
         source=raw.source, brand=raw.brand or "", model=raw.title,
         category_id=raw.category_id, btu_calc=btu, attrs=dict(raw.tech),
-        cost=cost, retail_ref=None, stock=raw.stock_qty, photos=list(raw.image_urls),
+        cost=cost, retail_ref=retail_ref, stock=raw.stock_qty, photos=list(raw.image_urls),
         series=series, content_hash=content_hash(raw),
     )

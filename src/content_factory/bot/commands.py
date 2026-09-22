@@ -204,7 +204,8 @@ def handle_command(text: str, queue, today: date | None = None, held_provider=No
                    regen_fn=None, make_fn=None, find_fn=None, pick_fn=None,
                    excel_fn=None, price_fn=None, sources_fn=None, markup_fn=None,
                    auto_fn=None, auto_state_fn=None,
-                   generation_fn=None, generation_state_fn=None) -> str:
+                   generation_fn=None, generation_state_fn=None,
+                   vkplan_fn=None) -> str:
     """Маршрутизация команды → действие → текст ответа владельцу.
     confirm_store/publish_fn/publish_state нужны для confirm-пилота (/approve, /reject, /pending).
     publish_fn(awaiting) -> PublishResult публикует подтверждённый пост в канал.
@@ -338,6 +339,8 @@ def handle_command(text: str, queue, today: date | None = None, held_provider=No
         return auto_fn(" ".join(parts[1:]).lower() if len(parts) > 1 else None)
     if cmd.startswith("/status"):
         return _status(queue, auto_state_fn, generation_state_fn)
+    if cmd.startswith("/vkplan"):
+        return vkplan_fn() if vkplan_fn else "❌ VK-план недоступен"
     if cmd.startswith("/cancel"):
         parts = text.split()
         if len(parts) < 2:

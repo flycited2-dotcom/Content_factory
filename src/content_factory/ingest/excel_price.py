@@ -135,13 +135,20 @@ def _parse_1c_blocks(ws) -> list[PriceItem]:
 
 
 def parse_price_xlsx(path) -> list[PriceItem]:
-    """Позиции прайса. Стратегии: таблица (БытТехОпт) → блоки 1С (ИП Аксёнов и т.п.)."""
+    """Позиции прайса: для каждого листа выбирается наиболее полная стратегия.
+
+    Это важно для универсальных прайсов: у Brinex, например, первые пять колонок
+    внешне похожи на старый табличный формат, но реальные ``Номенклатура`` и
+    ``Цена`` находятся в других колонках. Первое частичное совпадение не должно
+    блокировать корректный автопоиск шапки.
+    """
     import openpyxl                                   # тяжёлый импорт — только по нужде
     wb = openpyxl.load_workbook(Path(path), read_only=True)
     items: list[PriceItem] = []
     for sheet in wb.sheetnames:
         ws = wb[sheet]
-        got = _parse_table(ws) or _parse_generic(ws) or _parse_1c_blocks(ws)
+        candidates = (_parse_table(ws), _parse_generic(ws), _parse_1c_blocks(ws))
+        got = max(candidates, key=len)
         items.extend(got)
     wb.close()
     return items
@@ -207,6 +214,8 @@ def load_price_slots(prices_dir) -> list[tuple[str, list[PriceItem]]]:
     pdir = Path(prices_dir)
     markups = get_markups(prices_dir)
     for p in sorted(pdir.glob("manual__*.xlsx")):        # прайсы поставщиков (несколько)
+        out.append((p.stem, _apply_markup(parse_price_xlsx(p), markups.get(p.stem, 0))))
+    for p in sorted(pdir.glob("mail__*.xlsx")):          # отдельный слот каждого почтового поставщика
         out.append((p.stem, _apply_markup(parse_price_xlsx(p), markups.get(p.stem, 0))))
     for label in ("manual", "channel", "mail"):
         p = pdir / f"{label}.xlsx"

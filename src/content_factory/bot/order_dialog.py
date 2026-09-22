@@ -17,6 +17,8 @@ class OrderState:
     key: str
     qty: int | None
     comment: str | None = None
+    origin: str = ""
+    content_id: str = ""
 
 
 class OrderDialogStore:
@@ -26,23 +28,28 @@ class OrderDialogStore:
         with self._c() as c:
             c.execute("CREATE TABLE IF NOT EXISTS order_dialog ("
                       "chat_id TEXT PRIMARY KEY, step TEXT, key TEXT, qty INTEGER, "
-                      "comment TEXT)")
-            try:                                  # таблица из волны 1 была без comment —
-                c.execute("ALTER TABLE order_dialog ADD COLUMN comment TEXT")
-            except sqlite3.OperationalError:
-                pass                              # колонка уже есть (свежая таблица)
+                      "comment TEXT, origin TEXT DEFAULT '', content_id TEXT DEFAULT '')")
+            for ddl in ("ALTER TABLE order_dialog ADD COLUMN comment TEXT",
+                        "ALTER TABLE order_dialog ADD COLUMN origin TEXT DEFAULT ''",
+                        "ALTER TABLE order_dialog ADD COLUMN content_id TEXT DEFAULT ''"):
+                try:
+                    c.execute(ddl)
+                except sqlite3.OperationalError:
+                    pass
 
     def _c(self):
         return sqlite3.connect(self.path)
 
-    def start(self, chat_id: str, key: str) -> None:
+    def start(self, chat_id: str, key: str, *, origin: str = "",
+              content_id: str = "") -> None:
         """Начать (или перезапустить с нуля) заявку по товару key."""
         with self._c() as c:
-            c.execute("INSERT INTO order_dialog(chat_id, step, key, qty, comment) "
-                      "VALUES(?,?,?,NULL,NULL) "
+            c.execute("INSERT INTO order_dialog(chat_id,step,key,qty,comment,origin,content_id) "
+                      "VALUES(?,?,?,NULL,NULL,?,?) "
                       "ON CONFLICT(chat_id) DO UPDATE SET step=excluded.step, "
-                      "key=excluded.key, qty=NULL, comment=NULL",
-                      (str(chat_id), "awaiting_qty", key))
+                      "key=excluded.key,qty=NULL,comment=NULL,origin=excluded.origin,"
+                      "content_id=excluded.content_id",
+                      (str(chat_id), "awaiting_qty", key, origin or "", content_id or ""))
 
     def set_qty(self, chat_id: str, qty: int) -> None:
         with self._c() as c:
@@ -65,10 +72,11 @@ class OrderDialogStore:
 
     def snapshot(self, chat_id: str) -> OrderState | None:
         with self._c() as c:
-            row = c.execute("SELECT step, key, qty, comment FROM order_dialog "
+            row = c.execute("SELECT step,key,qty,comment,COALESCE(origin,''),"
+                            "COALESCE(content_id,'') FROM order_dialog "
                             "WHERE chat_id=?", (str(chat_id),)).fetchone()
         if not row:
             return None
-        step, key, qty, comment = row
+        step, key, qty, comment, origin, content_id = row
         return OrderState(chat_id=str(chat_id), step=step, key=key, qty=qty,
-                          comment=comment)
+                          comment=comment, origin=origin, content_id=content_id)

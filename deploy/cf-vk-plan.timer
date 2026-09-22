@@ -1,0 +1,11 @@
+[Unit]
+Description=Run VK Content Planner every 30 minutes
+
+[Timer]
+OnCalendar=*:0/30
+RandomizedDelaySec=3m
+Persistent=true
+Unit=cf-vk-plan.service
+
+[Install]
+WantedBy=timers.target
