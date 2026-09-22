@@ -1,7 +1,8 @@
 """Конвейер excel-товара: new → research → card → preview (+ кэш УТП, ретраи)."""
 import time as _time
 
-from content_factory.orchestrator.excel_pipeline import ExcelStore, tick
+from content_factory.orchestrator.excel_pipeline import (ExcelStore, parse_research_result,
+                                                         tick)
 
 
 def test_add_items_with_due_at_hidden_until_due(tmp_path):
@@ -52,8 +53,8 @@ def _fns(jobs=None, research_id=101, card_id=201):
     def read_job(job_id):
         return (jobs or {}).get(job_id, ("pending", None, None, None))
 
-    def submit_card(brand, model, utp, photo_path):
-        calls["card"].append((brand, model, utp, photo_path))
+    def submit_card(brand, model, utp, photo_path, mode="kbt"):
+        calls["card"].append((brand, model, utp, photo_path, mode))
         return card_id
 
     def preview(item, card_file):
@@ -78,7 +79,7 @@ def test_cache_hit_skips_research(tmp_path):
     tick(s, *fns)
     (item,) = s.by_status("card")
     assert calls["research"] == []                        # ChatGPT не тронут
-    assert calls["card"] == [("Beko", "X1", "✓ Кэш УТП", "/photos/x1.png")]
+    assert calls["card"] == [("Beko", "X1", "✓ Кэш УТП", "/photos/x1.png", "kbt")]
 
 
 def test_research_done_caches_and_submits_card(tmp_path):
@@ -169,5 +170,71 @@ def test_due_scheduled_returns_matured_only(tmp_path):
     es.add_items([("excel|c|3", "C", "3", "Товар C3", 300)])          # без расписания
     due = es.due_scheduled(now=1600.0)
     assert [d["brand"] for d in due] == ["B"]                         # дозрел только B
+    assert due[0]["key"] == "excel|b|2"
     es.update("excel|b|2", status="research")                         # тик забрал
     assert es.due_scheduled(now=1600.0) == []                         # алерт одноразовый
+
+
+def test_telegram_start_alert_only_for_manual_tasks_that_can_start(tmp_path):
+    from content_factory.orchestrator.excel_run import telegram_starting_items
+    from content_factory.orchestrator.excel_pipeline import ExcelStore
+    es = ExcelStore(tmp_path / "s.db")
+    es.add_items([("excel|a|1", "A", "1", "Товар A1", 100)], due_at=1.0)
+    es.add_items([("ready-price|2", "B", "2", "Товар B2", 200)], due_at=1.0)
+    assert telegram_starting_items(es, False) == []
+    assert [x["key"] for x in telegram_starting_items(es, True)] == ["excel|a|1"]
+
+
+def test_verified_research_json_keeps_evidence():
+    raw = '{"exact_model":true,"source_url":"https://maker.test/x1","photo_url":"https://maker.test/x1.png","features":["No Frost","320 л","39 дБ"]}'
+    utp, evidence = parse_research_result(raw)
+    assert utp == "✓ No Frost\n✓ 320 л\n✓ 39 дБ"
+    assert evidence["source_url"] == "https://maker.test/x1"
+
+
+def test_ready_price_ignores_unverified_legacy_cache(tmp_path):
+    s = ExcelStore(tmp_path / "s.db")
+    s.add_items([("ready-price|A-1", "Beko", "X1", "Холодильник Beko X1", 30000,
+                  "mcp")])
+    s.cache_put("beko|x1", "✓ старый кэш", "research_old.png")
+    calls, *fns = _fns()
+    tick(s, *fns)
+    assert calls["card"] == []
+    assert calls["research"] == [("Beko", "X1", "Холодильник")]
+
+
+def test_ready_price_uses_requested_card_mode(tmp_path):
+    s = ExcelStore(tmp_path / "s.db")
+    s.add_items([("ready-price|TV-1", "BQ", "43F34B", "Телевизор BQ 43F34B", 20000,
+                  "kbt")])
+    evidence = {"exact_model": True, "source_url": "https://bq.test/43f34b",
+                "photo_url": "https://bq.test/43f34b.png", "features": ["4K", "HDR", "Wi-Fi"]}
+    s.cache_put("bq|43f34b", "✓ 4K", "research_tv.png", evidence=evidence)
+    calls, *fns = _fns()
+    tick(s, *fns)
+    assert calls["card"][0][-1] == "kbt"
+
+
+def test_ready_price_card_is_saved_for_avito_without_telegram(tmp_path):
+    from content_factory.orchestrator.excel_run import save_ready_price_content
+    s = ExcelStore(tmp_path / "state.db")
+    s.add_items([("ready-price|A-1", "BQ", "KT100", "Kettle BQ KT100", 1050,
+                  "mcp")])
+    evidence = {"exact_model": True, "source_url": "https://bq.test/kt100",
+                "photo_url": "https://bq.test/kt100.png", "features": ["1.7 L"]}
+    s.cache_put("bq|kt100", "1.7 L", "research.png", evidence=evidence)
+    output = tmp_path / "output"; output.mkdir()
+    (output / "card.png").write_bytes(b"card")
+    (output / "research.png").write_bytes(b"original")
+    item = s.get("ready-price|A-1")
+    from unittest.mock import patch
+    with patch("content_factory.orchestrator.excel_run.audit_card_text",
+               return_value={"passed": True, "engine": "test", "unverified_terms": []}):
+        assert save_ready_price_content(s, item, "card.png", output,
+                                        tmp_path / "ready") == (True, None)
+    manifest = __import__("json").loads((tmp_path / "ready/A-1/content.json").read_text())
+    assert manifest["article"] == "A-1" and manifest["evidence"] == evidence
+    assert manifest["original"] == "original.png"
+    assert manifest["card_text_audit"]["passed"] is True
+    assert (tmp_path / "ready/A-1/card.png").read_bytes() == b"card"
+    assert (tmp_path / "ready/A-1/original.png").read_bytes() == b"original"

@@ -4,8 +4,10 @@ new → research (УТП+фото по наименованию; кэш — Chat
 Дальше — штатные кнопки ✅/❌/🔄. Чистая логика: сеть/файлы инъецируются
 (обвязка — excel_run). Ретрай одного этапа: 1 повтор, потом failed."""
 from __future__ import annotations
+import json
 import sqlite3
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,6 +26,7 @@ class ExcelItem:
     card_job: int | None
     tries: int
     error: str | None
+    card_mode: str = "kbt"
 
 
 class ExcelStore:
@@ -36,35 +39,55 @@ class ExcelStore:
                       "key TEXT PRIMARY KEY, brand TEXT, model TEXT, name TEXT, "
                       "price INTEGER, status TEXT DEFAULT 'new', research_job INTEGER, "
                       "card_job INTEGER, tries INTEGER DEFAULT 0, error TEXT, ts REAL, "
-                      "due_at REAL)")
-            try:      # миграция существующей таблицы (SQLite: колонку — только ALTER)
-                c.execute("ALTER TABLE excel_items ADD COLUMN due_at REAL")
-            except sqlite3.OperationalError:
-                pass                       # колонка уже есть
+                      "due_at REAL, card_mode TEXT DEFAULT 'kbt')")
+            for migration in (
+                "ALTER TABLE excel_items ADD COLUMN due_at REAL",
+                "ALTER TABLE excel_items ADD COLUMN card_mode TEXT DEFAULT 'kbt'",
+            ):
+                try:
+                    c.execute(migration)
+                except sqlite3.OperationalError:
+                    pass
             c.execute("CREATE TABLE IF NOT EXISTS research_cache ("
                       "model_key TEXT PRIMARY KEY, utp TEXT, photo_path TEXT, "
-                      "source TEXT DEFAULT 'research', ts REAL)")
+                      "source TEXT DEFAULT 'research', ts REAL, evidence TEXT)")
+            try:
+                c.execute("ALTER TABLE research_cache ADD COLUMN evidence TEXT")
+            except sqlite3.OperationalError:
+                pass
 
+    @contextmanager
     def _c(self):
-        return sqlite3.connect(self.path)
+        # sqlite3.Connection.__exit__ делает commit/rollback, но НЕ закрывает
+        # соединение. Один ready-price тик обращается к сотням строк и раньше
+        # оставлял сотни fd до завершения процесса, вызывая долгий fdatasync и
+        # блокировку state DB. Закрываем каждое соединение явно.
+        connection = sqlite3.connect(self.path, timeout=30)
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def add_items(self, rows, due_at: float | None = None) -> int:
         """rows: [(key, brand, model, name, price)]. Повторные ключи игнорируются.
         due_at — расписание (/task «завтра 9:00»): до срока тик товар не берёт."""
         n = 0
         with self._c() as c:
-            for key, brand, model, name, price in rows:
+            for row in rows:
+                key, brand, model, name, price = row[:5]
+                card_mode = row[5] if len(row) > 5 else "kbt"
                 cur = c.execute("INSERT OR IGNORE INTO excel_items"
-                                "(key, brand, model, name, price, status, tries, ts, due_at) "
-                                "VALUES(?,?,?,?,?,'new',0,?,?)",
-                                (key, brand, model, name, price, time.time(), due_at))
+                                "(key, brand, model, name, price, status, tries, ts, due_at, card_mode) "
+                                "VALUES(?,?,?,?,?,'new',0,?,?,?)",
+                                (key, brand, model, name, price, time.time(), due_at, card_mode))
                 n += cur.rowcount
         return n
 
     def _row(self, r) -> ExcelItem:
         return ExcelItem(key=r[0], brand=r[1], model=r[2], name=r[3], price=r[4],
                          status=r[5], research_job=r[6], card_job=r[7],
-                         tries=r[8] or 0, error=r[9])
+                         tries=r[8] or 0, error=r[9], card_mode=r[10] or "kbt")
 
     def all_keys(self) -> set:
         """Все ключи в работе/истории (анти-дубль при /make)."""
@@ -74,7 +97,7 @@ class ExcelStore:
     def get(self, key: str) -> ExcelItem | None:
         with self._c() as c:
             r = c.execute("SELECT key, brand, model, name, price, status, research_job, "
-                          "card_job, tries, error FROM excel_items WHERE key=?",
+                          "card_job, tries, error,card_mode FROM excel_items WHERE key=?",
                           (key,)).fetchone()
         return self._row(r) if r else None
 
@@ -86,17 +109,18 @@ class ExcelStore:
         args = (status, now if now is not None else time.time()) if status == "new" else (status,)
         with self._c() as c:
             rows = c.execute("SELECT key, brand, model, name, price, status, research_job, "
-                             f"card_job, tries, error FROM excel_items WHERE status=?{due_filter} "
+                             f"card_job, tries, error,card_mode FROM excel_items WHERE status=?{due_filter} "
                              "ORDER BY ts", args).fetchall()
         return [self._row(r) for r in rows]
 
     def _sched_rows(self, cmp: str, now: float | None) -> list[dict]:
         with self._c() as c:
-            rows = c.execute("SELECT brand, model, name, due_at FROM excel_items "
+            rows = c.execute("SELECT key, brand, model, name, due_at FROM excel_items "
                              "WHERE status='new' AND due_at IS NOT NULL "
                              f"AND due_at {cmp} ? ORDER BY due_at",
                              (now if now is not None else time.time(),)).fetchall()
-        return [{"brand": r[0], "model": r[1], "name": r[2], "due_at": r[3]}
+        return [{"key": r[0], "brand": r[1], "model": r[2], "name": r[3],
+                 "due_at": r[4]}
                 for r in rows]
 
     def scheduled(self, now: float | None = None) -> list[dict]:
@@ -134,8 +158,19 @@ class ExcelStore:
                             (model_key,)).fetchone()
         return row if row else None
 
+    def cache_evidence(self, model_key: str) -> dict | None:
+        with self._c() as c:
+            row = c.execute("SELECT evidence FROM research_cache WHERE model_key=?",
+                            (model_key,)).fetchone()
+        if not row or not row[0]:
+            return None
+        try:
+            return json.loads(row[0])
+        except (TypeError, ValueError):
+            return None
+
     def cache_put(self, model_key: str, utp: str, photo_path: str | None,
-                  source: str = "research") -> None:
+                  source: str = "research", evidence: dict | None = None) -> None:
         with self._c() as c:
             # ручные УТП (source='manual') приоритетнее — research их не перезаписывает
             row = c.execute("SELECT source FROM research_cache WHERE model_key=?",
@@ -143,8 +178,9 @@ class ExcelStore:
             if row and row[0] == "manual" and source != "manual":
                 return
             c.execute("INSERT OR REPLACE INTO research_cache"
-                      "(model_key, utp, photo_path, source, ts) VALUES(?,?,?,?,?)",
-                      (model_key, utp, photo_path, source, time.time()))
+                      "(model_key, utp, photo_path, source, ts, evidence) VALUES(?,?,?,?,?,?)",
+                      (model_key, utp, photo_path, source, time.time(),
+                       json.dumps(evidence, ensure_ascii=False) if evidence else None))
 
 
 def _cache_key(item: ExcelItem) -> str:
@@ -160,7 +196,20 @@ def _category_word(item: ExcelItem) -> str:
     return head or item.name.split()[0]
 
 
-def tick(store: ExcelStore, submit_research, read_job, submit_card, preview) -> dict:
+def parse_research_result(raw: str | None) -> tuple[str, dict | None]:
+    try:
+        data = json.loads(raw or "")
+    except (TypeError, ValueError):
+        return raw or "", None
+    features = data.get("features") if isinstance(data, dict) else None
+    if data.get("exact_model") is not True or not data.get("source_url") or not isinstance(features, list):
+        return raw or "", None
+    clean = [str(x).strip() for x in features if str(x).strip()]
+    return "\n".join(f"✓ {x}" for x in clean), data
+
+
+def tick(store: ExcelStore, submit_research, read_job, submit_card, preview,
+         max_new: int | None = None, new_key_prefix: str | None = None) -> dict:
     """Один проход конвейера. Инъекции:
     submit_research(brand, model, category) -> job_id
     read_job(job_id) -> (status, output_filename, result_specs, error)
@@ -174,15 +223,24 @@ def tick(store: ExcelStore, submit_research, read_job, submit_card, preview) -> 
             store.update(item.key, status="failed", error=err)
             stats["failed"] += 1
         else:
-            store.update(item.key, tries=item.tries + 1, **stage_reset)
+            store.update(item.key, tries=item.tries + 1, error=err, **stage_reset)
 
-    for item in store.by_status("new"):
+    new_items = store.by_status("new")
+    if new_key_prefix is not None:
+        new_items = [item for item in new_items if item.key.startswith(new_key_prefix)]
+    if max_new is not None:
+        new_items = new_items[:max(0, max_new)]
+    for item in new_items:
         cached = store.cache_get(_cache_key(item))
         if cached:
             utp, photo = cached
-            if photo:
-                job = submit_card(item.brand, item.model, utp, photo)
-                store.update(item.key, status="card", card_job=job, tries=0)
+            evidence = store.cache_evidence(_cache_key(item))
+            if photo and (not item.key.startswith("ready-price|") or evidence):
+                job = submit_card(item.brand, item.model, utp, photo, item.card_mode)
+                # Preserve a card-audit retry counter.  Resetting it here made
+                # a repeatedly hallucinated card loop forever without reaching
+                # the failed/backoff state.
+                store.update(item.key, status="card", card_job=job, tries=item.tries)
                 stats["card"] += 1
                 continue
         job = submit_research(item.brand, item.model, _category_word(item))
@@ -192,12 +250,17 @@ def tick(store: ExcelStore, submit_research, read_job, submit_card, preview) -> 
     for item in store.by_status("research"):
         status, out, utp, err = read_job(item.research_job)
         if status == "done":
-            store.cache_put(_cache_key(item), utp or "", out)
+            card_text, evidence = parse_research_result(utp)
+            if item.key.startswith("ready-price|") and not evidence:
+                _fail_or_retry(item, {"status": "new", "research_job": None},
+                               "research без проверяемого источника точной модели")
+                continue
+            store.cache_put(_cache_key(item), card_text, out, evidence=evidence)
             if not out:                     # фото не нашлось — карточку не из чего делать
                 _fail_or_retry(item, {"status": "new", "research_job": None},
                                "research без фото")
                 continue
-            job = submit_card(item.brand, item.model, utp or "", out)
+            job = submit_card(item.brand, item.model, card_text, out, item.card_mode)
             store.update(item.key, status="card", card_job=job, tries=0)
             stats["card"] += 1
         elif status == "failed":
@@ -207,9 +270,17 @@ def tick(store: ExcelStore, submit_research, read_job, submit_card, preview) -> 
     for item in store.by_status("card"):
         status, out, _, err = read_job(item.card_job)
         if status == "done" and out:
-            if preview(item, out):
+            result = preview(item, out)
+            if isinstance(result, tuple):
+                accepted, preview_error = result
+            else:
+                accepted, preview_error = bool(result), None
+            if accepted:
                 store.update(item.key, status="preview")
                 stats["preview"] += 1
+            elif preview_error:
+                _fail_or_retry(item, {"status": "new", "card_job": None},
+                               f"card audit: {preview_error}")
         elif status == "failed":
             _fail_or_retry(item, {"status": "new", "card_job": None},
                            f"card: {err or 'ошибка'}")

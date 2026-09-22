@@ -2,7 +2,7 @@
 между periodic-тиком excel_run и визардом /task (план 2026-07-04-bot-task-wizard)."""
 import sqlite3
 import httpx
-from content_factory.orchestrator.card_submit import make_card_submitter, slug
+from content_factory.orchestrator.card_submit import assigned_account, make_card_submitter, slug
 
 
 def _queue_db(tmp_path, input_filename="ext_1.jpg"):
@@ -19,6 +19,24 @@ def _queue_db(tmp_path, input_filename="ext_1.jpg"):
 def test_slug_normalizes():
     assert slug("EXPERTAIR by ZILON") == "expertair-by-zilon"
     assert slug("") == ""
+
+
+def test_account_assignment_is_stable_and_configurable():
+    a = assigned_account("Beko", "X100", "acc1,acc2")
+    assert a in {"acc1", "acc2"}
+    assert assigned_account(" beko ", " x100 ", "acc1,acc2") == a
+    assert assigned_account("Beko", "X100", "only") == "only"
+
+
+def test_account_assignment_preserves_previous_lane(tmp_path):
+    db = tmp_path / "q.db"
+    with sqlite3.connect(db) as con:
+        con.execute("CREATE TABLE jobs(id INTEGER PRIMARY KEY, brand TEXT, model TEXT, "
+                    "assigned_account TEXT)")
+        con.execute("INSERT INTO jobs(brand,model,assigned_account) VALUES(?,?,?)",
+                    ("Hotpoint-Ariston", "HSTF 1231 JSAH BLG", "acc1"))
+    assert assigned_account("Hotpoint-Ariston", "HSTF 1231 JSAH BLG",
+                            "acc1,acc2", str(db)) == "acc1"
 
 
 def test_submit_card_posts_and_silences(tmp_path):
@@ -41,6 +59,7 @@ def test_submit_card_posts_and_silences(tmp_path):
     assert captured["path"] == "/api/submit-job"
     body = captured["body"].decode(errors="ignore")
     assert "Olympio" in body and "specs text" in body
+    assert "assigned_account" in body and "acc" in body
 
     con = sqlite3.connect(db)
     assert con.execute("SELECT result_sent FROM jobs WHERE id=1").fetchone()[0] == 1

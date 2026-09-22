@@ -18,6 +18,7 @@ from content_factory.orchestrator.auto import auto_command, auto_enabled
 from content_factory.publish.telegram import publish_post, PublishState, TG_API
 from content_factory.publish.orders import OrderLinks, order_markup
 from content_factory.bot.order_dialog import OrderDialogStore
+from content_factory.bot.control_menu import ControlMenu, keyboard as control_keyboard
 from content_factory.bot.order_flow import make_order_flow
 from content_factory.orchestrator.queue import TaskQueue
 from content_factory.orchestrator.confirm_store import ConfirmStore
@@ -162,6 +163,7 @@ def make_find_pick_fns(state_db, prices_dir):
                 f"Конвейер: УТП+фото → карточка → превью сюда (тик ~10 мин). Статус: /excel")
 
     def excel_fn(arg: str | None = None):
+        from content_factory.orchestrator.card_submit import assigned_account
         store = ExcelStore(state_db)
         # /excel retry — вернуть failed в конвейер с чистого листа (2026-07-07)
         if arg in ("retry", "повтор", "повторить"):
@@ -170,11 +172,27 @@ def make_find_pick_fns(state_db, prices_dir):
                 return "✅ failed-позиций нет — повторять нечего"
             return (f"🔁 возвращено в конвейер: {n} (research заново, "
                     f"тик ~10 мин). Статус: /excel")
-        counts = {s: len(store.by_status(s))
-                  for s in ("new", "research", "card", "preview", "failed")}
-        lines = [f"Конвейер прайса: 🆕 {counts['new']} · 🔎 research {counts['research']} · "
-                 f"🎨 card {counts['card']} · 👀 превью {counts['preview']} · "
-                 f"❌ failed {counts['failed']}"]
+        statuses = ("new", "research", "card", "preview", "failed")
+        by_status = {s: store.by_status(s) for s in statuses}
+        auto = {s: [i for i in by_status[s] if i.key.startswith("ready-price|")]
+                for s in statuses}
+        manual = {s: [i for i in by_status[s] if not i.key.startswith("ready-price|")]
+                  for s in statuses}
+        lines = [
+            "Авито · автоматический конвейер:",
+            f"🆕 ждут {len(auto['new'])} · 🔎 ищется {len(auto['research'])} · "
+            f"🎨 рисуется {len(auto['card'])} · ✅ готово {len(auto['preview'])} · "
+            f"❌ ошибки {len(auto['failed'])}",
+            "Готовые карточки сохраняются прямо для Avito и в этот чат не присылаются.",
+        ]
+        if any(manual[s] for s in statuses):
+            lines += [
+                "━" * 22,
+                "Ручные задания с Telegram-превью:",
+                f"🆕 {len(manual['new'])} · 🔎 {len(manual['research'])} · "
+                f"🎨 {len(manual['card'])} · 👀 превью {len(manual['preview'])} · "
+                f"❌ {len(manual['failed'])}",
+            ]
         # отложенные /task-позиции by_status('new') прячет от тика — без этой
         # строки они невидимы в статусе («вакуум информации», 2026-07-10)
         sched = store.scheduled()
@@ -186,7 +204,7 @@ def make_find_pick_fns(state_db, prices_dir):
         for s, mark, title in (("research", "🔎", "На research"),
                                ("card", "🎨", "Рисуются карточки"),
                                ("failed", "❌", "Ошибки")):
-            items = store.by_status(s)[:5]
+            items = by_status[s][:5]
             if not items:
                 continue
             lines.append("━" * 22)
@@ -195,8 +213,11 @@ def make_find_pick_fns(state_db, prices_dir):
                 extra = ""
                 if s == "failed" and i.error:
                     extra = f" — {i.error.splitlines()[0][:70]}"
-                lines.append(f"• {i.brand} {i.model}{extra}".strip())
-        if counts["failed"]:
+                lane = assigned_account(
+                    i.brand, i.model,
+                    queue_db=config("FOTOGEN_QUEUE_DB", default="")).upper()
+                lines.append(f"• [{lane}] {i.brand} {i.model}{extra}".strip())
+        if by_status["failed"]:
             lines.append("↻ Вернуть ошибки в работу: /excel retry")
         return "\n".join(lines)
 
@@ -485,6 +506,11 @@ def setup_bot_commands(http, token: str, owner: str) -> None:
     if not (token and owner):
         return
     owner_cmds = [
+        {"command": "menu", "description": "Никита: главное меню"},
+        {"command": "content", "description": "Контент-завод"},
+        {"command": "prices", "description": "Прайсы поставщиков"},
+        {"command": "parsers", "description": "Парсеры и остатки"},
+        {"command": "system", "description": "Состояние и расписание сервисов"},
         {"command": "task", "description": "Поставить задачу кнопками"},
         {"command": "make", "description": "Авто-выбор из прайса по категории"},
         {"command": "find", "description": "Найти позиции в прайсе"},
@@ -516,6 +542,7 @@ def main():
     ps = PublishState(cfg.state.db)
     links = OrderLinks(cfg.state.db)
     pending = PendingCmdStore(cfg.state.db)              # ждём аргумент /find /make /pick
+    control = ControlMenu(cfg.state.db, owner)
     order_store = OrderDialogStore(cfg.state.db)         # опросник заказа клиента
     order_start, order_callback, order_text, order_contact = make_order_flow(
         order_store, links, ps)
@@ -799,6 +826,21 @@ def main():
             msg = u.get("message") or u.get("edited_message") or {}
             chat = str((msg.get("chat") or {}).get("id", ""))
             text = msg.get("text", "")
+            # Owner-only navigation precedes free-text wizards and order dialogs.
+            # Existing slash commands still go through their original handlers.
+            menu_reply = control.handle(text, chat, str((msg.get("from") or {}).get("id", "")))
+            if menu_reply is not None:
+                pending.clear(chat)
+                if menu_reply.command:
+                    text = menu_reply.command
+                else:
+                    try:
+                        http.post(f"{TG_API}/bot{token}/sendMessage", data={
+                            "chat_id": chat, "text": menu_reply.text,
+                            "reply_markup": json.dumps(menu_reply.markup, ensure_ascii=False)})
+                    except httpx.HTTPError:
+                        pass
+                    continue
             # Голосовое сообщение — распознаём в текст (ffmpeg+Google Speech Recognition,
             # см. bot/voice.py) и дальше обрабатываем как обычный текст (визард /task,
             # /make и т.д.). Модели/артикулы речь распознаёт ненадёжно — предупреждаем.
@@ -891,6 +933,7 @@ def main():
                 continue
             # /task — старт визарда постановки задачи кнопками
             if text.strip() == "/task":
+                control._set(chat, "content", control.state(chat)[1])
                 if not generation_state_fn():
                     try:
                         http.post(f"{TG_API}/bot{token}/sendMessage",
@@ -903,15 +946,9 @@ def main():
                 _send_wizard_reply(chat, _wizard_safe(wizard_start, chat))
                 continue
             # фото без reply на превью — шаг визарда «приложить фото»
-            if photos:
+            if photos and control.state(chat)[0] == "content":
                 data = download_telegram_file(http, token, photos[-1].get("file_id"))
                 wr = _wizard_safe(wizard_photo, chat, data) if data is not None else None
-                if wr is not None:
-                    _send_wizard_reply(chat, wr)
-                    continue
-            # текстовый шаг визарда (категория/список/УТП) — если диалог активен
-            if text:
-                wr = _wizard_safe(wizard_text, chat, text)
                 if wr is not None:
                     _send_wizard_reply(chat, wr)
                     continue
@@ -926,6 +963,13 @@ def main():
                 reconstructed = resolve_reply(pending.take(chat), text)
                 if reconstructed:
                     text = reconstructed
+            # Pending /find replies must not be consumed by an old task wizard.
+            # Switching sections pauses the draft, without deleting it.
+            if text and control.state(chat)[0] == "content":
+                wr = _wizard_safe(wizard_text, chat, text)
+                if wr is not None:
+                    _send_wizard_reply(chat, wr)
+                    continue
             if not text:
                 continue
             reply = handle_command(text, q, confirm_store=cs, publish_fn=publish_fn,
@@ -936,7 +980,8 @@ def main():
                                    auto_state_fn=auto_state_fn,
                                    generation_fn=generation_fn,
                                    generation_state_fn=generation_state_fn)
-            data = {"chat_id": chat, "text": reply}
+            data = {"chat_id": chat, "text": reply,
+                    "reply_markup": json.dumps(control_keyboard(control.state(chat)[0]), ensure_ascii=False)}
             if text.strip().startswith("/excel"):      # кнопки отмены активных задач
                 markup = excel_cancel_markup(cfg.state.db, links)
                 if markup:

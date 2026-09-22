@@ -286,6 +286,18 @@ def test_excel_fn_truncates_multiline_errors_and_separates_sections(tmp_path):
     assert "─" in text or "—" in text or "━" in text   # есть разделители секций
 
 
+def test_excel_fn_explains_ready_price_delivery_and_lane(tmp_path):
+    from content_factory.orchestrator.excel_pipeline import ExcelStore
+    es = ExcelStore(tmp_path / "state.db")
+    es.add_items([("ready-price|A-1", "BQ", "43F34B", "Телевизор BQ 43F34B", 20000)])
+    es.update("ready-price|A-1", status="card", card_job=7)
+    _, _, excel_fn = botrun.make_find_pick_fns(tmp_path / "state.db", tmp_path)
+    text = excel_fn()
+    assert "Авито · автоматический конвейер" in text
+    assert "в этот чат не присылаются" in text
+    assert "[ACC" in text and "BQ 43F34B" in text
+
+
 def test_resolve_callback_data_expands_code(tmp_path):
     from content_factory.publish.orders import OrderLinks
     from content_factory.orchestrator.confirm_store import ConfirmStore

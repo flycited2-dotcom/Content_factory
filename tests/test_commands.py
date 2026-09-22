@@ -385,6 +385,12 @@ def test_status_shows_auto_line(tmp_path):
     assert "🤖" not in out
 
 
+def test_vkplan_routes_to_provider(tmp_path):
+    q = TaskQueue(tmp_path / "q.db")
+    assert handle_command("/vkplan", q, vkplan_fn=lambda: "VK PLAN") == "VK PLAN"
+    assert "недоступен" in handle_command("/vkplan", q)
+
+
 def test_markup_command_no_args_lists(tmp_path):
     q = TaskQueue(tmp_path / "q.db")
     out = handle_command("/markup", q, markup_fn=lambda s, p: f"LIST|{s}|{p}")
