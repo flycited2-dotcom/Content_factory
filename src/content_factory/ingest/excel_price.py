@@ -253,6 +253,21 @@ def set_tg_enabled(prices_dir, slot: str, on: bool) -> None:
         encoding="utf-8")
 
 
+_PARSE_CACHE: dict = {}   # path -> (mtime, size, items) — прайс не меняется между кликами
+
+
+def _parse_cached(p: Path) -> list[PriceItem]:
+    """parse_price_xlsx с кэшем по (mtime, size). Возвращает КОПИИ позиций:
+    _apply_markup меняет цену на месте, кэш должен оставаться чистым."""
+    import copy
+    st = p.stat()
+    hit = _PARSE_CACHE.get(str(p))
+    if not hit or hit[0] != st.st_mtime or hit[1] != st.st_size:
+        hit = (st.st_mtime, st.st_size, parse_price_xlsx(p))
+        _PARSE_CACHE[str(p)] = hit
+    return [copy.copy(i) for i in hit[2]]
+
+
 def load_price_slots(prices_dir, for_telegram: bool = False
                      ) -> list[tuple[str, list[PriceItem]]]:
     """Активные прайсы: ручные прайсы поставщиков «manual__*.xlsx» (все, приоритет)
@@ -263,17 +278,15 @@ def load_price_slots(prices_dir, for_telegram: bool = False
     out = []
     pdir = Path(prices_dir)
     markups = get_markups(prices_dir)
-    for p in sorted(pdir.glob("manual__*.xlsx")):        # прайсы поставщиков (несколько)
-        out.append((p.stem, _apply_markup(parse_price_xlsx(p), markups.get(p.stem, 0))))
-    for p in sorted(pdir.glob("mail__*.xlsx")):          # отдельный слот каждого почтового поставщика
-        out.append((p.stem, _apply_markup(parse_price_xlsx(p), markups.get(p.stem, 0))))
-    for label in ("manual", "channel", "mail"):
-        p = pdir / f"{label}.xlsx"
-        if p.exists():
-            out.append((label, _apply_markup(parse_price_xlsx(p), markups.get(label, 0))))
-    if for_telegram:
-        off = tg_disabled(prices_dir)
-        out = [(lbl, its) for lbl, its in out if lbl not in off]
+    off = tg_disabled(prices_dir) if for_telegram else set()
+    paths = ([(p.stem, p) for p in sorted(pdir.glob("manual__*.xlsx"))]      # поставщики
+             + [(p.stem, p) for p in sorted(pdir.glob("mail__*.xlsx"))]     # почта по поставщикам
+             + [(lbl, pdir / f"{lbl}.xlsx") for lbl in ("manual", "channel", "mail")
+                if (pdir / f"{lbl}.xlsx").exists()])
+    for label, p in paths:
+        if label in off:                  # выключен для Telegram — даже не читаем
+            continue
+        out.append((label, _apply_markup(_parse_cached(p), markups.get(label, 0))))
     return out
 
 
