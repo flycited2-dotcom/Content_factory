@@ -18,6 +18,8 @@ from content_factory.orchestrator.auto import auto_command, auto_enabled
 from content_factory.publish.telegram import publish_post, PublishState, TG_API
 from content_factory.publish.orders import OrderLinks, order_markup
 from content_factory.bot.order_dialog import OrderDialogStore
+from content_factory.bot.control_menu import ControlMenu, keyboard as control_keyboard
+from content_factory.bot.avito_categories import category_action, category_text_action
 from content_factory.bot.order_flow import make_order_flow
 from content_factory.orchestrator.queue import TaskQueue
 from content_factory.orchestrator.confirm_store import ConfirmStore
@@ -105,7 +107,85 @@ def make_make_fn(state_db, prices_dir):
     return make_fn
 
 
-def make_find_pick_fns(state_db, prices_dir):
+def ready_price_publication_line(status_file) -> str | None:
+    """Explain the last Avito handoff without claiming that a card was published."""
+    path = Path(status_file)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "📤 Avito: статус передачи пока недоступен"
+    if data.get("status") == "deferred":
+        return "📤 Avito: другой издатель сейчас обновляет XML; повторим по таймеру."
+    content = data.get("content") or {}
+    status = content.get("status")
+    feed_size = (data.get("update") or {}).get("after")
+    if status == "committed" and isinstance(feed_size, int):
+        feed_size += len(content.get("added") or [])
+    feed_note = f" XML: {feed_size} объявлений." if isinstance(feed_size, int) else ""
+    if status == "paused_visual_audit":
+        holds = (data.get("visual_holds") or {}).get("configured") or 0
+        hold_note = f" {holds} ошибочные карточки помечены к снятию; ждём отчёт Avito." if holds else ""
+        return ("⛔ Avito: выпуск новых карточек остановлен на проверку изображений; "
+                "обновление цен продолжается." + hold_note + feed_note)
+    if status == "waiting_active_upload":
+        return "📤 Avito: ждём завершения текущей загрузки; новые карточки пока в очереди." + feed_note
+    if status == "blocked_rejected_batch":
+        rejected = content.get("rejected") or {}
+        count = rejected.get("ads") or rejected.get("count") or 0
+        active = rejected.get("active_ads") or 0
+        active_note = f" В этой партии уже активны: {active}." if active else ""
+        codes = {str(code) for code in rejected.get("error_codes") or []}
+        if "2214" in codes:
+            return (f"⛔ Avito: ещё не активировано объявлений: {count} (код 2214, аванс CPA)."
+                    + active_note + " Новые партии остановлены; обновление цен продолжается."
+                    + feed_note)
+        return (f"⛔ Avito: ещё не активировано объявлений: {count}." + active_note
+                + " Новые партии остановлены до устранения ошибок; обновление цен продолжается."
+                + feed_note)
+    if status == "waiting_previous_batch":
+        receipt = content.get("receipt") or {}
+        if receipt.get("status") == "rejected":
+            return "⛔ Avito: в предыдущей партии есть отклонённые карточки; следующая остановлена." + feed_note
+        missing = receipt.get("missing") or []
+        if missing:
+            return f"📤 Avito: ждём отчёт по {len(missing)} карточкам предыдущей партии." + feed_note
+        inactive = receipt.get("not_active") or []
+        if inactive:
+            return f"📤 Avito: {len(inactive)} карточки предыдущей партии ещё не активны." + feed_note
+        return "📤 Avito: ждём постатейный отчёт по предыдущей партии." + feed_note
+    if status == "committed":
+        count = len(content.get("added") or [])
+        return f"📤 Avito: {count} добавлено в XML; ждём штатной загрузки и отчёта." + feed_note
+    if status == "no_ready_candidates":
+        return "📤 Avito: проверенных кандидатов для следующей партии пока нет." + feed_note
+    if status == "credentials_unavailable":
+        return "⚠️ Avito: нет доступа к API для проверки публикации." + feed_note
+    return None
+
+
+def avito_markup(status: dict) -> dict:
+    """Separate controls for finite Avito content batches."""
+    if status["active"]:
+        action = ({"text": "⏸ Пауза Avito", "callback_data": "avito:pause"}
+                  if status["enabled"] else
+                  {"text": "▶️ Продолжить Avito", "callback_data": "avito:resume"})
+        rows = [[action]]
+        rows.append([{"text": "🛑 Отменить партию", "callback_data": "avito:cancel"},
+                     {"text": "🔄 Перезапуск", "callback_data": "avito:restart"}])
+    else:
+        rows = [[{"text": f"▶️ Общая {n}", "callback_data": f"avito:start:{n}"}
+                 for n in (5, 10, 20)]]
+        if status.get("batch_id"):
+            rows.append([{"text": "🔄 Перезапуск партии", "callback_data": "avito:restart"}])
+    rows.append([{"text": "📦 Категории", "callback_data": "avito:categories"},
+                 {"text": "📋 Очередь", "callback_data": "avito:queue"}])
+    rows.append([{"text": "📊 Статус Avito", "callback_data": "avito:status"}])
+    return {"inline_keyboard": rows}
+
+
+def make_find_pick_fns(state_db, prices_dir, publication_status_path=None):
     """/find <фраза> — нумерованный список кандидатов из прайса;
     /pick 1 3 5 — поставить выбранные в конвейер; /excel — статус конвейера."""
     from content_factory.ingest.excel_price import (
@@ -162,6 +242,7 @@ def make_find_pick_fns(state_db, prices_dir):
                 f"Конвейер: УТП+фото → карточка → превью сюда (тик ~10 мин). Статус: /excel")
 
     def excel_fn(arg: str | None = None):
+        from content_factory.orchestrator.card_submit import assigned_account
         store = ExcelStore(state_db)
         # /excel retry — вернуть failed в конвейер с чистого листа (2026-07-07)
         if arg in ("retry", "повтор", "повторить"):
@@ -170,11 +251,38 @@ def make_find_pick_fns(state_db, prices_dir):
                 return "✅ failed-позиций нет — повторять нечего"
             return (f"🔁 возвращено в конвейер: {n} (research заново, "
                     f"тик ~10 мин). Статус: /excel")
-        counts = {s: len(store.by_status(s))
-                  for s in ("new", "research", "card", "preview", "failed")}
-        lines = [f"Конвейер прайса: 🆕 {counts['new']} · 🔎 research {counts['research']} · "
-                 f"🎨 card {counts['card']} · 👀 превью {counts['preview']} · "
-                 f"❌ failed {counts['failed']}"]
+        statuses = ("new", "research", "card", "preview", "failed")
+        by_status = {s: store.by_status(s) for s in statuses}
+        auto = {s: [i for i in by_status[s] if i.key.startswith("ready-price|")]
+                for s in statuses}
+        manual = {s: [i for i in by_status[s] if not i.key.startswith("ready-price|")]
+                  for s in statuses}
+        lines = [
+            "Авито · автоматический конвейер:",
+            f"🆕 ждут {len(auto['new'])} · 🔎 ищется {len(auto['research'])} · "
+            f"🎨 рисуется {len(auto['card'])} · ✅ готово {len(auto['preview'])} · "
+            f"❌ ошибки {len(auto['failed'])}",
+            "Готовые карточки сохраняются прямо для Avito и в этот чат не присылаются.",
+        ]
+        from content_factory.ready_price import batch_status
+        control = batch_status(state_db)
+        mode = "▶️ партия запущена" if control["enabled"] else "⏸ генерация на паузе"
+        lines.append(f"{mode}; в текущей партии {control['active']} в работе, "
+                     f"следующих {control['backlog']}. Управление: /avito")
+        publication_path = publication_status_path or config(
+            "READY_PRICE_PUBLICATION_STATUS",
+            default="/opt/avito-bridge/state/ready-price/last-run.json")
+        publication_line = ready_price_publication_line(publication_path)
+        if publication_line:
+            lines.append(publication_line)
+        if any(manual[s] for s in statuses):
+            lines += [
+                "━" * 22,
+                "Ручные задания с Telegram-превью:",
+                f"🆕 {len(manual['new'])} · 🔎 {len(manual['research'])} · "
+                f"🎨 {len(manual['card'])} · 👀 превью {len(manual['preview'])} · "
+                f"❌ {len(manual['failed'])}",
+            ]
         # отложенные /task-позиции by_status('new') прячет от тика — без этой
         # строки они невидимы в статусе («вакуум информации», 2026-07-10)
         sched = store.scheduled()
@@ -186,7 +294,7 @@ def make_find_pick_fns(state_db, prices_dir):
         for s, mark, title in (("research", "🔎", "На research"),
                                ("card", "🎨", "Рисуются карточки"),
                                ("failed", "❌", "Ошибки")):
-            items = store.by_status(s)[:5]
+            items = by_status[s][:5]
             if not items:
                 continue
             lines.append("━" * 22)
@@ -195,8 +303,11 @@ def make_find_pick_fns(state_db, prices_dir):
                 extra = ""
                 if s == "failed" and i.error:
                     extra = f" — {i.error.splitlines()[0][:70]}"
-                lines.append(f"• {i.brand} {i.model}{extra}".strip())
-        if counts["failed"]:
+                lane = assigned_account(
+                    i.brand, i.model,
+                    queue_db=config("FOTOGEN_QUEUE_DB", default="")).upper()
+                lines.append(f"• [{lane}] {i.brand} {i.model}{extra}".strip())
+        if by_status["failed"]:
             lines.append("↻ Вернуть ошибки в работу: /excel retry")
         return "\n".join(lines)
 
@@ -485,11 +596,17 @@ def setup_bot_commands(http, token: str, owner: str) -> None:
     if not (token and owner):
         return
     owner_cmds = [
+        {"command": "menu", "description": "Никита: главное меню"},
+        {"command": "content", "description": "Контент-завод"},
+        {"command": "prices", "description": "Прайсы поставщиков"},
+        {"command": "parsers", "description": "Парсеры и остатки"},
+        {"command": "system", "description": "Состояние и расписание сервисов"},
         {"command": "task", "description": "Поставить задачу кнопками"},
         {"command": "make", "description": "Авто-выбор из прайса по категории"},
         {"command": "find", "description": "Найти позиции в прайсе"},
         {"command": "pick", "description": "Взять номера из /find в работу"},
         {"command": "excel", "description": "Статус конвейера прайса"},
+        {"command": "avito", "description": "Avito-контент: партии, пауза, продолжить"},
         {"command": "pending", "description": "Посты на подтверждении"},
         {"command": "status", "description": "Что в очереди"},
         {"command": "generation", "description": "МАСТЕР генерации: статус, вкл/выкл"},
@@ -516,6 +633,7 @@ def main():
     ps = PublishState(cfg.state.db)
     links = OrderLinks(cfg.state.db)
     pending = PendingCmdStore(cfg.state.db)              # ждём аргумент /find /make /pick
+    control = ControlMenu(cfg.state.db, owner)
     order_store = OrderDialogStore(cfg.state.db)         # опросник заказа клиента
     order_start, order_callback, order_text, order_contact = make_order_flow(
         order_store, links, ps)
@@ -541,6 +659,15 @@ def main():
     from content_factory.orchestrator.generation import (
         generation_command, generation_enabled,
     )
+    from content_factory.ready_price import (
+        batch_status as avito_batch_status, control_command as avito_control_command,
+    )
+    avito_catalog = config("READY_PRICE_CATALOG_DB",
+                           default="/opt/avito-bridge/state/ready-price/catalog.sqlite")
+
+    def avito_fn(arg):
+        return avito_control_command(arg, cfg.state.db, avito_catalog,
+                                     config("FOTOGEN_QUEUE_DB", default=""))
 
     def generation_fn(arg):
         return generation_command(
@@ -723,6 +850,22 @@ def main():
                     except httpx.HTTPError:
                         pass
                     continue
+                if data_cq.startswith("avito:"):
+                    action = data_cq.split(":", 1)[1]
+                    selected = category_action(action, cfg.state.db, avito_catalog)
+                    reply, markup = (selected if selected is not None else
+                                     (avito_fn(action.replace(":", " ")), None))
+                    markup = markup or avito_markup(avito_batch_status(cfg.state.db))
+                    chat_a = str((cq.get("message") or {}).get("chat", {}).get("id", ""))
+                    try:
+                        http.post(f"{TG_API}/bot{token}/answerCallbackQuery",
+                                  data={"callback_query_id": cq.get("id"), "text": reply[:180]})
+                        http.post(f"{TG_API}/bot{token}/sendMessage", data={
+                            "chat_id": chat_a, "text": reply,
+                            "reply_markup": json.dumps(markup, ensure_ascii=False)})
+                    except httpx.HTTPError:
+                        pass
+                    continue
                 if data_cq.startswith("auto:ask:"):    # редактор — спросить значение
                     what = data_cq.rsplit(":", 1)[1]
                     prompts = {
@@ -799,6 +942,21 @@ def main():
             msg = u.get("message") or u.get("edited_message") or {}
             chat = str((msg.get("chat") or {}).get("id", ""))
             text = msg.get("text", "")
+            # Owner-only navigation precedes free-text wizards and order dialogs.
+            # Existing slash commands still go through their original handlers.
+            menu_reply = control.handle(text, chat, str((msg.get("from") or {}).get("id", "")))
+            if menu_reply is not None:
+                pending.clear(chat)
+                if menu_reply.command:
+                    text = menu_reply.command
+                else:
+                    try:
+                        http.post(f"{TG_API}/bot{token}/sendMessage", data={
+                            "chat_id": chat, "text": menu_reply.text,
+                            "reply_markup": json.dumps(menu_reply.markup, ensure_ascii=False)})
+                    except httpx.HTTPError:
+                        pass
+                    continue
             # Голосовое сообщение — распознаём в текст (ffmpeg+Google Speech Recognition,
             # см. bot/voice.py) и дальше обрабатываем как обычный текст (визард /task,
             # /make и т.д.). Модели/артикулы речь распознаёт ненадёжно — предупреждаем.
@@ -891,6 +1049,7 @@ def main():
                 continue
             # /task — старт визарда постановки задачи кнопками
             if text.strip() == "/task":
+                control._set(chat, "content", control.state(chat)[1])
                 if not generation_state_fn():
                     try:
                         http.post(f"{TG_API}/bot{token}/sendMessage",
@@ -903,15 +1062,9 @@ def main():
                 _send_wizard_reply(chat, _wizard_safe(wizard_start, chat))
                 continue
             # фото без reply на превью — шаг визарда «приложить фото»
-            if photos:
+            if photos and control.state(chat)[0] == "content":
                 data = download_telegram_file(http, token, photos[-1].get("file_id"))
                 wr = _wizard_safe(wizard_photo, chat, data) if data is not None else None
-                if wr is not None:
-                    _send_wizard_reply(chat, wr)
-                    continue
-            # текстовый шаг визарда (категория/список/УТП) — если диалог активен
-            if text:
-                wr = _wizard_safe(wizard_text, chat, text)
                 if wr is not None:
                     _send_wizard_reply(chat, wr)
                     continue
@@ -926,6 +1079,13 @@ def main():
                 reconstructed = resolve_reply(pending.take(chat), text)
                 if reconstructed:
                     text = reconstructed
+            # Pending /find replies must not be consumed by an old task wizard.
+            # Switching sections pauses the draft, without deleting it.
+            if text and control.state(chat)[0] == "content":
+                wr = _wizard_safe(wizard_text, chat, text)
+                if wr is not None:
+                    _send_wizard_reply(chat, wr)
+                    continue
             if not text:
                 continue
             reply = handle_command(text, q, confirm_store=cs, publish_fn=publish_fn,
@@ -935,12 +1095,26 @@ def main():
                                    markup_fn=markup_fn, auto_fn=auto_fn,
                                    auto_state_fn=auto_state_fn,
                                    generation_fn=generation_fn,
-                                   generation_state_fn=generation_state_fn)
-            data = {"chat_id": chat, "text": reply}
-            if text.strip().startswith("/excel"):      # кнопки отмены активных задач
+                                   generation_state_fn=generation_state_fn,
+                                   avito_fn=avito_fn)
+            data = {"chat_id": chat, "text": reply,
+                    "reply_markup": json.dumps(control_keyboard(control.state(chat)[0]), ensure_ascii=False)}
+            if text.strip().startswith("/excel"):
                 markup = excel_cancel_markup(cfg.state.db, links)
-                if markup:
-                    data["reply_markup"] = json.dumps(markup, ensure_ascii=False)
+                rows = list((markup or {}).get("inline_keyboard", []))
+                rows += avito_markup(avito_batch_status(cfg.state.db))["inline_keyboard"]
+                data["reply_markup"] = json.dumps({"inline_keyboard": rows}, ensure_ascii=False)
+            if text.strip().startswith("/avito"):
+                arg = text.strip()[len("/avito"):].strip()
+                try:
+                    selected = category_text_action(arg, cfg.state.db, avito_catalog)
+                except ValueError as exc:
+                    selected = (f"❌ {exc}", avito_markup(avito_batch_status(cfg.state.db)))
+                if selected is not None:
+                    data["text"], markup = selected
+                else:
+                    markup = avito_markup(avito_batch_status(cfg.state.db))
+                data["reply_markup"] = json.dumps(markup, ensure_ascii=False)
             if text.strip().startswith(("/auto", "/status")):   # кнопка вкл/выкл автомата
                 st_a = auto_state_fn()
                 if st_a is not None:

@@ -8,9 +8,11 @@
 from __future__ import annotations
 import html
 import json
+import os
 import re
 import shutil
 import sqlite3
+import time
 from pathlib import Path
 
 import httpx
@@ -19,10 +21,14 @@ from decouple import config
 from content_factory.config import load_config
 from content_factory.orchestrator.excel_pipeline import ExcelStore, tick
 from content_factory.orchestrator.confirm_store import ConfirmStore
-from content_factory.orchestrator.card_submit import make_card_submitter, slug as _slug
+from content_factory.orchestrator.card_submit import (
+    assigned_account, make_card_submitter, slug as _slug,
+)
 from content_factory.publish.orders import OrderLinks
 from content_factory.publish.telegram import publish_post, send_message
 from content_factory.orchestrator.generation import generation_enabled
+from content_factory.ready_price import batch_keys, enabled as ready_price_enabled, sync_catalog
+from content_factory.ready_price_audit import audit_card_text
 
 DIVIDER = "═" * 26
 
@@ -83,11 +89,99 @@ def preview_markup(code: str) -> dict:
         [{"text": "💰 Изменить цену", "callback_data": f"price:{code}"}]]}
 
 
+def save_ready_price_content(store: ExcelStore, item, card_output: str,
+                             output_dir: Path, content_dir: Path) -> tuple[bool, str | None]:
+    """Сохранить карточку и доказательства для Avito без внешней публикации."""
+    article = item.key.split("|", 1)[1]
+    if not re.fullmatch(r"[A-Za-zА-Яа-я0-9#._-]+", article):
+        return False, "unsafe_article"
+    evidence = store.cache_evidence(f"{item.brand.strip().lower()}|{item.model.strip().lower()}")
+    source = output_dir / card_output
+    cached = store.cache_get(f"{item.brand.strip().lower()}|{item.model.strip().lower()}")
+    original = output_dir / cached[1] if cached and cached[1] else None
+    if not evidence or not source.is_file() or original is None or not original.is_file():
+        return False, "missing_content_inputs"
+    audit = audit_card_text(
+        source, original, brand=item.brand, model=item.model, name=item.name,
+        features=list(evidence.get("features") or []),
+    )
+    if not audit.get("passed"):
+        terms = ",".join(audit.get("unverified_terms") or [])
+        reason = audit.get("reason") or f"unverified_card_text:{terms}"
+        return False, reason
+    target = content_dir / article
+    target.mkdir(parents=True, exist_ok=True)
+    card = target / "card.png"
+    temp_card = target / ".card.png.tmp"
+    shutil.copyfile(source, temp_card)
+    os.replace(temp_card, card)
+    original_target = target / "original.png"
+    temp_original = target / ".original.png.tmp"
+    shutil.copyfile(original, temp_original)
+    os.replace(temp_original, original_target)
+    manifest = {"schema_version": 1, "article": article, "brand": item.brand,
+                "model": item.model, "name": item.name, "price": item.price,
+                "card_mode": item.card_mode, "card": "card.png",
+                "original": "original.png", "evidence": evidence,
+                "card_text_audit": audit}
+    temp_manifest = target / ".content.json.tmp"
+    temp_manifest.write_text(json.dumps(manifest, ensure_ascii=False, indent=2),
+                             encoding="utf-8")
+    os.replace(temp_manifest, target / "content.json")
+    return True, None
+
+
+def telegram_starting_items(store: ExcelStore, global_enabled: bool) -> list[dict]:
+    """Только реально запускаемые ручные задачи, которым придёт Telegram-превью."""
+    if not global_enabled:
+        return []
+    return [item for item in store.due_scheduled()
+            if not item["key"].startswith("ready-price|")]
+
+
+def notify_new_failures(state_db, events: list[tuple[str, str, str]],
+                        token: str, owner_chat: str, http=None) -> int:
+    """Send one alert per item and error type, including across retry cycles."""
+    if not events or not token or not owner_chat:
+        return 0
+    with sqlite3.connect(state_db, timeout=30) as db:
+        db.execute("CREATE TABLE IF NOT EXISTS excel_failure_notifications ("
+                   "item_key TEXT NOT NULL, error_type TEXT NOT NULL, notified_at REAL NOT NULL, "
+                   "PRIMARY KEY(item_key,error_type))")
+        fresh = []
+        for key, name, error in events:
+            error_type = (error or "ошибка").splitlines()[0].strip()
+            # Playwright's changing call log is diagnostic detail, not a new failure.
+            error_type = re.sub(r"Timeout \d+ms exceeded", "Timeout exceeded", error_type)
+            if db.execute("SELECT 1 FROM excel_failure_notifications "
+                          "WHERE item_key=? AND error_type=?", (key, error_type)).fetchone():
+                continue
+            fresh.append((key, name, error_type))
+        if not fresh:
+            return 0
+        lines = [f"— {name[:80]}: {reason}" for _, name, reason in fresh]
+        message = f"❌ Новые ошибки конвейера прайса ({len(fresh)}):\n" + "\n".join(lines)
+        if not send_message(token, owner_chat, message, http=http):
+            return 0
+        db.executemany("INSERT OR IGNORE INTO excel_failure_notifications "
+                       "(item_key,error_type,notified_at) VALUES(?,?,?)",
+                       ((key, reason, time.time()) for key, _, reason in fresh))
+        return len(fresh)
+
+
 def main():
     cfg = load_config(Path("config/config.yaml"))
-    if not generation_enabled(cfg.state.db):
+    global_enabled = generation_enabled(cfg.state.db)
+    source_enabled = ready_price_enabled(cfg.state.db)
+    if not global_enabled and not source_enabled:
         print("excel: generation disabled by master switch")
         return
+    sync_result = None
+    if source_enabled:
+        catalog = Path(config("READY_PRICE_CATALOG_DB",
+                              "/opt/avito-bridge/state/ready-price/catalog.sqlite"))
+        if catalog.is_file():
+            sync_result = sync_catalog(catalog, cfg.state.db)
     store = ExcelStore(cfg.state.db)
     api = config("FOTOGEN_API_URL", cfg.fotogen.api_url).rstrip("/")
     headers = {"x-agent-token": config("FOTOGEN_API_TOKEN")}
@@ -102,10 +196,13 @@ def main():
     cs = ConfirmStore(cfg.state.db)
     links = OrderLinks(cfg.state.db)
 
-    def submit_research(brand, model, category):
+    def submit_research(brand, model, category, *, request_key=""):
         r = http.post(f"{api}/api/submit-research", headers=headers,
                       data={"brand": brand, "model": model, "category": category,
-                            "chat_id": owner_chat or "0"})
+                            "chat_id": owner_chat or "0",
+                            "request_key": request_key,
+                            "assigned_account": assigned_account(
+                                brand, model, queue_db=queue_db)})
         r.raise_for_status()
         return int(r.json()["job_id"])
 
@@ -124,6 +221,10 @@ def main():
             send_message(token, owner_chat, text, http=http)
 
     def preview(item, card_output):
+        if item.key.startswith("ready-price|"):
+            return save_ready_price_content(
+                store, item, card_output, output_dir,
+                Path(config("READY_PRICE_CONTENT_DIR", "/opt/avito-ready-price/content")))
         card = f"{cfg.cards.dir}/excel_{_slug(item.brand)}-{_slug(item.model)}.jpg"
         shutil.copyfile(output_dir / card_output, card)
         utp = (store.cache_get(f"{item.brand.strip().lower()}|{item.model.strip().lower()}")
@@ -142,22 +243,44 @@ def main():
 
     # Дозревшие отложенные позиции снимаем ДО тика (после — уже research);
     # владелец должен видеть старт «задачи к 9:00», а не тишину (2026-07-10)
-    starting = store.due_scheduled()
-    stats = tick(store, submit_research, read_job, submit_card, preview)
+    # ready-price работает полностью автоматически и сохраняет карточки прямо в
+    # Avito-контент. Для него Telegram-превью не предусмотрены, поэтому нельзя
+    # обещать их владельцу каждые 10 минут. Здесь остаются только ручные /task.
+    starting = telegram_starting_items(store, global_enabled)
+    stats = {"research": 0, "card": 0, "preview": 0, "failed": 0}
+    failed_events: list[tuple[str, str, str]] = []
+    manual_stats = stats.copy()
+    if global_enabled:
+        manual_keys = {key for key in store.all_keys() if not key.startswith("ready-price|")}
+        manual_stats = tick(store, submit_research, read_job, submit_card, preview,
+                            allowed_keys=manual_keys, failed_events=failed_events)
+        for key in stats:
+            stats[key] += manual_stats[key]
+    if source_enabled:
+        selected = batch_keys(cfg.state.db)
+        active_ready = sum(1 for status in ("research", "card")
+                           for item in store.by_status(status) if item.key in selected)
+        ready_budget = max(0, int(config("READY_PRICE_MAX_ACTIVE", "6")) - active_ready)
+        ready_stats = tick(store, submit_research, read_job, submit_card, preview,
+                           max_new=ready_budget, allowed_keys=selected,
+                           failed_events=failed_events)
+        for key in stats:
+            stats[key] += ready_stats[key]
     if starting:
         _alert(f"⏳ Стартовала отложенная генерация: {len(starting)} позиций — "
                f"превью будут приходить по мере готовности. Статус: /excel")
-    if stats["failed"]:
-        fails = "\n".join(f"— {i.name[:60]}: {i.error}" for i in store.by_status("failed")[-5:])
-        _alert(f"❌ Выпали из конвейера прайса ({stats['failed']}):\n{fails}")
-    in_flight = sum(len(store.by_status(s)) for s in ("new", "research", "card"))
-    if stats["preview"] and in_flight == 0:      # партия доехала до конца
+    notify_new_failures(cfg.state.db, failed_events, token, owner_chat, http=http)
+    manual_in_flight = sum(1 for s in ("new", "research", "card")
+                           for item in store.by_status(s)
+                           if not item.key.startswith("ready-price|"))
+    if manual_stats["preview"] and manual_in_flight == 0:
         done = len(store.by_status("preview"))
         failed = len(store.by_status("failed"))
         _alert(f"🏁 Партия прайса обработана: превью {done}"
                + (f", не дошло {failed} (см. /excel)" if failed else "") + ".")
+    sync_text = f" | sync {sync_result}" if sync_result is not None else ""
     print(f"excel: research {stats['research']} | card {stats['card']} | "
-          f"preview {stats['preview']} | failed {stats['failed']}")
+          f"preview {stats['preview']} | failed {stats['failed']}{sync_text}")
 
 
 if __name__ == "__main__":

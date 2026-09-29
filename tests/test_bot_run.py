@@ -1,4 +1,5 @@
 from urllib.parse import unquote_plus
+import json
 import httpx
 from content_factory.publish.telegram import PublishState, PublishResult
 from content_factory.orchestrator.confirm_store import Awaiting
@@ -284,6 +285,98 @@ def test_excel_fn_truncates_multiline_errors_and_separates_sections(tmp_path):
     assert "Call log" not in text                  # простыня ошибки обрезана
     assert "Timeout 20000ms" in text               # суть ошибки осталась
     assert "─" in text or "—" in text or "━" in text   # есть разделители секций
+
+
+def test_excel_fn_explains_ready_price_delivery_and_lane(tmp_path):
+    from content_factory.orchestrator.excel_pipeline import ExcelStore
+    es = ExcelStore(tmp_path / "state.db")
+    es.add_items([("ready-price|A-1", "BQ", "43F34B", "Телевизор BQ 43F34B", 20000)])
+    es.update("ready-price|A-1", status="card", card_job=7)
+    _, _, excel_fn = botrun.make_find_pick_fns(tmp_path / "state.db", tmp_path)
+    text = excel_fn()
+    assert "Авито · автоматический конвейер" in text
+    assert "в этот чат не присылаются" in text
+    assert "[ACC" in text and "BQ 43F34B" in text
+
+
+def test_excel_fn_shows_why_ready_cards_are_not_in_avito_yet(tmp_path):
+    from content_factory.orchestrator.excel_pipeline import ExcelStore
+    es = ExcelStore(tmp_path / "state.db")
+    es.add_items([("ready-price|A-1", "BQ", "43F34B", "Телевизор BQ 43F34B", 20000)])
+    es.update("ready-price|A-1", status="preview")
+    status = tmp_path / "last-run.json"
+    status.write_text(json.dumps({"content": {"status": "waiting_active_upload"},
+                                  "update": {"after": 191}}), encoding="utf-8")
+    _, _, excel_fn = botrun.make_find_pick_fns(tmp_path / "state.db", tmp_path, status)
+    text = excel_fn()
+    assert "ждём завершения текущей загрузки" in text
+    assert "XML: 191 объявлений" in text
+
+
+def test_ready_price_visual_pause_is_visible_in_bot(tmp_path):
+    status = tmp_path / "last-run.json"
+    status.write_text(json.dumps({
+        "update": {"after": 213},
+        "visual_holds": {"configured": 4},
+        "content": {"status": "paused_visual_audit"},
+    }), encoding="utf-8")
+    line = botrun.ready_price_publication_line(status)
+    assert "выпуск новых карточек остановлен" in line
+    assert "4 ошибочные карточки" in line
+    assert "обновление цен продолжается" in line
+
+
+def test_ready_price_committed_status_counts_new_feed_ads(tmp_path):
+    status = tmp_path / "last-run.json"
+    status.write_text(json.dumps({"content": {"status": "committed", "added": [{}, {}, {}, {}]},
+                                  "update": {"after": 191}}), encoding="utf-8")
+    line = botrun.ready_price_publication_line(status)
+    assert "4 добавлено в XML" in line
+    assert "XML: 195 объявлений" in line
+
+
+def test_ready_price_status_explains_pending_and_rejected_receipts(tmp_path):
+    status = tmp_path / "last-run.json"
+    data = {"content": {"status": "waiting_previous_batch",
+                        "receipt": {"status": "pending", "missing": ["a", "b", "c", "d"]}},
+            "update": {"after": 195}}
+    status.write_text(json.dumps(data), encoding="utf-8")
+    assert "отчёт по 4 карточкам" in botrun.ready_price_publication_line(status)
+    data["content"]["receipt"] = {"status": "rejected"}
+    status.write_text(json.dumps(data), encoding="utf-8")
+    assert "отклонённые карточки" in botrun.ready_price_publication_line(status)
+
+
+def test_ready_price_status_explains_cpa_block(tmp_path):
+    status = tmp_path / "last-run.json"
+    status.write_text(json.dumps({
+        "content": {"status": "blocked_rejected_batch",
+                    "rejected": {"count": 5, "ads": 20, "error_codes": ["2214"]}},
+        "update": {"after": 213},
+    }), encoding="utf-8")
+    line = botrun.ready_price_publication_line(status)
+    assert "не активировано объявлений: 20" in line
+    assert "аванс CPA" in line
+    assert "Новые партии остановлены" in line
+    assert "XML: 213 объявлений" in line
+
+    data = json.loads(status.read_text(encoding="utf-8"))
+    data["content"]["rejected"].update(ads=1, active_ads=3)
+    status.write_text(json.dumps(data), encoding="utf-8")
+    partial = botrun.ready_price_publication_line(status)
+    assert "не активировано объявлений: 1" in partial
+    assert "уже активны: 3" in partial
+
+
+def test_avito_controls_show_pause_resume_and_finite_batch_sizes():
+    assert botrun.avito_markup({"active": 2, "enabled": True})["inline_keyboard"][0][0]["callback_data"] == "avito:pause"
+    assert botrun.avito_markup({"active": 2, "enabled": False})["inline_keyboard"][0][0]["callback_data"] == "avito:resume"
+    assert [button["callback_data"] for button in
+            botrun.avito_markup({"active": 2, "enabled": False})["inline_keyboard"][1]] == [
+                "avito:cancel", "avito:restart"]
+    starts = botrun.avito_markup({"active": 0, "enabled": False})["inline_keyboard"][0]
+    assert [button["callback_data"] for button in starts] == [
+        "avito:start:5", "avito:start:10", "avito:start:20"]
 
 
 def test_resolve_callback_data_expands_code(tmp_path):

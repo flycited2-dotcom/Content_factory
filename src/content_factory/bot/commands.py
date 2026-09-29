@@ -33,6 +33,7 @@ HELP = ("Команды:\n"
         "/make 10 холодильники beko=3 stinol=* — авто-выбор по категории и квотам\n"
         "/find генераторы carver — найти и показать список   /pick 1 3 5 — взять номера\n"
         "/excel — статус конвейера прайса\n"
+        "/avito — отдельное управление генерацией: start 10, pause, resume\n"
         "/task — пошаговая постановка задачи кнопками (категория → список → "
         "фото/УТП опционально)")
 
@@ -204,7 +205,8 @@ def handle_command(text: str, queue, today: date | None = None, held_provider=No
                    regen_fn=None, make_fn=None, find_fn=None, pick_fn=None,
                    excel_fn=None, price_fn=None, sources_fn=None, markup_fn=None,
                    auto_fn=None, auto_state_fn=None,
-                   generation_fn=None, generation_state_fn=None) -> str:
+                   generation_fn=None, generation_state_fn=None,
+                   vkplan_fn=None, avito_fn=None) -> str:
     """Маршрутизация команды → действие → текст ответа владельцу.
     confirm_store/publish_fn/publish_state нужны для confirm-пилота (/approve, /reject, /pending).
     publish_fn(awaiting) -> PublishResult публикует подтверждённый пост в канал.
@@ -236,6 +238,11 @@ def handle_command(text: str, queue, today: date | None = None, held_provider=No
         # /excel retry — вернуть failed-позиции в конвейер с чистого листа
         arg = parts[1].lower() if len(parts) > 1 else ""
         return excel_fn(arg or None)
+
+    if cmd.startswith("/avito"):
+        if not avito_fn:
+            return "❌ управление Avito-контентом недоступно"
+        return avito_fn(" ".join(parts[1:]) if len(parts) > 1 else None)
 
     if cmd.startswith("/make"):
         if not make_fn:
@@ -338,6 +345,8 @@ def handle_command(text: str, queue, today: date | None = None, held_provider=No
         return auto_fn(" ".join(parts[1:]).lower() if len(parts) > 1 else None)
     if cmd.startswith("/status"):
         return _status(queue, auto_state_fn, generation_state_fn)
+    if cmd.startswith("/vkplan"):
+        return vkplan_fn() if vkplan_fn else "❌ VK-план недоступен"
     if cmd.startswith("/cancel"):
         parts = text.split()
         if len(parts) < 2:
