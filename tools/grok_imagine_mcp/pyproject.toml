@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "grok-imagine-mcp"
+version = "0.1.0"
+description = "MCP-сервер: постановка задач генерации видео/картинок в десктоп-приложении Grok (Imagine)"
+requires-python = ">=3.11"
+dependencies = [
+  "mcp>=2.2,<3",
+  "pydantic>=2.6",
+]
+
+[project.optional-dependencies]
+# UIA-дамп интерфейса в разведке (только Windows)
+uia = ["pywinauto>=0.6.8; sys_platform == 'win32'"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+grok-imagine-mcp = "grok_imagine_mcp.server:main"
+grok-imagine-recon = "grok_imagine_mcp.recon:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

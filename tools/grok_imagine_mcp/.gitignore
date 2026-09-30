@@ -1,0 +1,5 @@
+# Очередь-заглушка и отчёты разведки — локальные, в git не нужны
+outbox/
+recon-report*.json
+*.egg-info/
+.venv/
