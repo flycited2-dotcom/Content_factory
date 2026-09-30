@@ -124,13 +124,31 @@ def ready_price_publication_line(status_file) -> str | None:
     if status == "committed" and isinstance(feed_size, int):
         feed_size += len(content.get("added") or [])
     feed_note = f" XML: {feed_size} объявлений." if isinstance(feed_size, int) else ""
+    expiry = data.get("expiration_review") or {}
+    if expiry.get("expired"):
+        feed_note += f" Истёк срок у {expiry['expired']} старых объявлений; требуется сверка наличия перед продлением."
+    autoload = data.get("autoload") or {}
+    if autoload.get("status") == "stale":
+        stamp = str(autoload.get("started_at") or "неизвестно")
+        try:
+            from datetime import datetime, timedelta, timezone
+            stamp = datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone(
+                timezone(timedelta(hours=3))).strftime("%d.%m.%Y %H:%M МСК")
+        except ValueError:
+            pass
+        return (f"⛔ Avito: автозагрузка не запускалась более 2 часов. Последняя: {stamp}. "
+                "Проверьте расписание, оплату тарифа и ошибки в кабинете. Добавление и снятие карточек "
+                "на площадке пока не подтверждены." + feed_note)
+    if status == "blocked_supplier_snapshot":
+        return "⛔ Avito: свежий исходный прайс не подтверждён. Новые публикации ждут обновления источника." + feed_note
     if status == "paused_visual_audit":
         holds = (data.get("visual_holds") or {}).get("configured") or 0
         hold_note = f" {holds} ошибочные карточки помечены к снятию; ждём отчёт Avito." if holds else ""
         return ("⛔ Avito: выпуск новых карточек остановлен на проверку изображений; "
                 "обновление цен продолжается." + hold_note + feed_note)
     if status == "waiting_active_upload":
-        return "📤 Avito: ждём завершения текущей загрузки; новые карточки пока в очереди." + feed_note
+        confirmed = " Предыдущая партия опубликована." if (content.get("receipt") or {}).get("status") == "accepted" else ""
+        return "📤 Avito:" + confirmed + " ждём завершения текущей загрузки; новые карточки пока в очереди." + feed_note
     if status == "blocked_rejected_batch":
         rejected = content.get("rejected") or {}
         count = rejected.get("ads") or rejected.get("count") or 0

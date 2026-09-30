@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import time
+from datetime import datetime, timezone
 
 from content_factory.ready_price import (
     _model, _outside_product_scope, _retry_delay, batch_keys, batch_status,
@@ -13,6 +14,11 @@ from content_factory.orchestrator.excel_pipeline import ExcelStore
 
 def _catalog(path, rows, bindings=()):
     with sqlite3.connect(path) as db:
+        stamp = datetime.now(timezone.utc).isoformat()
+        db.execute("CREATE TABLE releases(source TEXT,status TEXT,generated_at TEXT,manifest TEXT)")
+        db.execute("INSERT INTO releases VALUES(?,?,?,?)", ("telegram-nikita", "accepted", stamp,
+                   json.dumps({"schema_version": 2, "snapshot_kind": "full", "provenance": {
+                       "supplier_fallback": False, "supplier": {"modified_at": stamp}}})))
         db.execute("CREATE TABLE catalog(source TEXT,article TEXT,sha256 TEXT,data TEXT,present INTEGER,missing_since TEXT,PRIMARY KEY(source,article))")
         db.execute("CREATE TABLE source_bindings(source TEXT,article TEXT,ad_id TEXT,PRIMARY KEY(source,article))")
         for article, data, present in rows:
@@ -26,7 +32,8 @@ def _catalog(path, rows, bindings=()):
 
 def _item(article, name, bucket="small", price=1050):
     return {"article": article, "brand": "BQ", "name": name, "group": "Телевизоры",
-            "bucket": bucket, "avito_price": price, "source_price": "1000"}
+            "bucket": bucket, "avito_price": price, "source_price": "1000",
+            "availability": "supplier_price_present"}
 
 
 def test_avito_content_batches_pause_without_stopping_other_work(tmp_path):
@@ -158,10 +165,43 @@ def test_sync_queues_unique_targets_and_holds_duplicate_identity(tmp_path):
     result = sync_catalog(catalog, tmp_path / "state.db")
     assert result == {"target": 3, "queued": 1, "managed_existing": 0,
                       "held_duplicate_identity": 2, "held_missing_model": 0,
-                      "missing": 0}
+                      "missing": 0, "held_stock_unverified": 0, "source_problem": None}
     with sqlite3.connect(tmp_path / "state.db") as db:
         assert db.execute("SELECT key,card_mode FROM excel_items").fetchall() == [
             ("ready-price|A-3", "ready_light")]
+
+
+def test_stock_absence_holds_inflight_job_and_return_reuses_it(tmp_path):
+    catalog = _catalog(tmp_path / "catalog.db", [("A-1", _item("A-1", "Чайник BQ KT100"), 1)])
+    state = tmp_path / "state.db"
+    sync_catalog(catalog, state)
+    store = ExcelStore(state)
+    store.update("ready-price|A-1", status="card", card_job=77)
+    with sqlite3.connect(catalog) as db:
+        data = _item("A-1", "Чайник BQ KT100")
+        data["availability"] = "unverified_origin"
+        db.execute("UPDATE catalog SET data=?", (json.dumps(data),))
+    assert sync_catalog(catalog, state)["held_stock_unverified"] == 1
+    assert store.get("ready-price|A-1").status == "held"
+    assert next_items(state, catalog) == []
+    assert start_batch(state, 1, catalog_db=catalog)["selected"] == 0
+    with sqlite3.connect(catalog) as db:
+        data["availability"] = "supplier_price_present"
+        db.execute("UPDATE catalog SET data=?", (json.dumps(data),))
+    sync_catalog(catalog, state)
+    assert store.get("ready-price|A-1").status == "card"
+    assert store.get("ready-price|A-1").card_job == 77
+
+
+def test_stale_supplier_stops_generation_and_category_selection(tmp_path):
+    catalog = _catalog(tmp_path / "catalog.db", [("A-1", _item("A-1", "Чайник BQ KT100"), 1)])
+    state = tmp_path / "state.db"
+    sync_catalog(catalog, state)
+    with sqlite3.connect(catalog) as db:
+        db.execute("UPDATE releases SET generated_at='2020-01-01T00:00:00+00:00'")
+    assert sync_catalog(catalog, state)["source_problem"] == "supplier_snapshot_stale"
+    assert ExcelStore(state).get("ready-price|A-1").status == "held"
+    assert category_counts(state, catalog) == []
 
 
 def test_sync_updates_price_without_reset_and_skips_bound_item(tmp_path):

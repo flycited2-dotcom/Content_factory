@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from datetime import datetime, timedelta, timezone
 import json
 import re
 import sqlite3
@@ -14,6 +15,29 @@ from content_factory.orchestrator.excel_pipeline import ExcelStore
 
 SOURCE = "telegram-nikita"
 TARGET_BUCKETS = {"small", "large", "tv"}
+
+
+def _source_problem(db) -> str | None:
+    """Check the accepted supplier snapshot before spending work on its queue."""
+    try:
+        row = db.execute("SELECT generated_at,manifest FROM releases WHERE source=? "
+                         "AND status='accepted' ORDER BY generated_at DESC LIMIT 1", (SOURCE,)).fetchone()
+        if not row:
+            return "supplier_snapshot_unverified"
+        manifest = json.loads(row[1])
+        if (manifest.get("schema_version") != 2 or manifest.get("snapshot_kind") != "full"
+                or manifest.get("provenance", {}).get("supplier_fallback") is not False):
+            return "supplier_snapshot_unverified"
+        stamps = [datetime.fromisoformat(row[0]),
+                  datetime.fromisoformat(manifest["provenance"]["supplier"]["modified_at"])]
+        now = datetime.now(timezone.utc)
+        if any(stamp.tzinfo is None for stamp in stamps):
+            return "supplier_snapshot_unverified"
+        if min(stamps) < now - timedelta(days=4) or max(stamps) > now + timedelta(minutes=10):
+            return "supplier_snapshot_stale"
+    except (sqlite3.Error, ValueError, KeyError, TypeError):
+        return "supplier_snapshot_unverified"
+    return None
 
 
 def _outside_product_scope(data: dict) -> str | None:
@@ -80,27 +104,39 @@ def _mode(bucket: str) -> str:
 
 
 def sync_catalog(catalog_db, state_db) -> dict:
-    """Синхронизировать только 531 целевую строку, не трогая чужую очередь."""
+    """Синхронизировать подтверждённое наличие в целевых группах."""
     store = ExcelStore(state_db)
     with sqlite3.connect(catalog_db) as db:
         db.row_factory = sqlite3.Row
+        source_problem = _source_problem(db)
         rows = db.execute("SELECT c.article,c.sha256,c.data,c.present,b.ad_id "
                           "FROM catalog c LEFT JOIN source_bindings b "
                           "ON b.source=c.source AND b.article=c.article "
                           "WHERE c.source=?", (SOURCE,)).fetchall()
     candidates = []
-    missing = 0
+    missing = unverified = 0
+    held_rows = []
     for row in rows:
         data = json.loads(row["data"])
         if data.get("bucket") not in TARGET_BUCKETS:
             continue
-        if not row["present"]:
-            missing += 1
+        reason = (source_problem or ("absent_from_latest_snapshot" if not row["present"] else
+                  "not_in_fresh_supplier_price" if data.get("availability") != "supplier_price_present" else None))
+        if reason:
+            missing += int(not row["present"])
+            unverified += int(bool(row["present"]))
+            key = f"ready-price|{row['article']}"
+            existing = store.get(key)
+            if existing and existing.status in {"new", "failed", "research", "card"}:
+                # Keep job IDs so work already submitted can be reused if stock returns.
+                store.update(key, status="held", error=reason)
+            held_rows.append((row["article"], row["sha256"], "held", reason, data.get("bucket"),
+                              data.get("brand"), _model(data), data.get("name"), int(data["avito_price"])))
             continue
         candidates.append((row, data))
     identities = Counter(_identity(data) for _, data in candidates)
     queued = managed = duplicate = no_model = 0
-    status_rows = []
+    status_rows = held_rows
     to_add = []
     for row, data in candidates:
         article = row["article"]
@@ -134,6 +170,12 @@ def sync_catalog(catalog_db, state_db) -> dict:
                 if (existing and existing.status == "held"
                         and existing.error == "accessory_not_household_appliance"):
                     fields.update(status="new", tries=0, error=None, due_at=None)
+                if existing and existing.status == "held" and existing.error in {
+                    "absent_from_latest_snapshot", "not_in_fresh_supplier_price",
+                    "supplier_snapshot_unverified", "supplier_snapshot_stale",
+                }:
+                    resume = "card" if existing.card_job else "research" if existing.research_job else "new"
+                    fields.update(status=resume, error=None, due_at=None)
                 if existing and existing.status in {"new", "failed"}:
                     fields.update(brand=data.get("brand", ""), model=_model(data))
                 # Этот источник работает без оператора: временный сбой агента
@@ -159,9 +201,10 @@ def sync_catalog(catalog_db, state_db) -> dict:
                    "bucket TEXT, brand TEXT, model TEXT, name TEXT, price INTEGER)")
         db.executemany("INSERT OR REPLACE INTO ready_price_items VALUES(?,?,?,?,?,?,?,?,?)",
                        status_rows)
-    return {"target": len(candidates) + missing, "queued": queued,
+    return {"target": len(candidates) + missing + unverified, "queued": queued,
             "managed_existing": managed, "held_duplicate_identity": duplicate,
-            "held_missing_model": no_model, "missing": missing}
+            "held_missing_model": no_model, "missing": missing,
+            "held_stock_unverified": unverified, "source_problem": source_problem}
 
 
 def set_enabled(state_db, enabled: bool) -> None:
@@ -232,6 +275,9 @@ def _catalog_queue_rows(db, catalog_db) -> list[dict]:
     """Read the supplier's actual category for each Avito queue item."""
     if not catalog_db or not Path(catalog_db).is_file():
         raise ValueError("Каталог категорий недоступен; партия не запущена")
+    with sqlite3.connect(catalog_db) as source:
+        if _source_problem(source):
+            return []
     db.execute("ATTACH DATABASE ? AS ready_source", (str(catalog_db),))
     rows = db.execute(
         "SELECT e.key,e.status,e.brand,e.model,e.name,e.ts,e.due_at,r.bucket,c.data "
@@ -244,7 +290,7 @@ def _catalog_queue_rows(db, catalog_db) -> list[dict]:
     return [dict(key=row[0], status=row[1], brand=row[2], model=row[3],
                  name=row[4], ts=row[5], due_at=row[6], bucket=row[7],
                  category=str(json.loads(row[8]).get("group") or "").strip())
-            for row in rows]
+            for row in rows if json.loads(row[8]).get("availability") == "supplier_price_present"]
 
 
 def _matches_category(row: dict, category: str) -> bool:
@@ -289,12 +335,14 @@ def start_batch(state_db, count: int, category: str = "", catalog_db=None) -> di
         db.execute("PRAGMA busy_timeout=30000")
         _batch_tables(db)
         scoped = None
-        if category:
+        if catalog_db:
             scoped = {row["key"] for row in _catalog_queue_rows(db, catalog_db)
-                      if _matches_category(row, category)}
-            if not scoped:
+                      if not category or _matches_category(row, category)}
+            if category and not scoped:
                 raise ValueError(f"Категория «{category}» не найдена в очереди. "
                                  "Список: /avito categories")
+        elif category:
+            raise ValueError("Каталог категорий недоступен; партия не запущена")
         db.execute("BEGIN IMMEDIATE")
         setting = db.execute("SELECT value FROM settings WHERE key='ready_price_batch_id'").fetchone()
         current = setting[0] if setting else ""
@@ -497,7 +545,7 @@ def control_command(arg: str | None, state_db, catalog_db=None, queue_db=None) -
             return f"❌ {exc}"
         if not result["selected"]:
             return "✅ Новых позиций для генерации Avito сейчас нет."
-        return (f"▶️ Партия Avito" + (f" · {category}" if category else "") +
+        return ("▶️ Партия Avito" + (f" · {category}" if category else "") +
                 f": {result['selected']} позиций, из них "
                 f"{result['ongoing']} уже были в работе. /avito pause — остановить; "
                 "/avito — статус.")

@@ -326,6 +326,17 @@ def test_ready_price_visual_pause_is_visible_in_bot(tmp_path):
     assert "обновление цен продолжается" in line
 
 
+def test_ready_price_stale_autoload_explains_platform_delay(tmp_path):
+    status = tmp_path / "last-run.json"
+    status.write_text(json.dumps({"autoload": {"status": "stale", "started_at": "2026-09-28T19:50:03Z"},
+                                  "content": {"status": "waiting_previous_batch"},
+                                  "update": {"after": 67}}), encoding="utf-8")
+    line = botrun.ready_price_publication_line(status)
+    assert "28.09.2026 22:50 МСК" in line
+    assert "Проверьте расписание" in line
+    assert "XML: 67" in line
+
+
 def test_ready_price_committed_status_counts_new_feed_ads(tmp_path):
     status = tmp_path / "last-run.json"
     status.write_text(json.dumps({"content": {"status": "committed", "added": [{}, {}, {}, {}]},
@@ -333,6 +344,13 @@ def test_ready_price_committed_status_counts_new_feed_ads(tmp_path):
     line = botrun.ready_price_publication_line(status)
     assert "4 добавлено в XML" in line
     assert "XML: 195 объявлений" in line
+
+
+def test_ready_price_status_exposes_expired_listing_review(tmp_path):
+    status = tmp_path / "last-run.json"
+    status.write_text(json.dumps({"content": {"status": "no_ready_candidates"},
+                                 "expiration_review": {"expired": 100}}), encoding="utf-8")
+    assert "Истёк срок у 100" in botrun.ready_price_publication_line(status)
 
 
 def test_ready_price_status_explains_pending_and_rejected_receipts(tmp_path):

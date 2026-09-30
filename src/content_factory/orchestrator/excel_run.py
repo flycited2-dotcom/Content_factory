@@ -182,6 +182,10 @@ def main():
                               "/opt/avito-bridge/state/ready-price/catalog.sqlite"))
         if catalog.is_file():
             sync_result = sync_catalog(catalog, cfg.state.db)
+            if sync_result.get("source_problem"):
+                source_enabled = False
+        else:
+            source_enabled = False
     store = ExcelStore(cfg.state.db)
     api = config("FOTOGEN_API_URL", cfg.fotogen.api_url).rstrip("/")
     headers = {"x-agent-token": config("FOTOGEN_API_TOKEN")}
