@@ -1,22 +1,30 @@
-"""Запросы к Grok Imagine (валидируются до любого касания приложения) и квитанции о постановке."""
+"""Запросы к Grok Imagine (валидируются до любого обращения к API) и описание задач."""
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, field_validator
 
-# Страховочные пределы, а не знание о приложении: реальные лимиты Imagine уточним после разведки.
-MAX_PROMPT_CHARS = 4000
-MAX_DURATION_S = 60
-MAX_IMAGE_BYTES = 20 * 1024 * 1024
+# Допустимые значения — из xai-sdk 1.20.0 (types/model.py, types/video.py, types/image.py).
+VideoModel = Literal["grok-imagine-video", "grok-imagine-video-1.5"]
+VideoAspect = Literal["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"]
+VideoResolution = Literal["480p", "720p", "1080p"]
+ImageModel = Literal["grok-imagine-image", "grok-imagine-image-2.0", "grok-imagine-image-quality"]
+ImageAspect = Literal["1:1", "3:4", "4:3", "9:16", "16:9", "2:3", "3:2", "9:19.5", "19.5:9",
+                      "9:20", "20:9", "1:2", "2:1"]
+ImageResolution = Literal["1k", "2k"]
 
-_ASPECT_RE = re.compile(r"^[1-9]\d?:[1-9]\d?$")
+MAX_PROMPT_CHARS = 4000          # страховочный предел, не знание об API
+MAX_DURATION_S = 15              # xai-sdk: «Duration of the video to generate in seconds (1-15)»
+# Фото уходит base64 (×4/3), а канал xai-sdk режет сообщения на 20 МиБ, поэтому 10 МиБ с запасом.
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
+
+_IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
 
 
 def _looks_like(suffix: str, head: bytes) -> bool:
-    """Расширение должно совпадать с содержимым: произвольный файл под видом .png не уходит в приложение."""
+    """Расширение должно совпадать с содержимым: произвольный файл под видом .png наружу не уходит."""
     if suffix == ".png":
         return head.startswith(b"\x89PNG\r\n\x1a\n")
     if suffix in (".jpg", ".jpeg"):
@@ -24,9 +32,6 @@ def _looks_like(suffix: str, head: bytes) -> bool:
     if suffix == ".webp":
         return head[:4] == b"RIFF" and head[8:12] == b"WEBP"
     return False
-
-
-_IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
 
 
 def _check_image(value: Path) -> Path:
@@ -49,7 +54,6 @@ def _check_image(value: Path) -> Path:
 
 class _PromptRequest(BaseModel):
     prompt: str
-    aspect_ratio: str | None = None
 
     @field_validator("prompt")
     @classmethod
@@ -61,17 +65,14 @@ class _PromptRequest(BaseModel):
             raise ValueError(f"prompt длиннее {MAX_PROMPT_CHARS} символов")
         return v
 
-    @field_validator("aspect_ratio")
-    @classmethod
-    def _aspect(cls, v: str | None) -> str | None:
-        if v is not None and not _ASPECT_RE.match(v):
-            raise ValueError(f"aspect_ratio должен быть вида 16:9, получено {v!r}")
-        return v
-
 
 class VideoRequest(_PromptRequest):
+    model: VideoModel = "grok-imagine-video"
     image_path: Path | None = None
     duration_s: int | None = None
+    aspect_ratio: VideoAspect | None = None
+    resolution: VideoResolution | None = None
+    generate_audio: bool | None = None
 
     @field_validator("image_path")
     @classmethod
@@ -87,21 +88,32 @@ class VideoRequest(_PromptRequest):
 
 
 class ImageRequest(_PromptRequest):
-    pass
+    model: ImageModel = "grok-imagine-image"
+    aspect_ratio: ImageAspect | None = None
+    resolution: ImageResolution | None = None
 
 
-class Receipt(BaseModel):
-    """Результат постановки задачи. submitted_to_app=False означает: в Grok ничего НЕ отправлено."""
+class TaskInfo(BaseModel):
+    """Состояние задачи. submitted=False значит, что в xAI ничего не отправлено (режим dry-run)."""
     task_id: str
     kind: Literal["video", "image"]
     driver: str
-    submitted_to_app: bool
-    status: str
+    status: str                      # pending | done | failed | expired | recorded_dry_run
+    submitted: bool
     message: str
+    created_at: str
+    output_path: str | None = None
+    duration_s: float | None = None
+    cost_usd: float | None = None
+    error: str | None = None
+
+
+class TaskList(BaseModel):
+    tasks: list[TaskInfo]
 
 
 class DriverStatus(BaseModel):
     driver: str
     ready: bool
-    controls_app: bool
+    live: bool                       # True — генерации реально уходят в xAI
     detail: str
