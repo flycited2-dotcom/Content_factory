@@ -5,22 +5,25 @@
 общую очередь фотоагента, пока владелец явно не даст ``/generation on``.
 """
 from __future__ import annotations
+from content_factory.sqlite_state import state_connection
 
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 
 _SETTING = "generation_enabled"
-_EXCEL_ACTIVE = ("new", "research", "card")
+_EXCEL_ACTIVE = ("new", "research", "card", "submission", "submission_failed")
 
 
-def _settings_c(db) -> sqlite3.Connection:
+@contextmanager
+def _settings_c(db):
     path = Path(db)
     path.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(path)
-    con.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
-    return con
+    with state_connection(path) as con:
+        con.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+        yield con
 
 
 def generation_enabled(db) -> bool:
@@ -119,6 +122,9 @@ def stop_factory_tail(state_db, card_jobs_db, queue_db) -> StopSummary:
                 f"UPDATE excel_items SET status='cancelled' WHERE status IN ({marks})",
                 _EXCEL_ACTIVE,
             ).rowcount
+        from content_factory.bot.task_status import recover_submissions
+        from content_factory.orchestrator.excel_pipeline import ExcelStore
+        recover_submissions(ExcelStore(state_path), queue_path)
 
     return StopSummary(
         queue_jobs=cancelled_jobs,

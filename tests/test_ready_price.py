@@ -5,11 +5,13 @@ from datetime import datetime, timezone
 
 from content_factory.ready_price import (
     _model, _outside_product_scope, _retry_delay, batch_keys, batch_status,
-    cancel_batch, category_counts, control_command, next_items, restart_batch,
+    batch_publication_report, cancel_batch, category_counts, control_command,
+    next_items, restart_batch,
     set_enabled, start_batch,
     sync_catalog,
 )
 from content_factory.orchestrator.excel_pipeline import ExcelStore
+from content_factory.orchestrator.excel_run import reuse_ready_price_archive
 
 
 def _catalog(path, rows, bindings=()):
@@ -55,6 +57,132 @@ def test_avito_content_batches_pause_without_stopping_other_work(tmp_path):
     store.update("ready-price|A-2", status="preview")
     assert start_batch(state, 1)["selected"] == 1
     assert batch_keys(state) == {"ready-price|A-3"}
+
+
+def test_owner_stop_controls_publication_and_failed_restart_keeps_stop(tmp_path, monkeypatch):
+    state = tmp_path / "state.db"
+    ExcelStore(state).add_items([("ready-price|A-1", "BQ", "M1", "Товар", 1000)])
+    from content_factory.orchestrator.generation import set_generation_enabled
+    set_generation_enabled(state, True)
+    path = tmp_path / "publication-control.json"
+    monkeypatch.setenv("READY_PRICE_PUBLICATION_CONTROL", str(path))
+    assert "Передача новых карточек в Avito остановлена" in control_command("pause", state)
+    assert json.loads(path.read_text())["enabled"] is False
+    assert control_command("restart", state).startswith("❌")
+    assert json.loads(path.read_text())["enabled"] is False
+    assert not control_command("start 1", state).startswith("❌")
+    assert json.loads(path.read_text())["enabled"] is True
+    control_command("cancel", state)
+    assert json.loads(path.read_text())["enabled"] is False
+
+
+def test_broken_publication_control_does_not_allow_generation(tmp_path, monkeypatch):
+    state = tmp_path / "state.db"
+    ExcelStore(state).add_items([("ready-price|A-1", "BQ", "M1", "Товар", 1000)])
+    from content_factory.orchestrator.generation import set_generation_enabled
+    set_generation_enabled(state, True)
+    parent = tmp_path / "not-directory"
+    parent.write_text("file")
+    monkeypatch.setenv("READY_PRICE_PUBLICATION_CONTROL", str(parent / "control.json"))
+    assert control_command("start 1", state).startswith("❌")
+    assert not batch_status(state)["enabled"]
+
+
+def test_factory_cancelled_backlog_can_start_only_a_selected_finite_batch(tmp_path):
+    rows = [(f"A-{i}", _item(f"A-{i}", f"Чайник BQ KT{i}"), 1) for i in range(1, 6)]
+    catalog = _catalog(tmp_path / "catalog.db", rows)
+    state = tmp_path / "state.db"
+    sync_catalog(catalog, state)
+    store = ExcelStore(state)
+    for i in range(1, 6):
+        store.update(f"ready-price|A-{i}", status="cancelled")
+    store.update("ready-price|A-5", research_job=99)
+    assert sum(n for _, n in category_counts(state, catalog)) == 4
+    assert start_batch(state, 2, catalog_db=catalog)["selected"] == 2
+    assert sum(store.get(f"ready-price|A-{i}").status == "new" for i in range(1, 6)) == 2
+    assert store.get("ready-price|A-5").research_job == 99
+
+
+def test_master_stop_cannot_be_bypassed_by_avito_start(tmp_path, monkeypatch):
+    state = tmp_path / "state.db"
+    ExcelStore(state).add_items([("ready-price|A-1", "BQ", "M1", "Товар", 1000)])
+    path = tmp_path / "publication-control.json"
+    path.write_text('{"enabled":false}')
+    monkeypatch.setenv("READY_PRICE_PUBLICATION_CONTROL", str(path))
+    assert "Общая генерация выключена" in control_command("start 1", state)
+    assert json.loads(path.read_text())["enabled"] is False
+    assert not batch_status(state)["batch_id"]
+
+
+def test_finished_batch_report_explains_publication_hold(tmp_path):
+    catalog = _catalog(tmp_path / "catalog.db", [
+        ("A-1", _item("A-1", "Аэрогриль BQ GR2001"), 1),
+    ])
+    state = tmp_path / "state.db"
+    sync_catalog(catalog, state)
+    start_batch(state, 1, catalog_db=catalog)
+    ExcelStore(state).update("ready-price|A-1", status="preview")
+    report = tmp_path / "last-run.json"
+    report.write_text(json.dumps({"content": {"held": {
+        "A-1": "independent_visual_product_audit_required"}}}), encoding="utf-8")
+    detail = batch_publication_report(state, catalog, report)
+    assert "Аэрогриль BQ GR2001" in detail
+    assert "ждёт независимой проверки фото" in detail
+    assert "card.png" in detail
+    assert "генерация партии завершена" in control_command("status", state)
+
+
+def test_exact_article_archive_skips_generation_and_refreshes_price(tmp_path):
+    from PIL import Image
+    catalog = _catalog(tmp_path / "catalog.db", [
+        ("A-1", _item("A-1", "Чайник BQ KT100", price=1200), 1)])
+    state = tmp_path / "state.db"
+    sync_catalog(catalog, state)
+    item = ExcelStore(state).get("ready-price|A-1")
+    folder = tmp_path / "content" / "A-1"
+    folder.mkdir(parents=True)
+    for name in ("card.png", "original.png"):
+        Image.new("RGB", (128, 128), "blue").save(folder / name, compress_level=0)
+    manifest = {"schema_version": 1, "article": "A-1", "brand": item.brand,
+                "model": item.model, "name": item.name, "card_mode": item.card_mode,
+                "price": 1000, "card": "card.png", "original": "original.png",
+                "card_text_audit": {"passed": True}, "evidence": {"exact_model": True}}
+    (folder / "content.json").write_text(json.dumps(manifest), encoding="utf-8")
+    assert reuse_ready_price_archive(ExcelStore(state), state, tmp_path / "content") == {
+        "reused": 1, "prices_refreshed": 1}
+    assert ExcelStore(state).get("ready-price|A-1").status == "preview"
+    assert json.loads((folder / "content.json").read_text())["price"] == 1200
+    assert reuse_ready_price_archive(ExcelStore(state), state, tmp_path / "content") == {
+        "reused": 0, "prices_refreshed": 0}
+
+
+def test_report_keeps_per_article_rejection_when_publisher_is_blocked(tmp_path):
+    catalog = _catalog(tmp_path / "catalog.db", [
+        ("A-1", _item("A-1", "Аэрогриль BQ GR2005"), 1),
+        ("A-2", _item("A-2", "Аэрогриль BQ GR2001"), 1)],
+        bindings=(("A-1", "nikita-A-1"), ("A-2", "nikita-A-2")))
+    state = tmp_path / "state.db"
+    store = ExcelStore(state)
+    store.add_items([("ready-price|A-1", "BQ", "GR2005", "Аэрогриль BQ GR2005", 1000),
+                     ("ready-price|A-2", "BQ", "GR2001", "Аэрогриль BQ GR2001", 1000)])
+    start_batch(state, 2)
+    for key in ("ready-price|A-1", "ready-price|A-2"):
+        store.update(key, status="preview")
+    with sqlite3.connect(catalog) as db:
+        db.execute("CREATE TABLE content_publications(article TEXT,status TEXT,reason TEXT,ad_id TEXT)")
+        db.executemany("INSERT INTO content_publications VALUES(?,?,?,?)", [
+            ("A-1", "held", "avito_rejected", "nikita-A-1"),
+            ("A-2", "accepted", "avito_report_active", "nikita-A-2")])
+        db.execute("CREATE TABLE publication_batches(status TEXT,receipt TEXT)")
+        receipt = [{"ad_id": "nikita-A-1", "messages": [{"type": "error", "code": 2204}]}]
+        db.execute("INSERT INTO publication_batches VALUES('rejected',?)", (json.dumps(receipt),))
+    report = tmp_path / "last-run.json"
+    report.write_text(json.dumps({"content": {"status": "blocked_rejected_batch", "held": {},
+                                              "rejected": {"error_codes": ["2204"]}}}))
+    text = batch_publication_report(state, catalog, report)
+    assert "отклонено Avito; код 2204" in text
+    assert "активация подтверждена отчётом Avito" in text
+    assert "Публикация приостановлена" in text
 
 
 def test_avito_category_batch_skips_inflight_from_other_categories(tmp_path):
@@ -169,6 +297,39 @@ def test_sync_queues_unique_targets_and_holds_duplicate_identity(tmp_path):
     with sqlite3.connect(tmp_path / "state.db") as db:
         assert db.execute("SELECT key,card_mode FROM excel_items").fetchall() == [
             ("ready-price|A-3", "ready_light")]
+
+
+def test_restart_cancelled_batch_reuses_finished_agent_results(tmp_path):
+    catalog = _catalog(tmp_path / "catalog.db", [
+        ("A-1", _item("A-1", "Чайник BQ KT100"), 1),
+        ("A-2", _item("A-2", "Чайник BQ KT200"), 1)])
+    state = tmp_path / "state.db"
+    sync_catalog(catalog, state)
+    start_batch(state, 2, catalog_db=catalog)
+    store = ExcelStore(state)
+    store.update("ready-price|A-1", status="cancelled", research_job=10, card_job=11)
+    store.update("ready-price|A-2", status="cancelled", research_job=20)
+    queue = tmp_path / "queue.db"
+    with sqlite3.connect(queue) as db:
+        db.execute("CREATE TABLE jobs(id INTEGER PRIMARY KEY,status TEXT,output_filename TEXT)")
+        db.executemany("INSERT INTO jobs VALUES(?,?,?)", [
+            (10, "done", "r1.png"), (11, "done", "card1.png"), (20, "done", "r2.png")])
+    result = restart_batch(state, queue)
+    assert result["reused_results"] == 2
+    assert store.get("ready-price|A-1").status == "card"
+    assert store.get("ready-price|A-1").card_job == 11
+    assert store.get("ready-price|A-2").status == "research"
+    assert store.get("ready-price|A-2").research_job == 20
+    from content_factory.orchestrator.excel_pipeline import tick
+
+    def no_generation(*args, **kwargs):
+        raise AssertionError("already completed card must not be generated again")
+
+    stats = tick(store, no_generation,
+                 lambda job: ("done", "card1.png", None, None), no_generation,
+                 lambda item, output: output == "card1.png",
+                 allowed_keys={"ready-price|A-1"})
+    assert stats["preview"] == 1 and stats["research"] == stats["card"] == 0
 
 
 def test_stock_absence_holds_inflight_job_and_return_reuses_it(tmp_path):

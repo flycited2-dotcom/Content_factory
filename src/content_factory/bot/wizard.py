@@ -5,6 +5,7 @@
 подтверждение. Чистая логика без Telegram (см. bot/run.py для оркестрации);
 состояние в SQLite, переживает рестарт cf-bot."""
 from __future__ import annotations
+from content_factory.sqlite_state import state_connection
 import json
 import sqlite3
 import time
@@ -52,7 +53,7 @@ class WizardStore:
                     pass                           # колонка уже есть
 
     def _c(self):
-        return sqlite3.connect(self.path)
+        return state_connection(self.path)
 
     def start(self, chat_id: str) -> None:
         """Начать (или перезапустить с нуля) диалог для chat_id."""

@@ -16,6 +16,9 @@ def test_migrates_legacy_table_without_comment(tmp_path):
     con.commit()
     con.close()
     s = OrderDialogStore(db)                    # init обязан ALTER добавить comment
+    # Legacy rows have no activity timestamp. Refresh this row explicitly to
+    # test schema migration independently of the deployed stale-dialog expiry.
+    s.set_step("1", "awaiting_comment")
     st = s.snapshot("1")                        # не должно падать
     assert st.step == "awaiting_comment" and st.qty == 2 and st.comment is None
     s.set_comment("1", "тест")

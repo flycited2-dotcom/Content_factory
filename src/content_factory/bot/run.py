@@ -5,7 +5,10 @@
   python -m content_factory.bot.run
 """
 from __future__ import annotations
+from content_factory.bot import worker_control
 import json
+import os
+import re
 import sqlite3
 import time
 from datetime import datetime
@@ -15,19 +18,35 @@ from decouple import config
 
 from content_factory.config import load_config
 from content_factory.orchestrator.auto import auto_command, auto_enabled
-from content_factory.publish.telegram import publish_post, PublishState, TG_API
+from content_factory.publish.telegram import (
+    edit_post_media, publish_post, PublishState, TG_API, telegram_client,
+)
 from content_factory.publish.orders import OrderLinks, order_markup
 from content_factory.bot.order_dialog import OrderDialogStore
 from content_factory.bot.control_menu import ControlMenu, keyboard as control_keyboard
 from content_factory.bot.avito_categories import category_action, category_text_action
 from content_factory.bot.order_flow import make_order_flow
 from content_factory.orchestrator.queue import TaskQueue
+from content_factory.orchestrator.vk_content_plan import (
+    VkContentPlanStore,
+    callback_markup,
+    format_vk_plan,
+    handle_plan_callback,
+    review_caption,
+)
 from content_factory.orchestrator.confirm_store import ConfirmStore
 from content_factory.bot.commands import handle_command, handle_callback
 from content_factory.bot.manual_photo import make_manual_photo_fn
 from content_factory.bot.voice import transcribe_voice_bytes
 from content_factory.bot.cmd_input import (
     bare_arg_command, prompt_for, resolve_reply, PendingCmdStore)
+
+
+def vk_plan_store_from_env() -> VkContentPlanStore:
+    """Открыть общую VK-очередь, используемую планировщиком и Telegram-пультом."""
+    return VkContentPlanStore(os.getenv(
+        "VK_PLAN_STATE_DB", "/opt/content-factory-vk/state/vk-plan.db"
+    ))
 
 
 def make_publish_fn(token: str, parse_mode: str, pub_state: PublishState, http=None,
@@ -38,6 +57,10 @@ def make_publish_fn(token: str, parse_mode: str, pub_state: PublishState, http=N
         markup = None
         if order_bot and links is not None:
             markup = order_markup(order_bot, links.code_for(a.key))
+        if str(a.channel).startswith("edit|"):
+            _, channel, message_id = str(a.channel).split("|", 2)
+            return edit_post_media(token, channel, int(message_id), a.card_path, a.caption,
+                                   http=http, parse_mode=parse_mode, reply_markup=markup)
         return publish_post(token, a.channel, a.card_path, a.caption, http=http,
                             parse_mode=parse_mode, key=a.key, state=pub_state, retries=2,
                             reply_markup=markup)
@@ -75,7 +98,23 @@ def make_regen_fn(card_jobs_db, state_db):
     return regen_fn
 
 
-def make_make_fn(state_db, prices_dir):
+
+def _wake_note(wake_fn, state_db=None):
+    if wake_fn is None:
+        return ""
+    if state_db is not None:
+        from content_factory.orchestrator.generation import generation_enabled
+        if not generation_enabled(state_db):
+            return "\nЗадачи сохранены; общая генерация выключена. Включение: /generation on."
+    try:
+        requested = bool(wake_fn())
+    except Exception:
+        requested = False
+    return ("\nЗапуск конвейера запрошен; этапы появятся в /excel." if requested else
+            "\nЗадачи сохранены; немедленный запуск не подтверждён. "
+            "Автопроверка каждую минуту. Статус: /excel")
+
+def make_make_fn(state_db, prices_dir, queue_db=None, wake_fn=None):
     """make_fn(count, category, quotas) для /make: выбрать позиции из последнего
     прайса и поставить в excel-конвейер (research → карточка → превью)."""
     def make_fn(count, category, quotas):
@@ -84,26 +123,29 @@ def make_make_fn(state_db, prices_dir):
             load_search_aliases)
         from content_factory.orchestrator.excel_pipeline import ExcelStore
         from content_factory.orchestrator.confirm_store import ConfirmStore
-        slots = load_price_slots(prices_dir)
+        slots = load_price_slots(prices_dir, for_telegram=True)
         if not slots:
             return "❌ прайс не загружен — пришлите .xlsx файлом в этот чат"
         items = [i for _, its in slots for i in its]      # свой прайс приоритетнее почтового
         store = ExcelStore(state_db)
         taken = (PublishState(state_db).published_keys()
-                 | ConfirmStore(state_db).blocked_keys() | store.all_keys())
+                 | ConfirmStore(state_db).blocked_keys()
+                 | store.selection_blocked_keys(queue_db or config("FOTOGEN_QUEUE_DB", default="")))
         got = select_from_price(items, category, quotas, count, taken,
                                 aliases=load_search_aliases(Path("config/search_aliases.yaml")))
         if not got:
             return f"❌ по запросу «{category}» ничего не нашлось (или всё уже в работе)"
         rows = [(item_key(i), i.brand, extract_model(i.name, i.brand), i.name, i.price)
                 for i in got]
-        n = store.add_items(rows)
+        accepted = store.select_items(rows, queue_db=queue_db or config("FOTOGEN_QUEUE_DB", default=""))
+        n = len(accepted)
+        wake_note = _wake_note(wake_fn, state_db) if n else ""
         listing = "\n".join(
             f"— {(i.brand + ' ') if i.brand else ''}{extract_model(i.name, i.brand)}"
             f" · {i.price:,} ₽".replace(",", " ") for i in got)
         short = f" (запрошено {count}, нашлось только {len(got)})" if len(got) < count else ""
         return (f"✅ выбрано {len(got)}{short} (новых в работу: {n}):\n{listing}\n\n"
-                f"Конвейер: УТП+фото → карточка → превью сюда (тик ~10 мин). Статус: /excel")
+                f"Конвейер: УТП+фото → карточка → превью на согласование. Статус: /excel{wake_note}")
     return make_fn
 
 
@@ -197,13 +239,18 @@ def avito_markup(status: dict) -> dict:
                  for n in (5, 10, 20)]]
         if status.get("batch_id"):
             rows.append([{"text": "🔄 Перезапуск партии", "callback_data": "avito:restart"}])
+    if not status["active"]:
+        rows.append([{"text": "⏸ Стоп Avito", "callback_data": "avito:pause"}])
     rows.append([{"text": "📦 Категории", "callback_data": "avito:categories"},
                  {"text": "📋 Очередь", "callback_data": "avito:queue"}])
     rows.append([{"text": "📊 Статус Avito", "callback_data": "avito:status"}])
+    rows.append([{"text": "📦 Проверить наличие", "callback_data": "avito:stock"}])
+    rows.append([{"text": "📍 Где карточки / причины", "callback_data": "avito:report"}])
     return {"inline_keyboard": rows}
 
 
-def make_find_pick_fns(state_db, prices_dir, publication_status_path=None):
+def make_find_pick_fns(state_db, prices_dir, publication_status_path=None, queue_db=None,
+                        wake_fn=None, worker_status_fn=None):
     """/find <фраза> — нумерованный список кандидатов из прайса;
     /pick 1 3 5 — поставить выбранные в конвейер; /excel — статус конвейера."""
     from content_factory.ingest.excel_price import (
@@ -215,14 +262,15 @@ def make_find_pick_fns(state_db, prices_dir, publication_status_path=None):
 
     def _taken(store):
         return (PublishState(state_db).published_keys()
-                | ConfirmStore(state_db).blocked_keys() | store.all_keys())
+                | ConfirmStore(state_db).blocked_keys()
+                | store.selection_blocked_keys(queue_db or config("FOTOGEN_QUEUE_DB", default="")))
 
     def _pick_table(c):
         c.execute("CREATE TABLE IF NOT EXISTS pick_list (idx INTEGER PRIMARY KEY, "
                   "key TEXT, brand TEXT, model TEXT, name TEXT, price INTEGER)")
 
     def find_fn(phrase):
-        slots = load_price_slots(prices_dir)
+        slots = load_price_slots(prices_dir, for_telegram=True)
         if not slots:
             return "❌ прайс не загружен — пришлите .xlsx файлом"
         items = [i for _, its in slots for i in its]      # свой прайс приоритетнее почтового
@@ -254,21 +302,27 @@ def make_find_pick_fns(state_db, prices_dir, publication_status_path=None):
         if not rows:
             return "❌ таких номеров нет — сначала /find <фраза>"
         store = ExcelStore(state_db)
-        n = store.add_items(rows)
-        listing = "\n".join(f"— {r[3]} · {r[4]:,} ₽".replace(",", " ") for r in rows)
-        return (f"✅ взято в работу {n} из {len(rows)}:\n{listing}\n\n"
-                f"Конвейер: УТП+фото → карточка → превью сюда (тик ~10 мин). Статус: /excel")
+        requested = len(rows)
+        rows = [row for row in rows if row[0] not in _taken(store)]
+        accepted = store.select_items(rows, queue_db=queue_db or config("FOTOGEN_QUEUE_DB", default=""))
+        n = len(accepted)
+        wake_note = _wake_note(wake_fn, state_db) if n else ""
+        listing = "\n".join(f"— {r[3]} · {r[4]:,} ₽".replace(",", " ") for r in accepted)
+        return (f"✅ взято в работу {n} из {requested}:\n{listing}\n\n"
+                f"Конвейер: УТП+фото → карточка → превью на согласование. Статус: /excel{wake_note}")
 
     def excel_fn(arg: str | None = None):
         from content_factory.orchestrator.card_submit import assigned_account
+        from content_factory.bot.task_status import recover_submissions, selection_status_lines
         store = ExcelStore(state_db)
+        recover_submissions(store, queue_db or config("FOTOGEN_QUEUE_DB", default=""))
         # /excel retry — вернуть failed в конвейер с чистого листа (2026-07-07)
         if arg in ("retry", "повтор", "повторить"):
             n = store.retry_failed()
             if not n:
                 return "✅ failed-позиций нет — повторять нечего"
-            return (f"🔁 возвращено в конвейер: {n} (research заново, "
-                    f"тик ~10 мин). Статус: /excel")
+            return (f"🔁 возвращено в конвейер: {n}. Статус: /excel"
+                    + _wake_note(wake_fn, state_db))
         statuses = ("new", "research", "card", "preview", "failed")
         by_status = {s: store.by_status(s) for s in statuses}
         auto = {s: [i for i in by_status[s] if i.key.startswith("ready-price|")]
@@ -282,6 +336,12 @@ def make_find_pick_fns(state_db, prices_dir, publication_status_path=None):
             f"❌ ошибки {len(auto['failed'])}",
             "Готовые карточки сохраняются прямо для Avito и в этот чат не присылаются.",
         ]
+        if worker_status_fn is not None:
+            lines = [*worker_status_fn(), "━" * 22, *lines]
+        selection = selection_status_lines(
+            store, queue_db or config("FOTOGEN_QUEUE_DB", default=""))
+        if selection:
+            lines = [*selection, "━" * 22, *lines]
         from content_factory.ready_price import batch_status
         control = batch_status(state_db)
         mode = "▶️ партия запущена" if control["enabled"] else "⏸ генерация на паузе"
@@ -296,9 +356,9 @@ def make_find_pick_fns(state_db, prices_dir, publication_status_path=None):
         if any(manual[s] for s in statuses):
             lines += [
                 "━" * 22,
-                "Ручные задания с Telegram-превью:",
+                "Вся очередь Контент-завода (включая прошлые партии):",
                 f"🆕 {len(manual['new'])} · 🔎 {len(manual['research'])} · "
-                f"🎨 {len(manual['card'])} · 👀 превью {len(manual['preview'])} · "
+                f"🎨 {len(manual['card'])} · 👀 превью в истории {len(manual['preview'])} · "
                 f"❌ {len(manual['failed'])}",
             ]
         # отложенные /task-позиции by_status('new') прячет от тика — без этой
@@ -362,30 +422,19 @@ def make_price_fn(state_db, token: str, review_channel: str, parse_mode: str,
     return price_fn
 
 
+def sources_markup(prices_dir):
+    from content_factory.bot.source_menu import sources_markup as implementation
+    return implementation(prices_dir)
+
+
+def toggle_tg_source(prices_dir, data):
+    from content_factory.bot.source_menu import toggle_tg_source as implementation
+    return implementation(prices_dir, data)
+
+
 def make_sources_fn(prices_dir):
-    """/sources — источники прайсов: имя, позиций, наценка, свежесть. Новый
-    источник добавляется просто отправкой .xlsx файлом в чат (бот сам спросит
-    наценку); наценка меняется /markup <слот> <±число> (2026-07-07)."""
-    def sources_fn() -> str:
-        import time as _t
-        from content_factory.ingest.excel_price import load_price_slots, get_markups
-        slots = load_price_slots(prices_dir)
-        if not slots:
-            return ("❌ источников нет — пришлите .xlsx прайс файлом в этот чат, "
-                    "он добавится источником")
-        markups = get_markups(prices_dir)
-        lines = ["📦 Источники прайсов:"]
-        for label, items in slots:
-            pct = markups.get(label, 0)
-            pct_s = f" · {'+' if pct > 0 else ''}{pct:g}%" if pct else ""
-            p = Path(prices_dir) / f"{label}.xlsx"
-            age_h = (_t.time() - p.stat().st_mtime) / 3600 if p.exists() else None
-            age_s = f" · {age_h:.0f}ч назад" if age_h is not None else ""
-            lines.append(f"• {label}: {len(items)} поз.{pct_s}{age_s}")
-        lines.append("\n➕ Добавить: пришлите .xlsx файлом. "
-                     "Наценка: /markup <слот> <±число>")
-        return "\n".join(lines)
-    return sources_fn
+    from content_factory.bot.source_menu import make_sources_fn as implementation
+    return implementation(prices_dir)
 
 
 _DB_MARKUP_SOURCES = ("breeze", "rusklimat", "daichi", "jac")
@@ -428,7 +477,7 @@ def make_markup_fn(prices_dir, state_db=None):
     return markup_fn
 
 
-_EXCEL_ACTIVE_STATUSES = ("new", "research", "card")   # до preview — можно отменить
+_EXCEL_ACTIVE_STATUSES = ("new", "research", "card", "submission", "submission_failed")
 
 
 def make_cancel_excel_fn(state_db, queue_db):
@@ -439,25 +488,65 @@ def make_cancel_excel_fn(state_db, queue_db):
     никуда не поедет (товар вне конвейера)."""
     def cancel_fn(target: str) -> str:
         from content_factory.orchestrator.excel_pipeline import ExcelStore
+        from content_factory.bot.task_status import cancellable_items, audit_task_event
         store = ExcelStore(state_db)
-        items = [i for s in _EXCEL_ACTIVE_STATUSES for i in store.by_status(s)]
-        if target != "*":
+        items = cancellable_items(store)
+        if target == "latest":
+            receipt = store.latest_selection()
+            keys = set(receipt["keys"]) if receipt else set()
+            items = [i for i in items if i.key in keys]
+        elif target != "*":
             items = [i for i in items if i.key == target]
         if not items:
             return "❌ нечего отменять — активных задач нет"
         cancelled_jobs = 0
-        with sqlite3.connect(queue_db) as q:
-            for item in items:
-                store.update(item.key, status="cancelled")
-                for job_id in (item.research_job, item.card_job):
-                    if job_id:
-                        cancelled_jobs += q.execute(
-                            "UPDATE jobs SET status='cancelled' "
-                            "WHERE id=? AND status='pending'", (job_id,)).rowcount
+        processing = 0
+        queue_warning = ""
+        # Stop advancement even if the remote worker queue is unavailable.
+        with store._c() as db:
+            db.executemany("UPDATE excel_items SET status='cancelled' WHERE key=? "
+                           "AND status IN ('new','research','card','submission','submission_failed')",
+                           [(i.key,) for i in items])
+        with store._c() as db:
+            uncertain = {row[0] for row in db.execute(
+                "SELECT key FROM excel_items WHERE status='cancelled' "
+                "AND (COALESCE(card_request_key,'')<>'' OR COALESCE(research_request_key,'')<>'')")}
+        needs_queue = any(i.research_job or i.card_job or i.key in uncertain for i in items)
+        try:
+            if queue_db and Path(queue_db).is_file():
+                with sqlite3.connect(queue_db, timeout=30) as q:
+                    columns = {r[1] for r in q.execute("PRAGMA table_info(jobs)")}
+                    for item in items:
+                        ids = {j for j in (item.research_job, item.card_job) if j is not None}
+                        if "request_key" in columns:
+                            with store._c() as db:
+                                request = db.execute("SELECT research_request_key,card_request_key FROM excel_items "
+                                                     "WHERE key=?", (item.key,)).fetchone()
+                            for stage, request_key in zip(('research','card'), request or ()):
+                                if request_key:
+                                    job = q.execute("SELECT id FROM jobs WHERE request_key=?",
+                                                    (request_key,)).fetchone()
+                                    if job:
+                                        ids.add(job[0])
+                                        store.update(item.key, **{f'{stage}_job': job[0]})
+                        for job_id in ids:
+                            cancelled_jobs += q.execute("UPDATE jobs SET status='cancelled' "
+                                                        "WHERE id=? AND status='pending'", (job_id,)).rowcount
+                            processing += q.execute("SELECT COUNT(*) FROM jobs WHERE id=? "
+                                                    "AND status='processing'", (job_id,)).fetchone()[0]
+            elif needs_queue:
+                queue_warning = " Очередь фотоагента недоступна; его остановка не подтверждена."
+        except sqlite3.Error:
+            queue_warning = " Очередь фотоагента недоступна; его остановка не подтверждена."
+        audit_task_event(state_db, "cancel", [i.key for i in items],
+                         {"pending_cancelled": cancelled_jobs, "processing": processing,
+                          "queue_unavailable": bool(queue_warning)})
         names = ", ".join(i.name[:30] for i in items[:3])
         more = f" (+{len(items) - 3})" if len(items) > 3 else ""
         return (f"🛑 отменено {len(items)}: {names}{more}"
-                + (f"; снято из очереди агента: {cancelled_jobs}" if cancelled_jobs else ""))
+                + f"; снято из очереди агента: {cancelled_jobs}. Уже выполняются: {processing}. "
+                "Новые этапы для отменённых товаров не запускаются."
+                + queue_warning + " Выбрать их заново: /task.")
     return cancel_fn
 
 
@@ -466,14 +555,20 @@ def excel_cancel_markup(state_db, links) -> dict | None:
     «отменить все». None, если в конвейере нет активных. excel-ключи длинные —
     в callback_data короткий код (OrderLinks, как у превью-кнопок)."""
     from content_factory.orchestrator.excel_pipeline import ExcelStore
+    from content_factory.bot.task_status import cancellable_items
     store = ExcelStore(state_db)
-    items = [i for s in _EXCEL_ACTIVE_STATUSES for i in store.by_status(s)]
+    items = cancellable_items(store)
     if not items:
         return None
     rows = [[{"text": f"🛑 {i.name[:40]}",
               "callback_data": f"excancel:{links.code_for(i.key)}"}]
             for i in items[:8]]
-    rows.append([{"text": f"🛑 Отменить все ({len(items)})",
+    receipt = store.latest_selection()
+    latest_count = sum(i.key in set(receipt["keys"]) for i in items) if receipt else 0
+    if latest_count:
+        rows.append([{"text": f"🛑 Отменить последнюю партию ({latest_count})",
+                      "callback_data": "excancel:latest"}])
+    rows.append([{"text": f"🛑 Отменить всю очередь ({len(items)})",
                   "callback_data": "excancel:*"}])
     return {"inline_keyboard": rows}
 
@@ -554,7 +649,7 @@ def finalize_preview(http, token: str, cq: dict, verdict: str) -> None:
 
 
 def get_updates(token: str, offset: int, timeout: int = 30, http=None) -> list:
-    client = http or httpx.Client(timeout=timeout + 10)
+    client = http or telegram_client(timeout + 10)
     r = client.get(f"{TG_API}/bot{token}/getUpdates",
                    params={"offset": offset, "timeout": timeout})
     return (r.json() or {}).get("result", [])
@@ -581,7 +676,8 @@ def _make_wizard(cfg, owner, prices_dir, http, excel_fn):
 
     store = WizardStore(cfg.state.db)
     return make_wizard_flow(cfg.state.db, prices_dir, store, submit_card, save_photo,
-                            excel_fn)
+                            excel_fn, queue_db=queue_db,
+                            wake_fn=worker_control.request_run)
 
 
 def auto_markup(enabled: bool) -> dict:
@@ -627,7 +723,9 @@ def setup_bot_commands(http, token: str, owner: str) -> None:
         {"command": "avito", "description": "Avito-контент: партии, пауза, продолжить"},
         {"command": "pending", "description": "Посты на подтверждении"},
         {"command": "status", "description": "Что в очереди"},
-        {"command": "generation", "description": "МАСТЕР генерации: статус, вкл/выкл"},
+        {"command": "generation", "description": "Генерация: включить/выключить"},
+        {"command": "vkplan", "description": "Очередь и статусы публикаций VK"},
+        {"command": "vkpost", "description": "Открыть VK-пост вместе с фото"},
         {"command": "auto", "description": "Авто-контент: статус, вкл/выкл"},
     ]
     try:
@@ -664,36 +762,20 @@ def main():
     manual_photo_fn = make_manual_photo_fn(
         cfg.state.db, links, cs, regen_fn, Path(cfg.state.db).parent / "manual_photos")
     prices_dir = Path(cfg.state.db).parent / "prices"
-    make_fn = make_make_fn(cfg.state.db, prices_dir)
-    find_fn, pick_fn, excel_fn = make_find_pick_fns(cfg.state.db, prices_dir)
+    make_fn = make_make_fn(cfg.state.db, prices_dir, wake_fn=worker_control.request_run)
+    find_fn, pick_fn, excel_fn = make_find_pick_fns(
+        cfg.state.db, prices_dir, wake_fn=worker_control.request_run,
+        worker_status_fn=worker_control.status_lines)
     cancel_excel_fn = make_cancel_excel_fn(cfg.state.db, config("FOTOGEN_QUEUE_DB"))
-    http = httpx.Client(timeout=40)
+    # Связь VPS→Telegram рвётся: ~30% соединений не устанавливаются (2026-09-22).
+    # connect=40с замораживал однопоточного бота на 40с и терял ответ — короткий
+    # connect + повтор соединения (retries) даёт ответ за секунды.
+    http = telegram_client(40)
     review_channel = config("TELEGRAM_REVIEW_CHANNEL_ID", cfg.telegram.review_channel_id)
     price_fn = make_price_fn(cfg.state.db, token, review_channel,
                              cfg.telegram.parse_mode, links, http=http)
     sources_fn = make_sources_fn(prices_dir)
     markup_fn = make_markup_fn(prices_dir, cfg.state.db)
-
-    from content_factory.orchestrator.generation import (
-        generation_command, generation_enabled,
-    )
-    from content_factory.ready_price import (
-        batch_status as avito_batch_status, control_command as avito_control_command,
-    )
-    avito_catalog = config("READY_PRICE_CATALOG_DB",
-                           default="/opt/avito-bridge/state/ready-price/catalog.sqlite")
-
-    def avito_fn(arg):
-        return avito_control_command(arg, cfg.state.db, avito_catalog,
-                                     config("FOTOGEN_QUEUE_DB", default=""))
-
-    def generation_fn(arg):
-        return generation_command(
-            arg, cfg.state.db, cfg.state.card_jobs_db, config("FOTOGEN_QUEUE_DB")
-        )
-
-    def generation_state_fn():
-        return generation_enabled(cfg.state.db)
 
     # /auto: выключатель автомата (флаг в state-БД, слоты в общей очереди q)
     def cats_catalog_fn():
@@ -721,6 +803,56 @@ def main():
 
     def auto_state_fn():
         return auto_enabled(cfg.state.db) if cfg.auto_tasks else None
+
+    from content_factory.ready_price import (
+        batch_status as avito_batch_status, control_command as avito_control_command,
+    )
+    avito_catalog = config("READY_PRICE_CATALOG_DB",
+                           default="/opt/avito-bridge/state/ready-price/catalog.sqlite")
+
+    def avito_fn(arg):
+        return avito_control_command(arg, cfg.state.db, avito_catalog,
+                                     config("FOTOGEN_QUEUE_DB", default=""))
+
+    from content_factory.orchestrator.generation import generation_command, generation_enabled
+
+    def generation_fn(arg):
+        reply = generation_command(
+            arg, cfg.state.db, cfg.state.card_jobs_db, config("FOTOGEN_QUEUE_DB")
+        )
+        if arg in ("on", "off"):
+            from content_factory.bot.task_status import audit_task_event
+            audit_task_event(cfg.state.db, "generation", detail={"enabled": generation_state_fn()})
+        if arg == "on" and generation_state_fn():
+            reply += _wake_note(worker_control.request_run, cfg.state.db)
+        return reply
+
+    def generation_state_fn():
+        return generation_enabled(cfg.state.db)
+
+    def vkplan_fn():
+        return format_vk_plan(
+            vk_plan_store_from_env(), now=datetime.now(),
+            owner_id=int(os.getenv("VK_OWNER_ID", "-241020718")),
+        )
+
+    def _send_vk_plan_preview(chat_id: str, raw_id: str) -> str:
+        try:
+            item_id = int(str(raw_id).strip().removeprefix("CF-VK-"))
+        except ValueError:
+            return "❌ формат: /vkpost 13"
+        item = vk_plan_store_from_env().get(item_id)
+        if item is None:
+            return "❌ материал VK-плана не найден"
+        if not item.card_path or not Path(item.card_path).is_file():
+            return f"❌ у CF-VK-{item.id:03d} пока нет готового изображения"
+        markup = callback_markup(item) if item.status == "review" else None
+        result = publish_post(
+            token, chat_id, item.card_path, review_caption(item),
+            http=http, reply_markup=markup, retries=1,
+        )
+        return (f"🖼 Открыт CF-VK-{item.id:03d} вместе с изображением."
+                if result.ok else f"❌ не удалось отправить фото: {result.error}")
     wizard_start, wizard_text, wizard_photo, wizard_callback = _make_wizard(
         cfg, owner, prices_dir, http, excel_fn)
 
@@ -735,8 +867,9 @@ def main():
             import traceback
             traceback.print_exc()
             from content_factory.bot.wizard_flow import WizardReply
-            return WizardReply("⚠️ внутренняя ошибка — попробуйте ещё раз "
-                               "(детали в журнале cf-bot)")
+            return WizardReply("⚠️ Отправка задачи не подтверждена. Проверить: /excel. "
+                               "Повторное платное задание автоматически не отправляется; "
+                               "детали сохранены в журнале cf-bot.")
 
     def _send_wizard_reply(chat_id, wr):
         data = {"chat_id": chat_id, "text": wr.text}
@@ -817,9 +950,26 @@ def main():
                     except httpx.HTTPError:
                         pass
                     continue
+                if (cq.get("data") or "").startswith("srctg:"):
+                    msg_s = cq.get("message") or {}
+                    note = toggle_tg_source(prices_dir, cq.get("data"))
+                    try:
+                        http.post(f"{TG_API}/bot{token}/answerCallbackQuery",
+                                  data={"callback_query_id": cq.get("id"), "text": note[:180]})
+                        http.post(f"{TG_API}/bot{token}/editMessageText", data={
+                            "chat_id": msg_s.get("chat", {}).get("id"),
+                            "message_id": msg_s.get("message_id"),
+                            "text": sources_fn(),
+                            "reply_markup": json.dumps(sources_markup(prices_dir),
+                                                       ensure_ascii=False)})
+                    except httpx.HTTPError:
+                        pass
+                    continue
                 if (cq.get("data") or "").startswith("wizard:"):
                     chat_w = str((cq.get("message") or {}).get("chat", {}).get("id", ""))
                     if cq.get("data") == "wizard:confirm" and not generation_state_fn():
+                        from content_factory.bot.task_status import audit_task_event
+                        audit_task_event(cfg.state.db, "confirm_blocked", detail={"reason": "generation_off"})
                         try:
                             http.post(f"{TG_API}/bot{token}/answerCallbackQuery",
                                       data={"callback_query_id": cq.get("id"),
@@ -854,9 +1004,40 @@ def main():
                                       f"💰 Новая цена для «{key_p[:50]}»? Только число.",
                                       "напр.: 25990")
                     continue
+                if data_cq.startswith("vkp:"):
+                    plan_store = vk_plan_store_from_env()
+                    edit_match = re.fullmatch(r"vkp:e:(\d+)", data_cq)
+                    if edit_match:
+                        item = plan_store.get(int(edit_match.group(1)))
+                        chat_v = str((cq.get("message") or {}).get("chat", {}).get("id", ""))
+                        if item is None or item.status not in {"review", "approved"}:
+                            reply = "Материал уже обработан"
+                        else:
+                            pending.set(owner or chat_v, f"/vkrevision {item.id}")
+                            order_store.cancel(owner or chat_v)
+                            reply = f"📝 Что изменить в CF-VK-{item.id:03d}?"
+                            _send_force_reply(
+                                owner or chat_v, reply,
+                                "например: мастер должен стоять на стремянке",
+                            )
+                        try:
+                            http.post(f"{TG_API}/bot{token}/answerCallbackQuery",
+                                      data={"callback_query_id": cq.get("id"),
+                                            "text": reply[:180]})
+                        except httpx.HTTPError:
+                            pass
+                        continue
+                    reply = handle_plan_callback(data_cq, plan_store)
+                    try:
+                        http.post(f"{TG_API}/bot{token}/answerCallbackQuery",
+                                  data={"callback_query_id": cq.get("id"), "text": reply[:180]})
+                    except httpx.HTTPError:
+                        pass
+                    finalize_preview(http, token, cq, reply)
+                    continue
                 if data_cq.startswith("excancel:"):    # отмена задач excel-конвейера
                     target = data_cq.split(":", 1)[1]
-                    if target != "*":
+                    if target not in ("*", "latest"):
                         target = links.key_for(target) or target
                     reply = cancel_excel_fn(target)
                     chat_c = str((cq.get("message") or {}).get("chat", {}).get("id", ""))
@@ -960,8 +1141,6 @@ def main():
             msg = u.get("message") or u.get("edited_message") or {}
             chat = str((msg.get("chat") or {}).get("id", ""))
             text = msg.get("text", "")
-            # Owner-only navigation precedes free-text wizards and order dialogs.
-            # Existing slash commands still go through their original handlers.
             menu_reply = control.handle(text, chat, str((msg.get("from") or {}).get("id", "")))
             if menu_reply is not None:
                 pending.clear(chat)
@@ -1068,15 +1247,6 @@ def main():
             # /task — старт визарда постановки задачи кнопками
             if text.strip() == "/task":
                 control._set(chat, "content", control.state(chat)[1])
-                if not generation_state_fn():
-                    try:
-                        http.post(f"{TG_API}/bot{token}/sendMessage",
-                                  data={"chat_id": chat,
-                                        "text": "⏸ Мастер-генерация выключена. "
-                                                "Сначала: /generation on"})
-                    except httpx.HTTPError:
-                        pass
-                    continue
                 _send_wizard_reply(chat, _wizard_safe(wizard_start, chat))
                 continue
             # фото без reply на превью — шаг визарда «приложить фото»
@@ -1097,8 +1267,7 @@ def main():
                 reconstructed = resolve_reply(pending.take(chat), text)
                 if reconstructed:
                     text = reconstructed
-            # Pending /find replies must not be consumed by an old task wizard.
-            # Switching sections pauses the draft, without deleting it.
+            # текстовый шаг визарда (категория/список/УТП) — если диалог активен
             if text and control.state(chat)[0] == "content":
                 wr = _wizard_safe(wizard_text, chat, text)
                 if wr is not None:
@@ -1106,17 +1275,47 @@ def main():
                     continue
             if not text:
                 continue
+            if text.lower().startswith("/vkrevision"):
+                parts_v = text.split(maxsplit=2)
+                if len(parts_v) < 3 or not parts_v[1].isdigit():
+                    reply = "❌ формат: /vkrevision 13 что именно изменить"
+                else:
+                    item_id = int(parts_v[1])
+                    store_v = vk_plan_store_from_env()
+                    item_v = store_v.get(item_id)
+                    reply = (
+                        f"🛠 CF-VK-{item_id:03d} возвращён на доработку: {parts_v[2]}"
+                        if store_v.request_revision(item_id, parts_v[2])
+                        else "Материал уже обработан или комментарий пуст"
+                    )
+                try:
+                    http.post(f"{TG_API}/bot{token}/sendMessage",
+                              data={"chat_id": chat, "text": reply})
+                except httpx.HTTPError:
+                    pass
+                continue
+            if text.lower().startswith("/vkpost"):
+                parts_v = text.split(maxsplit=1)
+                reply = (_send_vk_plan_preview(chat, parts_v[1])
+                         if len(parts_v) == 2 else "❌ формат: /vkpost 13")
+                try:
+                    http.post(f"{TG_API}/bot{token}/sendMessage",
+                              data={"chat_id": chat, "text": reply})
+                except httpx.HTTPError:
+                    pass
+                continue
             reply = handle_command(text, q, confirm_store=cs, publish_fn=publish_fn,
                                    publish_state=ps, regen_fn=regen_fn, make_fn=make_fn,
                                    find_fn=find_fn, pick_fn=pick_fn, excel_fn=excel_fn,
                                    price_fn=price_fn, sources_fn=sources_fn,
                                    markup_fn=markup_fn, auto_fn=auto_fn,
-                                   auto_state_fn=auto_state_fn,
+                                   auto_state_fn=auto_state_fn, vkplan_fn=vkplan_fn,
                                    generation_fn=generation_fn,
                                    generation_state_fn=generation_state_fn,
                                    avito_fn=avito_fn)
             data = {"chat_id": chat, "text": reply,
-                    "reply_markup": json.dumps(control_keyboard(control.state(chat)[0]), ensure_ascii=False)}
+                    "reply_markup": json.dumps(control_keyboard(control.state(chat)[0]),
+                                               ensure_ascii=False)}
             if text.strip().startswith("/excel"):
                 markup = excel_cancel_markup(cfg.state.db, links)
                 rows = list((markup or {}).get("inline_keyboard", []))
@@ -1133,13 +1332,15 @@ def main():
                 else:
                     markup = avito_markup(avito_batch_status(cfg.state.db))
                 data["reply_markup"] = json.dumps(markup, ensure_ascii=False)
+            if text.strip().startswith("/generation"):
+                data["reply_markup"] = json.dumps(
+                    generation_markup(generation_state_fn()), ensure_ascii=False)
+            if text.strip().startswith("/sources"):
+                data["reply_markup"] = json.dumps(sources_markup(prices_dir), ensure_ascii=False)
             if text.strip().startswith(("/auto", "/status")):   # кнопка вкл/выкл автомата
                 st_a = auto_state_fn()
                 if st_a is not None:
                     data["reply_markup"] = json.dumps(auto_markup(st_a), ensure_ascii=False)
-            if text.strip().startswith("/generation"):
-                data["reply_markup"] = json.dumps(
-                    generation_markup(generation_state_fn()), ensure_ascii=False)
             try:
                 http.post(f"{TG_API}/bot{token}/sendMessage", data=data)
             except httpx.HTTPError:

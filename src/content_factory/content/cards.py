@@ -21,6 +21,8 @@ class CardConfig:
     base_url: str = ""          # публичный HTTPS-префикс этой папки
     exts: list = field(default_factory=lambda: [".jpg", ".jpeg", ".png"])
     require_for_publish: bool = False   # публиковать серию ТОЛЬКО при наличии уникальной карточки
+    reference_dir: str = "state/product-references"
+    trusted_image_domains: list[str] = field(default_factory=list)
 
 
 def has_card(offer: Offer, cfg: CardConfig) -> bool:

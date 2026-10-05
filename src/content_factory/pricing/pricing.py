@@ -15,6 +15,7 @@ class PricingConfig:
     default_markup_pct: float = 5
     min_margin_abs: Decimal | int = 0   # 0 = без пола маржи (наценка строго +pct%); см. ТЗ §10
     rounding: str = "up_to_90"
+    prefer_retail_ref: bool = False
     rules: list[dict] = field(default_factory=list)
 
 
@@ -27,6 +28,9 @@ def _markup_for(offer: Offer, cfg: PricingConfig) -> float:
 
 
 def compute_price(offer: Offer, cfg: PricingConfig) -> PriceResult:
+    if cfg.prefer_retail_ref and offer.retail_ref is not None and offer.retail_ref > 0:
+        return PriceResult(ok=True, price=int(offer.retail_ref), markup_pct=0,
+                           min_margin_applied=False)
     if offer.cost is None or offer.cost <= 0:
         return PriceResult(ok=False, reason="cost<=0 or missing")
     pct = _markup_for(offer, cfg)

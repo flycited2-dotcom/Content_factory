@@ -45,4 +45,5 @@ def apply_overrides(cfg: PricingConfig, overrides: dict[str, float]) -> PricingC
              for s, p in overrides.items() if s != "*"]
     return PricingConfig(default_markup_pct=overrides.get("*", cfg.default_markup_pct),
                          min_margin_abs=cfg.min_margin_abs, rounding=cfg.rounding,
+                         prefer_retail_ref=cfg.prefer_retail_ref,
                          rules=rules + cfg.rules)

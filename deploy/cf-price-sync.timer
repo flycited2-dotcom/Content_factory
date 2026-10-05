@@ -1,0 +1,9 @@
+[Unit]
+Description=Refresh Content Factory supplier price links every ten minutes
+
+[Timer]
+OnCalendar=*:0/10
+Persistent=true
+
+[Install]
+WantedBy=timers.target

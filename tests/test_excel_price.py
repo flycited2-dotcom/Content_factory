@@ -57,6 +57,13 @@ def test_item_key_matches_manual_pilot_keys(tmp_path):
     assert item_key(stinol) == "excel|stinol|sts 167"      # совпадает с ключами пилота
 
 
+def test_search_deduplicates_models_across_supplier_slots_before_limit():
+    first = PriceItem('Стиральные машины', 'A', 'LG', 'Стиральная машина LG WM1', 100)
+    duplicate = PriceItem('Стиральные машины', 'B', 'LG', 'Стиральная машина LG WM1', 200)
+    second = PriceItem('Стиральные машины', 'C', 'LG', 'Стиральная машина LG WM2', 300)
+    assert search_items([first, duplicate, second], 'стиральные машины', set(), limit=2) == [first, second]
+
+
 def test_select_quotas_and_rest(tmp_path):
     items = parse_price_xlsx(_xlsx(tmp_path, ROWS))
     got = select_from_price(items, "холодильник", {"beko": 1, "*": None}, 3, taken=set())

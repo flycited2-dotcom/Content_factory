@@ -10,6 +10,8 @@
 Чистая логика без Telegram: download/send инъецируются извне (bot/run.py)."""
 from __future__ import annotations
 import re
+import hashlib
+import inspect
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -53,23 +55,34 @@ class WizardReply:
     markup: dict | None = None
 
 
-_CATS_PER_PAGE = 24       # 12 рядов по 2: групп бывает 200+, все кнопки в одно
-                          # сообщение Telegram не влезают — листаем страницами
+_CATS_PER_PAGE = 8
+
+
+def _category_key(name: str) -> str:
+    return hashlib.sha256(name.encode("utf-8")).hexdigest()[:12]
+
+
+def _pick_keyboard(count: int) -> dict:
+    sizes = sorted({min(n, count) for n in (1, 5, 10) if count})
+    rows = [[{"text": f"✅ Взять {n}", "callback_data": f"wizard:pick_first:{n}"} for n in sizes]]
+    if count and count not in sizes:
+        rows.append([{"text": f"✅ Все {count}", "callback_data": f"wizard:pick_first:{count}"}])
+    rows.append([{"text": "◀️ Другие категории", "callback_data": "wizard:categories"},
+                 {"text": "❌ Отмена", "callback_data": "wizard:cancel"}])
+    return {"inline_keyboard": rows}
 
 
 def _category_keyboard(prices_dir, page: int = 0) -> dict | None:
-    """Кнопки разделов прайсов, страница `page` (wizard:cat:<ГЛОБАЛЬНЫЙ индекс> —
-    категории кириллицей не влезают в 64 байта callback_data, поэтому индекс в
-    top_sections; листание — wizard:catpage:<n>). Все группы доступны."""
+    """Use stable category hashes so refreshed price lists cannot swap buttons."""
     sections = top_sections(prices_dir)
     if not sections:
         return None
     pages = max(1, -(-len(sections) // _CATS_PER_PAGE))
     page = max(0, min(page, pages - 1))
     lo = page * _CATS_PER_PAGE
-    btns = [{"text": s[:32], "callback_data": f"wizard:cat:{lo + k}"}
+    btns = [{"text": s, "callback_data": f"wizard:cat:{_category_key(s)}"}
             for k, s in enumerate(sections[lo:lo + _CATS_PER_PAGE])]
-    rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
+    rows = [[b] for b in btns]
     if pages > 1:                                  # ряд листания
         nav = []
         if page > 0:
@@ -84,7 +97,7 @@ def _category_keyboard(prices_dir, page: int = 0) -> dict | None:
 
 
 def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel_fn,
-                     now_fn=datetime.now):
+                     now_fn=datetime.now, queue_db=None, wake_fn=None):
     """submit_card(brand, model, utp, photo_path) -> job_id (см. card_submit.py).
     save_photo(chat_id, photo_bytes) -> абсолютный путь к сохранённому файлу.
     excel_fn() -> str — статус конвейера (кнопка «📊 Статус», не сбрасывает диалог).
@@ -92,10 +105,11 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
 
     def _taken(excel_store: ExcelStore) -> set:
         return (PublishState(state_db).published_keys()
-                | ConfirmStore(state_db).blocked_keys() | excel_store.all_keys())
+                | ConfirmStore(state_db).blocked_keys()
+                | excel_store.selection_blocked_keys(queue_db))
 
     def _price_items():
-        slots = load_price_slots(prices_dir)
+        slots = load_price_slots(prices_dir, for_telegram=True)
         return [i for _, its in slots for i in its]
 
     def start(chat_id: str) -> WizardReply:
@@ -108,7 +122,8 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
                 {"inline_keyboard": [[
                     {"text": "➕ Свой товар", "callback_data": "wizard:manual"},
                     {"text": "📊 Статус", "callback_data": "wizard:status"}]]})
-        return WizardReply("🧾 Выберите категорию кнопкой — пришлю список позиций "
+        return WizardReply("🎬 Задача Контент-заводу. Для Avito: /avito categories.\n"
+                           "🧾 Выберите категорию кнопкой — пришлю список позиций "
                            "из прайсов. Или напишите категорию/список моделей текстом.",
                            kb)
 
@@ -117,8 +132,10 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
         found = search_items(_price_items(), category, _taken(excel_store),
                              limit=_MAX_LIST)
         if not found:
-            return WizardReply(f"❌ по «{category}» в прайсах пусто (или всё уже "
-                               f"в работе) — попробуйте другую категорию")
+            return WizardReply(f"По «{category}» нет свободных позиций для новой задачи. "
+                               "Товары могут быть уже в работе или иметь готовые карточки. "
+                               "Проверить: /excel. Отменённые задачи можно выбрать снова "
+                               "после завершения уже запущенного фотоагента.")
         cands = [(item_key(i), i.brand, extract_model(i.name, i.brand),
                   i.name, i.price) for i in found]
         store.set_candidates(chat_id, category, cands)
@@ -126,7 +143,7 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
                             for n, c in enumerate(cands, 1))
         return WizardReply(f"🔎 «{category}» — найдено {len(cands)}:\n{listing}\n\n"
                            f"Какие взять? Номера через пробел (напр.: 1 3 5) "
-                           f"или «все».", _CANCEL_KB)
+                           f"или нажмите кнопку ниже.", _pick_keyboard(len(cands)))
 
     def _time_prompt() -> WizardReply:
         return WizardReply("⏰ Когда выгружать? «🚀 Сейчас» — или напишите время: "
@@ -284,14 +301,49 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
                 return WizardReply("📎 Фото потерялось (файл не найден) — "
                                    "пришлите фото заново или пропустите.",
                                    _SKIP_PHOTO_KB)
-        # Сабмит карточек ДО записи в конвейер: падение сабмита не должно
-        # оставлять товар в status=new — иначе excel-тик утащит его в research
-        # с чужим фото ChatGPT (грабля 2026-07-09, ларь Hyundai CH1002)
-        jobs: list[tuple[str, int]] = []
+        requested = len({row[0] for row in rows})
+        blocked = _taken(excel_store)
+        rows = [row for row in rows if row[0] not in blocked]
+        start_at = None
+        if st.due_at is not None:
+            lead = max(TASK_LEAD_SECONDS, _LEAD_PER_ITEM_SECONDS * len(rows))
+            start_at = st.due_at - lead
+        # Claim before any paid request. A failed photo submission remains outside
+        # the research pipeline; repeated confirmations cannot send it twice.
+        rows = excel_store.select_items(rows, due_at=start_at, queue_db=queue_db,
+                                        reservation=photo is not None)
+        if not rows:
+            store.cancel(chat_id)
+            from content_factory.bot.task_status import audit_task_event
+            audit_task_event(state_db, "selection", detail={"requested": requested, "accepted": 0})
+            return WizardReply("Новых задач добавлено: 0. Выбранные позиции уже "
+                               "заняты или ждут завершения фотоагента. Статус: /excel")
+        n_override = 0
         if photo is not None:
-            for key, brand, model, name, price in rows:
-                jobs.append((key, submit_card(brand, model, st.utp_text or "",
-                                              str(photo))))
+            try:
+                for key, brand, model, name, price in rows:
+                    if excel_store.get(key).status != "submission":
+                        continue  # Finished research/card is resumed without payment.
+                    request_key = excel_store.get_or_create_request_key(key, "card")
+                    parameters = inspect.signature(submit_card).parameters.values()
+                    with_identity = any(p.name == "request_key" or
+                                        p.kind == inspect.Parameter.VAR_KEYWORD
+                                        for p in parameters)
+                    kwargs = {"request_key": request_key} if with_identity else {}
+                    job = submit_card(brand, model, st.utp_text or "", str(photo), **kwargs)
+                    active = excel_store.bind_submitted_job(
+                        key, "card", job, "submission", tries=0, request_key=request_key)
+                    if active:
+                        n_override += 1
+                    elif excel_store.get(key).status == "cancelled":
+                        from content_factory.bot.task_status import cancel_known_job
+                        cancel_known_job(queue_db, job, request_key)
+            except Exception as exc:
+                for row in rows:
+                    if excel_store.get(row[0]).status == "submission":
+                        excel_store.update(row[0], status="submission_failed",
+                                           error=f"manual_card_submission:{type(exc).__name__}")
+                raise
         # УТП владельца — в research_cache (source='manual', research его не
         # перезапишет): превью строит «Ключевые особенности» из кэша, и для
         # ручного товара со своим УТП подпись выходила ПУСТОЙ (2026-07-10,
@@ -301,16 +353,10 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
                 excel_store.cache_put(
                     f"{brand.strip().lower()}|{model.strip().lower()}",
                     st.utp_text, None, source="manual")
-        start_at = None
-        if st.due_at is not None:
-            lead = max(TASK_LEAD_SECONDS, _LEAD_PER_ITEM_SECONDS * len(rows))
-            start_at = st.due_at - lead
-        excel_store.add_items(rows, due_at=start_at)
-        n_override = 0
-        for key, job in jobs:
-            excel_store.update(key, status="card", card_job=job, tries=0)
-            n_override += 1
         store.cancel(chat_id)
+        from content_factory.bot.task_status import audit_task_event
+        audit_task_event(state_db, "selection", [row[0] for row in rows],
+                         {"requested": requested, "accepted": len(rows), "photo_override": n_override})
         if n_override:
             mode = "карточка сразу, минуя research (своё фото)"
         elif st.due_at is not None:
@@ -320,35 +366,66 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
                     + datetime.fromtimestamp(start_at).strftime("%d.%m %H:%M"))
         else:
             mode = "обычный конвейер (research → карточка)"
-        return WizardReply(f"✅ поставлено в очередь: {len(rows)} ({mode}). "
-                           f"Статус: /excel")
+        skipped = f" Уже занято: {requested - len(rows)}." if requested > len(rows) else ""
+        listing = "\n".join(f"• {row[3][:100]}" for row in rows)
+        wake_note = ""
+        if wake_fn is not None and (start_at is None or start_at <= now_fn().timestamp()):
+            try:
+                requested_run = bool(wake_fn())
+            except Exception:
+                requested_run = False
+            wake_note = ("\nЗапуск конвейера запрошен; этапы появятся в /excel."
+                         if requested_run else
+                         "\nЗадачи сохранены. Немедленный запуск не подтверждён; "
+                         "автопроверка повторяется каждую минуту. Статус: /excel")
+        return WizardReply(f"✅ поставлено в очередь: {len(rows)} ({mode}).{skipped}\n"
+                           f"{listing}\nСтатус этой партии и всей очереди: /excel{wake_note}")
 
     def handle_callback(chat_id: str, data: str) -> WizardReply | None:
         if not data.startswith("wizard:"):
             return None
         if data == "wizard:status":            # работает вне зависимости от диалога
             return WizardReply(excel_fn())
+        action = data.split(":", 1)[1]
         st = store.snapshot(chat_id)
+        if st is None and (action == "categories" or action.startswith(("cat:", "catpage:"))):
+            store.start(chat_id)
+            st = store.snapshot(chat_id)
         if st is None:
             return WizardReply("❌ нет активного диалога — начните /task")
-        action = data.split(":", 1)[1]
-        if action.startswith("catpage:") and st.step == "awaiting_category":
+        if action == "categories" or action.startswith("catpage:"):
             try:
-                page = int(action.split(":", 1)[1])
+                page = int(action.split(":", 1)[1]) if ":" in action else 0
             except ValueError:
                 page = 0
             kb = _category_keyboard(prices_dir, page=page)
             if kb is None:
                 return WizardReply("❌ прайсы пусты — пришлите .xlsx файлом")
+            store.start(chat_id)
             return WizardReply("🧾 Выберите категорию кнопкой (или напишите "
                                "категорию/список моделей текстом).", kb)
-        if action.startswith("cat:") and st.step == "awaiting_category":
+        if action.startswith("cat:"):
             sections = top_sections(prices_dir)
-            try:
-                category = sections[int(action.split(":", 1)[1])]
-            except (ValueError, IndexError):
-                return WizardReply("❌ категория устарела — напишите текстом")
+            key = action.split(":", 1)[1]
+            # Old ordinal buttons cannot prove which category was displayed.
+            # Reopen the current list instead of selecting a different product.
+            category = next((name for name in sections if _category_key(name) == key), None)
+            if category is None:
+                store.start(chat_id)
+                return WizardReply("Категория в старом меню устарела. Выберите её заново.",
+                                   _category_keyboard(prices_dir))
+            store.start(chat_id)
             return _autolist(chat_id, category)
+        if action.startswith("pick_first:") and st.step == "awaiting_pick":
+            try:
+                count = int(action.split(":", 1)[1])
+            except ValueError:
+                count = 0
+            if not 1 <= count <= len(st.candidates or []):
+                return WizardReply("Выберите количество из текущего списка.",
+                                   _pick_keyboard(len(st.candidates or [])))
+            store.set_pick(chat_id, list(st.candidates[:count]))
+            return _time_prompt()
         if action == "manual":
             # «Свой товар» стартует с ЛЮБОГО шага (грабля 2026-07-09: на шаге
             # списка кнопка падала в «неожиданное действие») — начинаем заново.
@@ -390,6 +467,18 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
             return WizardReply("❌ отменено")
         if action == "confirm" and st.step == "awaiting_confirm":
             return _do_confirm(chat_id, st)
-        return WizardReply("❌ неожиданное действие для текущего шага")
+        if st.step == "awaiting_pick":
+            return WizardReply("Список уже открыт. Выберите количество кнопкой или отправьте номера.",
+                               _pick_keyboard(len(st.candidates or [])))
+        if st.step == "awaiting_time":
+            return _time_prompt()
+        if st.step == "awaiting_photo":
+            return WizardReply("Сейчас нужен снимок товара или «Пропустить».", _SKIP_PHOTO_KB)
+        if st.step == "awaiting_utp":
+            return WizardReply("Сейчас нужен текст УТП или «Пропустить».", _SKIP_UTP_KB)
+        if st.step == "awaiting_confirm":
+            return _confirm_prompt(st)
+        return WizardReply("Эта кнопка относится к предыдущему шагу. Выберите категорию заново.",
+                           {"inline_keyboard": [[{"text": "📦 Категории", "callback_data": "wizard:categories"}]]})
 
     return start, handle_text, handle_photo, handle_callback

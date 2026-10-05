@@ -1,0 +1,11 @@
+[Unit]
+Description=Synchronize verified supplier prices into Content Factory
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/content-factory
+Environment=PYTHONPATH=/opt/content-factory/src
+ExecStart=/opt/content-factory/.venv/bin/python -m content_factory.ingest.price_sync
+TimeoutStartSec=90

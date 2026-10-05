@@ -1,0 +1,11 @@
+[Unit]
+Description=Sync Avito content archive to Google Drive every 15 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+RandomizedDelaySec=1min
+Unit=avito-drive-archive.service
+
+[Install]
+WantedBy=timers.target

@@ -6,14 +6,29 @@
 (не помечаем опубликованным, не ретраим). Троттлинг между постами — на уровне планировщика
 (см. PublishState.seconds_since_last)."""
 from __future__ import annotations
+from content_factory.sqlite_state import state_connection
 import sqlite3
 import time
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import httpx
 
 TG_API = "https://api.telegram.org"
 CAPTION_MAX = 1024
+# Сервер теряет заметную долю TCP-соединений к api.telegram.org (на замере 01.10.2026
+# зависали 25–60% попыток). Короткий connect-таймаут и повтор превращают зависшее
+# соединение из 40-секундной паузы в 4 секунды.
+TELEGRAM_CONNECT_TIMEOUT = 4.0
+TELEGRAM_RETRIES = 4
+
+
+def telegram_client(timeout: float = 40.0) -> httpx.Client:
+    """HTTP-клиент для Bot API, устойчивый к зависающим соединениям."""
+    return httpx.Client(
+        timeout=httpx.Timeout(timeout, connect=TELEGRAM_CONNECT_TIMEOUT),
+        transport=httpx.HTTPTransport(retries=TELEGRAM_RETRIES),
+    )
 
 
 @dataclass
@@ -55,7 +70,7 @@ class PublishState:
                     pass                              # колонка уже есть
 
     def _c(self):
-        return sqlite3.connect(self.path)
+        return state_connection(self.path)
 
     def is_published(self, key: str) -> bool:
         with self._c() as c:
@@ -109,7 +124,7 @@ class PublishState:
 def send_message(bot_token: str, chat_id: str, text: str,
                  http: httpx.Client | None = None) -> bool:
     """Текстовое сообщение владельцу (алерты fail-ревизии/ошибок). Возвращает ok."""
-    client = http or httpx.Client(timeout=30)
+    client = http or telegram_client(30)
     try:
         r = client.post(f"{TG_API}/bot{bot_token}/sendMessage",
                         data={"chat_id": str(chat_id), "text": text})
@@ -123,7 +138,7 @@ def edit_caption(bot_token: str, chat_id, message_id: int, caption: str, *,
                  retries: int = 1, backoff: float = 1.0):
     """editMessageCaption («живой канал»). → (ok, error, gone): gone=True — пост
     удалён/недоступен (больше не трогать: пометить sold). Транзиенты ретраим."""
-    client = http or httpx.Client(timeout=30)
+    client = http or telegram_client(30)
     data = {"chat_id": str(chat_id), "message_id": message_id,
             "caption": (caption or "")[:CAPTION_MAX]}
     if parse_mode:
@@ -153,6 +168,36 @@ def edit_caption(bot_token: str, chat_id, message_id: int, caption: str, *,
                 or "can't be edited" in desc)
         return False, desc, gone
     return False, "unknown", False
+
+
+def edit_post_media(bot_token: str, chat_id, message_id: int, image: str, caption: str, *,
+                    parse_mode: str | None = None, reply_markup: str | None = None,
+                    http: httpx.Client | None = None) -> PublishResult:
+    """Заменить фотографию существующего поста без создания дубля."""
+    client = http or telegram_client(60)
+    media = {"type": "photo", "media": image if _is_url(image) else "attach://photo",
+             "caption": (caption or "")[:CAPTION_MAX]}
+    if parse_mode:
+        media["parse_mode"] = parse_mode
+    data = {"chat_id": str(chat_id), "message_id": int(message_id),
+            "media": json.dumps(media, ensure_ascii=False)}
+    if reply_markup:
+        data["reply_markup"] = reply_markup
+    try:
+        if _is_url(image):
+            response = client.post(f"{TG_API}/bot{bot_token}/editMessageMedia", data=data)
+        else:
+            with open(image, "rb") as fh:
+                files = {"photo": (Path(image).name, fh.read(), "image/png")}
+            response = client.post(f"{TG_API}/bot{bot_token}/editMessageMedia",
+                                   data=data, files=files)
+        body = response.json() or {}
+    except (OSError, httpx.HTTPError, ValueError) as exc:
+        return PublishResult(ok=False, error=str(exc))
+    if response.status_code == 200 and body.get("ok"):
+        mid = (body.get("result") or {}).get("message_id") or int(message_id)
+        return PublishResult(ok=True, message_id=mid)
+    return PublishResult(ok=False, error=body.get("description") or f"http {response.status_code}")
 
 
 def _is_url(s: str) -> bool:
@@ -186,7 +231,7 @@ def publish_post(bot_token: str, channel_id: str, image: str, caption: str,
         return PublishResult(ok=True, skipped=True)
 
     caption = (caption or "")[:caption_max]
-    client = http or httpx.Client(timeout=60)
+    client = http or telegram_client(60)
 
     last_err = None
     for attempt in range(max(1, retries) + 1):

@@ -29,8 +29,36 @@ from content_factory.publish.telegram import publish_post, send_message
 from content_factory.orchestrator.generation import generation_enabled
 from content_factory.ready_price import batch_keys, enabled as ready_price_enabled, sync_catalog
 from content_factory.ready_price_audit import audit_card_text
+from content_factory.drive_archive import ARTICLE, restore_missing, valid_png
 
 DIVIDER = "═" * 26
+
+
+def make_photo_resolver(store: ExcelStore, output_dir: Path, content_dir: Path):
+    """Resolve cached originals and recover exact models from the durable bank."""
+    from content_factory.archive_recovery import find_archive_recovery
+
+    def resolve_photo(item, photo_path):
+        source = output_dir / photo_path
+        if source.is_file():
+            return str(source.resolve())
+        archive = find_archive_recovery(
+            content_dir, brand=item.brand, model=item.model,
+            card_mode=item.card_mode,
+            article=item.key.split("|", 1)[1] if item.key.startswith("ready-price|") else None)
+        if archive is None:
+            return None
+        model_key = f"{item.brand.strip().lower()}|{item.model.strip().lower()}"
+        cached = store.cache_get(model_key)
+        utp = cached[0] if cached and cached[0] else "\n".join(
+            f"✓ {feature}" for feature in archive.evidence.get("features", []) if feature)
+        store.cache_put(model_key, utp, str(archive.original_path),
+                        source="archive", evidence=archive.evidence)
+        print(f"excel archive: restored original for {item.brand} {item.model} "
+              f"from article {archive.article}")
+        return str(archive.original_path)
+
+    return resolve_photo
 
 
 def _money(p) -> str:
@@ -93,7 +121,7 @@ def save_ready_price_content(store: ExcelStore, item, card_output: str,
                              output_dir: Path, content_dir: Path) -> tuple[bool, str | None]:
     """Сохранить карточку и доказательства для Avito без внешней публикации."""
     article = item.key.split("|", 1)[1]
-    if not re.fullmatch(r"[A-Za-zА-Яа-я0-9#._-]+", article):
+    if not ARTICLE.fullmatch(article):
         return False, "unsafe_article"
     evidence = store.cache_evidence(f"{item.brand.strip().lower()}|{item.model.strip().lower()}")
     source = output_dir / card_output
@@ -129,6 +157,59 @@ def save_ready_price_content(store: ExcelStore, item, card_output: str,
                              encoding="utf-8")
     os.replace(temp_manifest, target / "content.json")
     return True, None
+
+
+def reuse_ready_price_archive(store: ExcelStore, state_db, content_dir: Path) -> dict:
+    """Reuse exact-article content and refresh its price without another ChatGPT job.
+
+    Only articles still present in the verified supplier snapshot qualify. Image
+    quality and independent visual approval remain the publication gate.
+    """
+    result = {"reused": 0, "prices_refreshed": 0}
+    if not content_dir.is_dir():
+        return result
+    with sqlite3.connect(state_db) as db:
+        allowed = {row[0] for row in db.execute(
+            "SELECT article FROM ready_price_items WHERE status='content_pipeline'")}
+    for status in ("new", "preview"):
+        for item in store.by_status(status):
+            if not item.key.startswith("ready-price|"):
+                continue
+            article = item.key.split("|", 1)[1]
+            if article not in allowed or not ARTICLE.fullmatch(article):
+                continue
+            folder = content_dir / article
+            manifest_path = folder / "content.json"
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if (manifest.get("schema_version") != 1 or
+                        manifest.get("article") != article or
+                        any(manifest.get(k) != getattr(item, k) for k in
+                            ("brand", "model", "name", "card_mode")) or
+                        (manifest.get("card_text_audit") or {}).get("passed") is not True or
+                        (manifest.get("evidence") or {}).get("exact_model") is not True):
+                    continue
+                sizes = []
+                for kind in ("card", "original"):
+                    filename = manifest[kind]
+                    if (Path(filename).name != filename or
+                            not valid_png((folder / filename).read_bytes())):
+                        raise ValueError("invalid archived image")
+                    sizes.append((folder / filename).stat().st_size)
+                if int(manifest.get("price") or 0) != int(item.price):
+                    manifest["price"] = int(item.price)
+                    temporary = folder / ".content.json.price.tmp"
+                    temporary.write_text(json.dumps(manifest, ensure_ascii=False, indent=2),
+                                         encoding="utf-8")
+                    os.replace(temporary, manifest_path)
+                    result["prices_refreshed"] += 1
+                if status == "new" and min(sizes) >= 1024:
+                    store.update(item.key, status="preview", tries=0, error=None,
+                                 research_job=None, card_job=None, due_at=None)
+                    result["reused"] += 1
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+    return result
 
 
 def telegram_starting_items(store: ExcelStore, global_enabled: bool) -> list[dict]:
@@ -174,6 +255,8 @@ def main():
     global_enabled = generation_enabled(cfg.state.db)
     source_enabled = ready_price_enabled(cfg.state.db)
     if not global_enabled and not source_enabled:
+        from content_factory.bot.task_status import recover_stopped_requests
+        recover_stopped_requests(cfg.state.db, config("FOTOGEN_QUEUE_DB", default=""))
         print("excel: generation disabled by master switch")
         return
     sync_result = None
@@ -187,9 +270,36 @@ def main():
         else:
             source_enabled = False
     store = ExcelStore(cfg.state.db)
+    content_dir = Path(config("READY_PRICE_CONTENT_DIR", "/opt/avito-ready-price/content"))
+    restore_result = None
+    if source_enabled:
+        selected_keys = batch_keys(cfg.state.db)
+        with sqlite3.connect(cfg.state.db) as db:
+            supplier_articles = {row[0] for row in db.execute(
+                "SELECT article FROM ready_price_items WHERE status='content_pipeline'")}
+        restore_items = [item for status in ("new", "preview")
+                         for item in store.by_status(status)
+                         if item.key.startswith("ready-price|") and
+                         item.key.split("|", 1)[1] in supplier_articles and
+                         (status == "preview" or item.key in selected_keys)]
+        if restore_items:
+            restore_result = restore_missing(
+                content_dir,
+                Path(config("GDRIVE_ARCHIVE_TOKEN",
+                            "/opt/content-factory/state/private/gdrive_token.json")),
+                Path(config("GDRIVE_ARCHIVE_STATE",
+                            "/opt/content-factory/state/avito-drive-sync.json")),
+                Path(config("GDRIVE_RESTORE_STATE",
+                            "/opt/content-factory/state/avito-drive-restore.json")),
+                restore_items)
+    archive_result = (reuse_ready_price_archive(
+        store, cfg.state.db, content_dir)
+        if source_enabled else {"reused": 0, "prices_refreshed": 0})
     api = config("FOTOGEN_API_URL", cfg.fotogen.api_url).rstrip("/")
     headers = {"x-agent-token": config("FOTOGEN_API_TOKEN")}
     queue_db = config("FOTOGEN_QUEUE_DB")
+    from content_factory.bot.task_status import recover_submissions
+    recover_submissions(store, queue_db)
     output_dir = Path(config("FOTOGEN_OUTPUT_DIR"))
     owner_chat = config("TELEGRAM_OWNER_CHAT_ID", config("FOTOGEN_CHAT_ID", ""))
     token = config("TELEGRAM_BOT_TOKEN", "")
@@ -219,6 +329,7 @@ def main():
 
     submit_card = make_card_submitter(api, headers, output_dir, owner_chat,
                                       queue_db, http=http)
+    resolve_photo = make_photo_resolver(store, output_dir, content_dir)
 
     def _alert(text):
         if token and owner_chat:
@@ -257,17 +368,20 @@ def main():
     if global_enabled:
         manual_keys = {key for key in store.all_keys() if not key.startswith("ready-price|")}
         manual_stats = tick(store, submit_research, read_job, submit_card, preview,
-                            allowed_keys=manual_keys, failed_events=failed_events)
+                            allowed_keys=manual_keys, failed_events=failed_events,
+                            resolve_photo=resolve_photo)
         for key in stats:
             stats[key] += manual_stats[key]
     if source_enabled:
         selected = batch_keys(cfg.state.db)
+        if restore_result:
+            selected -= set(restore_result["deferred"])
         active_ready = sum(1 for status in ("research", "card")
                            for item in store.by_status(status) if item.key in selected)
         ready_budget = max(0, int(config("READY_PRICE_MAX_ACTIVE", "6")) - active_ready)
         ready_stats = tick(store, submit_research, read_job, submit_card, preview,
                            max_new=ready_budget, allowed_keys=selected,
-                           failed_events=failed_events)
+                           failed_events=failed_events, resolve_photo=resolve_photo)
         for key in stats:
             stats[key] += ready_stats[key]
     if starting:
@@ -282,7 +396,8 @@ def main():
         failed = len(store.by_status("failed"))
         _alert(f"🏁 Партия прайса обработана: превью {done}"
                + (f", не дошло {failed} (см. /excel)" if failed else "") + ".")
-    sync_text = f" | sync {sync_result}" if sync_result is not None else ""
+    sync_text = (f" | sync {sync_result} | archive {archive_result} | restore {restore_result}"
+                 if sync_result is not None else "")
     print(f"excel: research {stats['research']} | card {stats['card']} | "
           f"preview {stats['preview']} | failed {stats['failed']}{sync_text}")
 

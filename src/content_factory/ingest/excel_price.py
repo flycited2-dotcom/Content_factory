@@ -135,16 +135,45 @@ def _parse_1c_blocks(ws) -> list[PriceItem]:
 
 
 def parse_price_xlsx(path) -> list[PriceItem]:
-    """Позиции прайса. Стратегии: таблица (БытТехОпт) → блоки 1С (ИП Аксёнов и т.п.)."""
+    """Позиции прайса: для каждого листа выбирается наиболее полная стратегия.
+
+    Это важно для универсальных прайсов: у Brinex, например, первые пять колонок
+    внешне похожи на старый табличный формат, но реальные ``Номенклатура`` и
+    ``Цена`` находятся в других колонках. Первое частичное совпадение не должно
+    блокировать корректный автопоиск шапки.
+    """
     import openpyxl                                   # тяжёлый импорт — только по нужде
     wb = openpyxl.load_workbook(Path(path), read_only=True)
     items: list[PriceItem] = []
     for sheet in wb.sheetnames:
         ws = wb[sheet]
-        got = _parse_table(ws) or _parse_generic(ws) or _parse_1c_blocks(ws)
+        candidates = (_parse_table(ws), _parse_generic(ws), _parse_1c_blocks(ws))
+        got = max(candidates, key=len)
+        _borrow_sections(got, candidates)
         items.extend(got)
     wb.close()
     return items
+
+
+_MAX_SECTION_LEN = 70   # длиннее — это примечание из шапки прайса, а не раздел
+
+
+def _borrow_sections(got: list[PriceItem], candidates) -> None:
+    """Самый полный разбор листа может не видеть разделов: у БытТехОпт generic даёт
+    на ~85 строк больше, чем разбор блоками 1С, но без разделов — и с правки
+    2026-08-24 из /task пропали 132 категории. Подтягиваем раздел по названию
+    товара из разбора, где разделы есть (≥3 разных — иначе это шапка, не дерево)."""
+    if any((i.section or "").strip() for i in got):
+        return
+    for cand in candidates:
+        secs = {(i.section or "").strip() for i in cand} - {""}
+        if cand is got or len(secs) < 3:
+            continue
+        by_name = {i.name: i.section for i in cand if (i.section or "").strip()}
+        for i in got:
+            if not (i.section or "").strip() and i.name in by_name:
+                i.section = by_name[i.name]
+        return
 
 
 _SLUG_RE = re.compile(r"[^a-z0-9а-яё]+")
@@ -197,7 +226,50 @@ def _apply_markup(items: list[PriceItem], pct: float) -> list[PriceItem]:
     return items
 
 
-def load_price_slots(prices_dir) -> list[tuple[str, list[PriceItem]]]:
+def _tg_path(prices_dir) -> Path:
+    return Path(prices_dir) / "telegram_sources.json"
+
+
+def tg_disabled(prices_dir) -> set:
+    """Прайсы, выключенные для ручной генерации в Telegram (/task /find /make).
+    Avito/витрина (private_price_catalog) видят ВСЕ прайсы — фильтр только тут
+    (запрос владельца 2026-09-22: шины/инструмент Бринэкса не нужны в канале)."""
+    import json
+    p = _tg_path(prices_dir)
+    if not p.exists():
+        return set()
+    try:
+        return set(json.loads(p.read_text(encoding="utf-8")).get("disabled") or [])
+    except (OSError, ValueError):
+        return set()
+
+
+def set_tg_enabled(prices_dir, slot: str, on: bool) -> None:
+    import json
+    off = tg_disabled(prices_dir)
+    (off.discard if on else off.add)(slot)
+    _tg_path(prices_dir).write_text(
+        json.dumps({"disabled": sorted(off)}, ensure_ascii=False, indent=1),
+        encoding="utf-8")
+
+
+_PARSE_CACHE: dict = {}   # path -> (mtime, size, items) — прайс не меняется между кликами
+
+
+def _parse_cached(p: Path) -> list[PriceItem]:
+    """parse_price_xlsx с кэшем по (mtime, size). Возвращает КОПИИ позиций:
+    _apply_markup меняет цену на месте, кэш должен оставаться чистым."""
+    import copy
+    st = p.stat()
+    hit = _PARSE_CACHE.get(str(p))
+    if not hit or hit[0] != st.st_mtime or hit[1] != st.st_size:
+        hit = (st.st_mtime, st.st_size, parse_price_xlsx(p))
+        _PARSE_CACHE[str(p)] = hit
+    return [copy.copy(i) for i in hit[2]]
+
+
+def load_price_slots(prices_dir, for_telegram: bool = False
+                     ) -> list[tuple[str, list[PriceItem]]]:
     """Активные прайсы: ручные прайсы поставщиков «manual__*.xlsx» (все, приоритет)
     → legacy «manual.xlsx» → авто-забор из канала «channel.xlsx» → почта «mail.xlsx».
     Раздельные слоты — иначе один прайс молча перезаписывал бы другой (почта каждые
@@ -206,12 +278,16 @@ def load_price_slots(prices_dir) -> list[tuple[str, list[PriceItem]]]:
     out = []
     pdir = Path(prices_dir)
     markups = get_markups(prices_dir)
-    for p in sorted(pdir.glob("manual__*.xlsx")):        # прайсы поставщиков (несколько)
-        out.append((p.stem, _apply_markup(parse_price_xlsx(p), markups.get(p.stem, 0))))
-    for label in ("manual", "channel", "mail"):
-        p = pdir / f"{label}.xlsx"
-        if p.exists():
-            out.append((label, _apply_markup(parse_price_xlsx(p), markups.get(label, 0))))
+    off = tg_disabled(prices_dir) if for_telegram else set()
+    paths = ([(p.stem, p) for p in sorted(pdir.glob("manual__*.xlsx"))]      # поставщики
+             + [(p.stem, p) for p in sorted(pdir.glob("mail__*.xlsx"))]     # почта по поставщикам
+             + [(lbl, pdir / f"{lbl}.xlsx") for lbl in ("manual", "channel", "mail")
+                if (pdir / f"{lbl}.xlsx").exists()])
+    from content_factory.ingest.source_links import active_source_paths
+    for label, p in active_source_paths(pdir, paths):
+        if label in off:                  # выключен для Telegram — даже не читаем
+            continue
+        out.append((label, _apply_markup(_parse_cached(p), markups.get(label, 0))))
     return out
 
 
@@ -221,10 +297,11 @@ def top_sections(prices_dir, n: int | None = None) -> list[str]:
     большинство групп товаров (жалоба владельца 2026-07-07). n — опц. лимит."""
     from collections import Counter
     counts: Counter = Counter()
-    for _, items in load_price_slots(prices_dir):
+    for _, items in load_price_slots(prices_dir, for_telegram=True):
         for i in items:
-            if (i.section or "").strip():
-                counts[i.section.strip()] += 1
+            sec = (i.section or "").strip()
+            if sec and len(sec) <= _MAX_SECTION_LEN:
+                counts[sec] += 1
     return [s for s, _ in counts.most_common(n)]
 
 
@@ -358,7 +435,11 @@ def search_items(items: list[PriceItem], phrase: str, taken: set,
     scored = [(match_phrase(i, phrase, aliases), i) for i in items]
     alive = [(s, i) for s, i in scored if s and item_key(i) not in taken]
     by_name = [i for s, i in alive if s == 2]
-    return (by_name or [i for s, i in alive])[:limit]
+    # The same model in several supplier slots is one selectable task.
+    unique = {}
+    for item in by_name or [i for s, i in alive]:
+        unique.setdefault(item_key(item), item)
+    return list(unique.values())[:limit]
 
 
 def select_from_price(items: list[PriceItem], category_kw: str, quotas: dict,

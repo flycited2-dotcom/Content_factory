@@ -65,9 +65,10 @@ def test_start_offers_category_buttons(tmp_path):
 
 def test_category_button_returns_numbered_autolist(tmp_path):
     start, _, _, handle_callback, _, store = _flow(tmp_path)
-    start("1")
-    sections_btn_idx = 0                               # топ-раздел: Стиральные машины
-    r = handle_callback("1", f"wizard:cat:{sections_btn_idx}")
+    menu = start("1")
+    button = next(b for row in menu.markup["inline_keyboard"] for b in row
+                  if b["text"] == "Стиральные машины")
+    r = handle_callback("1", button["callback_data"])
     assert "1." in r.text and "2." in r.text           # нумерованный список
     assert store.snapshot("1").step == "awaiting_pick"
 
@@ -77,6 +78,62 @@ def test_category_text_also_works(tmp_path):
     start("1")
     r = handle_text("1", "телевизоры")
     assert "MIU" in r.text and "1." in r.text
+
+
+def test_old_category_menu_can_switch_after_pick(tmp_path):
+    start, text, _, callback, calls, store = _flow(tmp_path)
+    menu = start("1")
+    tv = next(b for row in menu.markup["inline_keyboard"] for b in row
+              if b["text"] == "Телевизоры")
+    text("1", "стиральные машины")
+    callback("1", "wizard:pick_first:1")
+    result = callback("1", tv["callback_data"])
+    assert "MIU" in result.text
+    assert store.snapshot("1").step == "awaiting_pick"
+    assert calls == []
+    assert ExcelStore(tmp_path / "state.db").by_status("new") == []
+
+
+def test_category_identity_survives_price_list_reordering(tmp_path, monkeypatch):
+    import content_factory.bot.wizard_flow as wf
+    start, _, _, callback, _, store = _flow(tmp_path)
+    menu = start("1")
+    washing = next(b for row in menu.markup["inline_keyboard"] for b in row
+                   if b["text"] == "Стиральные машины")
+    monkeypatch.setattr(wf, "top_sections", lambda _: ["Телевизоры", "Стиральные машины"])
+    result = callback("1", washing["callback_data"])
+    assert "Beko" in result.text and "Candy" in result.text and "MIU" not in result.text
+    assert store.snapshot("1").category == "Стиральные машины"
+
+
+def test_wizard_respects_supplier_excluded_from_telegram(tmp_path):
+    import json
+    start, text, _, callback, calls, store = _flow(tmp_path)
+    (tmp_path / 'prices/telegram_sources.json').write_text(
+        json.dumps({'disabled': ['manual']}), encoding='utf-8')
+    start('1')
+    result = text('1', 'телевизоры')
+    assert 'MIU' not in result.text
+    assert store.snapshot('1').step != 'awaiting_pick'
+    assert calls == []
+
+
+def test_obsolete_ordinal_menu_does_not_guess_category(tmp_path):
+    start, _, _, callback, _, store = _flow(tmp_path)
+    start("1")
+    result = callback("1", "wizard:cat:0")
+    assert "устарела" in result.text
+    assert store.snapshot("1").step == "awaiting_category"
+
+
+def test_wrong_step_button_explains_current_choice(tmp_path):
+    start, text, _, callback, _, store = _flow(tmp_path)
+    start("1")
+    text("1", "стиральные машины")
+    result = callback("1", "wizard:skip_utp")
+    assert "Выберите количество" in result.text
+    assert "wizard:pick_first:1" in str(result.markup)
+    assert store.snapshot("1").step == "awaiting_pick"
 
 
 # ── пагинация категорий: групп бывает 200+ (Аксёнов+БытТехОпт), в одно
@@ -89,15 +146,14 @@ def test_category_buttons_paginated_when_many(tmp_path, monkeypatch):
     flat = [b for row in kb["inline_keyboard"] for b in row]
     cats = [b for b in flat if b["callback_data"].startswith("wizard:cat:")]
     assert len(cats) == wf._CATS_PER_PAGE                 # первая страница
-    assert cats[0]["callback_data"] == "wizard:cat:0"
+    assert cats[0]["callback_data"] == f"wizard:cat:{wf._category_key(many[0])}"
     assert any(b["callback_data"] == "wizard:catpage:1" for b in flat)   # «▸»
     assert not any(b["callback_data"] == "wizard:catpage:-1" for b in flat)
 
     kb2 = wf._category_keyboard(tmp_path, page=1)
     flat2 = [b for row in kb2["inline_keyboard"] for b in row]
     cats2 = [b for b in flat2 if b["callback_data"].startswith("wizard:cat:")]
-    # индексы ГЛОБАЛЬНЫЕ (резолв по top_sections), страница 2 начинается с 24
-    assert cats2[0]["callback_data"] == f"wizard:cat:{wf._CATS_PER_PAGE}"
+    assert cats2[0]["callback_data"] == f"wizard:cat:{wf._category_key(many[wf._CATS_PER_PAGE])}"
     assert any(b["callback_data"] == "wizard:catpage:0" for b in flat2)  # «◂»
 
 
@@ -110,7 +166,7 @@ def test_catpage_callback_flips_page(tmp_path, monkeypatch):
     r = handle_callback("1", "wizard:catpage:2")
     flat = [b for row in r.markup["inline_keyboard"] for b in row]
     cats = [b for b in flat if b["callback_data"].startswith("wizard:cat:")]
-    assert cats[0]["callback_data"] == f"wizard:cat:{2 * wf._CATS_PER_PAGE}"
+    assert cats[0]["callback_data"] == f"wizard:cat:{wf._category_key(many[2 * wf._CATS_PER_PAGE])}"
     assert store.snapshot("1").step == "awaiting_category"   # шаг не сломан
 
 

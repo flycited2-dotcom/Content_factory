@@ -3,6 +3,7 @@
 бот публикует пост в канал, по /reject <key> — отклоняет. Так пилот идёт в боевой канал
 безопасно (каждый пост — явный OK владельца)."""
 from __future__ import annotations
+from content_factory.sqlite_state import state_connection
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -29,7 +30,7 @@ class ConfirmStore:
                       "status TEXT DEFAULT 'pending', ts REAL)")
 
     def _c(self):
-        return sqlite3.connect(self.path)
+        return state_connection(self.path)
 
     def add(self, key: str, channel: str, card_path: str, caption: str) -> None:
         """Поставить пост на подтверждение (upsert → статус сбрасывается в pending)."""

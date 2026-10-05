@@ -1,0 +1,12 @@
+[Unit]
+Description=Mirror verified Avito content archive to Google Drive
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/content-factory
+Environment=PYTHONPATH=/opt/content-factory/src
+ExecStart=/opt/content-factory/.venv/bin/python -m content_factory.drive_archive --token /opt/content-factory/state/private/gdrive_token.json --reader-email tsarevalexsimf@gmail.com
+TimeoutStartSec=30min
