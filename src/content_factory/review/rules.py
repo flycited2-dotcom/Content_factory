@@ -6,6 +6,13 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
+import re
+
+
+STABILIZER_CATEGORY_IDS = {10598}
+_VOLTAGE_RANGE_RE = re.compile(
+    r"\b\d{2,3}\s*[-–—]\s*\d{2,3}\s*В\b", re.IGNORECASE
+)
 
 
 @dataclass
@@ -71,6 +78,12 @@ def review(item: ReviewItem, cfg, stop_words=()) -> tuple[bool, list[str]]:
     found = [w for w in (stop_words or []) if w and w.lower() in cap.lower()]
     if found:
         reasons.append("стоп-слова: " + ", ".join(found))
+
+    # Для стабилизаторов диапазон входного напряжения — обязательная часть УТП.
+    # Проверяем уже финальную подпись, чтобы характеристика не потерялась между
+    # каталогом, генератором и публикацией.
+    if item.category_id in STABILIZER_CATEGORY_IDS and not _VOLTAGE_RANGE_RE.search(cap):
+        reasons.append("для стабилизатора в УТП нет диапазона входного напряжения")
 
     # бренд и тип заполнены
     if not (item.brand or "").strip():
