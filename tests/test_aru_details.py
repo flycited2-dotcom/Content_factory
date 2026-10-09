@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from datetime import datetime, timezone
 
 import pytest
@@ -202,3 +203,16 @@ def test_prepare_retries_transient_download_errors(tmp_path):
     prepare(item())
     assert attempts == [ORIGINAL] * 3
     assert store.cache_get("alg|перчатки нейлон alg") is not None
+
+
+def test_cached_photo_path_is_absolute_even_for_relative_photos_dir(tmp_path, monkeypatch):
+    # на сервере prices_dir относительный; resolve_photo/submit_card относительный путь
+    # трактуют от output_dir фотоагента и не находят файл → позиция уходила в research
+    snapshot(tmp_path, [row()])
+    monkeypatch.chdir(tmp_path)
+    store = ExcelStore(tmp_path / "s.db")
+    prepare = make_aru_prepare(store, load_aru_details(tmp_path), Path("state/aru-photos"),
+                               lambda url: JPEG)
+    prepare(item())
+    photo = store.cache_get("alg|перчатки нейлон alg")[1]
+    assert Path(photo).is_absolute() and Path(photo).is_file()

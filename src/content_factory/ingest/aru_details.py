@@ -132,7 +132,7 @@ def make_aru_prepare(store, details: dict, photos_dir, fetch: Callable[[str], by
     """prepare(item) для tick: если позиция — товар АРУ с однозначными данными и в кэше
     ещё ничего нет, скачать фото и записать УТП+фото в research_cache. Любой сбой —
     молча оставить позицию обычному research."""
-    photos = Path(photos_dir)
+    photos = Path(photos_dir).resolve()   # абсолютный: относительный resolve_photo не найдёт
 
     def prepare(item) -> None:
         detail = details.get((item.brand.strip().casefold(), item.name))
