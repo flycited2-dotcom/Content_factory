@@ -34,7 +34,11 @@ def make_sources_fn(prices_dir):
     def sources_fn() -> str:
         pdir = Path(prices_dir)
         slots = load_price_slots(pdir)
+        from content_factory.ingest.aru_site import catalog_status
+        aru = catalog_status(pdir)
         if not slots:
+            if aru:
+                return aru
             return '❌ Источников нет — пришлите .xlsx прайс файлом.'
         metadata = source_refresh_metadata(pdir)
         try:
@@ -45,6 +49,8 @@ def make_sources_fn(prices_dir):
             mail = {}
         markups, off = get_markups(pdir), tg_disabled(pdir)
         lines = ['📦 Прайсы: 🟢 включён в /task и /find; ⚪ исключён из них.']
+        if aru:
+            lines.append(aru)
         try:
             sync = json.loads((pdir / 'price-sync-status.json').read_text(encoding='utf-8'))
             if isinstance(sync, dict) and sync.get('status') == 'deferred':
@@ -58,10 +64,15 @@ def make_sources_fn(prices_dir):
                 meta = {}
             name = meta.get('display_name', label)
             count = len(items)
-            pct = markups.get(label, 0)
+            pct = markups.get(label, 10 if label == 'aru' else 0)
             extra = f" · {pct:+g}%" if pct else ''
             path = pdir / f'{label}.xlsx'
-            saved = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).astimezone()
+            if label == 'aru':
+                path = pdir / 'aru-catalog.json'
+            try:
+                saved = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).astimezone()
+            except OSError:
+                saved = None
             if meta.get('issue_date'):
                 details = f"авто · прайс {meta['issue_date']}"
             elif label.startswith('mail__'):
@@ -73,11 +84,15 @@ def make_sources_fn(prices_dir):
                         date = parsedate_to_datetime(date).strftime('%d.%m.%Y')
                     except (TypeError, ValueError):
                         date = ''
-                details = f"почта · письмо {date or saved.strftime('%d.%m.%Y')}"
+                details = f"почта · письмо {date or (saved.strftime('%d.%m.%Y') if saved else 'дата неизвестна')}"
+            elif saved is None:
+                details = 'каталог API' if label == 'splithub' else 'дата файла недоступна'
+            elif label == 'aru':
+                details = 'персональные цены · только в наличии · обновление через кабинет'
             else:
                 details = 'ручная копия · автообновление не подключено'
             lines.append(f"{'⚪' if label in off else '🟢'} {n}. {name}: {count} поз.{extra}\n"
-                         f"   {details}; сохранён {saved.strftime('%d.%m.%Y %H:%M')}")
+                         f"   {details}" + (f"; сохранён {saved.strftime('%d.%m.%Y %H:%M')}" if saved else ''))
         lines += ['\nКнопки ниже включают/выключают поиск и постановку задач, а не загрузку прайса.',
                   'Новая почтовая цена появляется после новой рассылки поставщика.',
                   'Наценка: /markup <слот> <±число>']

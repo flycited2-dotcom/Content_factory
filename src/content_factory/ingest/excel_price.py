@@ -288,6 +288,11 @@ def load_price_slots(prices_dir, for_telegram: bool = False
         if label in off:                  # выключен для Telegram — даже не читаем
             continue
         out.append((label, _apply_markup(_parse_cached(p), markups.get(label, 0))))
+    if 'aru' not in off:
+        from content_factory.ingest.aru_account import load_account_items
+        aru_items = load_account_items(pdir, markups.get('aru', 10))
+        if aru_items:
+            out.append(('aru', aru_items))  # account price +10%, applied exactly once
     return out
 
 
