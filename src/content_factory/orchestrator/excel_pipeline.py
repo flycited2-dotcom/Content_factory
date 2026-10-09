@@ -461,13 +461,15 @@ def tick(store: ExcelStore, submit_research, read_job, submit_card, preview,
          max_new: int | None = None, new_key_prefix: str | None = None,
          allowed_keys: set[str] | None = None,
          failed_events: list[tuple[str, str, str]] | None = None,
-         resolve_photo=None) -> dict:
+         resolve_photo=None, prepare=None) -> dict:
     """Один проход конвейера. Инъекции:
     submit_research(brand, model, category) -> job_id
     read_job(job_id) -> (status, output_filename, result_specs, error)
     submit_card(brand, model, utp, photo_path) -> job_id
     preview(item, card_output_filename) -> bool
     resolve_photo(item, photo_path) -> usable path or None (optional, no paid I/O)
+    prepare(item) -> None: перед проверкой кэша позиции new (источник с готовыми фото/УТП,
+    напр. АРУ, кладёт их в research_cache); сбой не ломает позицию — уйдёт в research
     """
     stats = {"research": 0, "card": 0, "preview": 0, "failed": 0}
 
@@ -520,6 +522,11 @@ def tick(store: ExcelStore, submit_research, read_job, submit_card, preview,
         try:
             if not _current(item):
                 continue
+            if prepare is not None:
+                try:
+                    prepare(item)
+                except Exception as exc:
+                    _LOG.warning("Excel prepare failed: %s", type(exc).__name__)
             cached = store.cache_get(_cache_key(item))
             if cached:
                 utp, cached_photo = cached

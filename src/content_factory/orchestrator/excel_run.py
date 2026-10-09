@@ -19,6 +19,7 @@ import httpx
 from decouple import config
 
 from content_factory.config import load_config
+from content_factory.ingest.aru_details import load_aru_details, make_aru_prepare
 from content_factory.orchestrator.excel_pipeline import ExcelStore, tick
 from content_factory.orchestrator.confirm_store import ConfirmStore
 from content_factory.orchestrator.card_submit import (
@@ -330,6 +331,19 @@ def main():
     submit_card = make_card_submitter(api, headers, output_dir, owner_chat,
                                       queue_db, http=http)
     resolve_photo = make_photo_resolver(store, output_dir, content_dir)
+    # АРУ: фото и характеристики берём из своего снимка, а не ищем через research
+    prices_dir = Path(cfg.state.db).parent / "prices"
+
+    def _fetch(url):
+        r = http.get(url, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True)
+        r.raise_for_status()
+        return r.content
+
+    try:
+        aru_details = load_aru_details(prices_dir)
+    except (OSError, ValueError, KeyError):
+        aru_details = {}             # битый снимок АРУ не должен останавливать остальных
+    aru_prepare = make_aru_prepare(store, aru_details, prices_dir / "aru-photos", _fetch)
 
     def _alert(text):
         if token and owner_chat:
@@ -369,7 +383,7 @@ def main():
         manual_keys = {key for key in store.all_keys() if not key.startswith("ready-price|")}
         manual_stats = tick(store, submit_research, read_job, submit_card, preview,
                             allowed_keys=manual_keys, failed_events=failed_events,
-                            resolve_photo=resolve_photo)
+                            resolve_photo=resolve_photo, prepare=aru_prepare)
         for key in stats:
             stats[key] += manual_stats[key]
     if source_enabled:

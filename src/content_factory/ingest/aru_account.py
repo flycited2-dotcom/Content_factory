@@ -114,13 +114,11 @@ def build_account_snapshot(
     }
 
 
-def load_account_items(prices_dir: Path, markup_pct=10):
-    """Keep the last complete snapshot until replaced; preserve wholesale cents."""
-    from .excel_price import PriceItem
-
+def read_snapshot(prices_dir: Path):
+    """Last complete authorised snapshot, or None. Age never disqualifies it."""
     path = Path(prices_dir) / "aru-catalog.json"
     if not path.is_file():
-        return []
+        return None
     if path.stat().st_size > 50 * 1024 * 1024:
         raise ValueError("aru_account: oversized snapshot")
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -130,12 +128,22 @@ def load_account_items(prices_dir: Path, markup_pct=10):
         or data.get("authenticated") is not True
         or data.get("price_basis") != "account_price"
     ):
-        return []
+        return None
     stamp = datetime.fromisoformat(data["generated_at"])
     if (
         stamp.tzinfo is None
         or (datetime.now(timezone.utc) - stamp).total_seconds() < -300
     ):
+        return None
+    return data
+
+
+def load_account_items(prices_dir: Path, markup_pct=10):
+    """Keep the last complete snapshot until replaced; preserve wholesale cents."""
+    from .excel_price import PriceItem
+
+    data = read_snapshot(prices_dir)
+    if data is None:
         return []
     markup = Decimal(str(markup_pct))
     if not markup.is_finite() or markup <= -100:

@@ -294,3 +294,27 @@ def test_ready_price_card_is_saved_for_avito_without_telegram(tmp_path):
     assert manifest["card_text_audit"]["passed"] is True
     assert (tmp_path / "ready/A-1/card.png").read_bytes() == b"card"
     assert (tmp_path / "ready/A-1/original.png").read_bytes() == b"original"
+
+
+def test_prepare_hook_runs_before_cache_lookup_and_can_skip_research(tmp_path):
+    s = _store(tmp_path)
+    seen = []
+
+    def prepare(item):
+        seen.append(item.key)
+        s.cache_put("beko|x1", "✓ из источника", "/photos/x1.png", source="aru")
+    calls, *fns = _fns()
+    tick(s, *fns, prepare=prepare)
+    assert seen == ["excel|beko|x1"]
+    assert calls["research"] == []
+    assert calls["card"] == [("Beko", "X1", "✓ из источника", "/photos/x1.png", "kbt")]
+
+
+def test_prepare_hook_failure_falls_back_to_research(tmp_path):
+    s = _store(tmp_path)
+
+    def prepare(item):
+        raise RuntimeError("источник недоступен")
+    calls, *fns = _fns()
+    tick(s, *fns, prepare=prepare)
+    assert len(calls["research"]) == 1
