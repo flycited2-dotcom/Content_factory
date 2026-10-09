@@ -9,6 +9,86 @@ from urllib.parse import parse_qs, urlparse
 from .aru_site import _price, save_snapshot
 
 
+def _eligible_item(identity: str, row: dict, stamp: datetime) -> dict | None:
+    """Snapshot item for an in-stock, priced row; None otherwise."""
+    price = _price(row.get("price_text", ""))
+    # Exact stock text avoids matching "Нет в наличии" or unknown states.
+    if row.get("stock_text", "").strip().casefold() != "в наличии" or price is None:
+        return None
+    sale = Decimal(price) * Decimal("1.10")
+    return {
+        "id": identity,
+        "article": row.get("article", ""),
+        "name": row["name"],
+        "url": row["url"],
+        "brand": row.get("brand", ""),
+        "category_path": urlparse(row["url"]).path.strip("/").split("/")[:-1],
+        "available": True,
+        "price": price,
+        "price_basis": "account_price",
+        "content_markup_pct": "10",
+        "content_price": str(sale.quantize(Decimal(".01"), rounding=ROUND_HALF_UP)),
+        "content_price_rub": int(sale.quantize(Decimal("1"), rounding=ROUND_CEILING)),
+        "captured_at": stamp.isoformat(),
+        "specifications": row.get("specifications", {}),
+        "image_urls": row.get("image_urls", []),
+        "description": row.get("description", ""),
+    }
+
+
+def merge_supplement(base: dict, rows: list[dict], *, authenticated: bool) -> dict:
+    """Add products from sections that /vse-tovary/ does not list (Электроинструмент,
+    Инструмент для пайки и все новинки выше последнего id обхода) to a complete snapshot.
+
+    Same eligibility and price rules as build_account_snapshot. Products already in
+    the base keep their base data. The supplier date (generated_at) stays that of the
+    base: it is the oldest capture, which is the honest claim for the merged price list.
+    """
+    if not authenticated:
+        raise ValueError("aru_account: unauthenticated supplement")
+    if (
+        base.get("source") != "aru"
+        or base.get("complete") is not True
+        or base.get("authenticated") is not True
+        or base.get("price_basis") != "account_price"
+    ):
+        raise ValueError("aru_account: base snapshot is not complete")
+    known = {str(item["id"]) for item in base["items"]}
+    seen, added, excluded = set(), [], 0
+    for row in rows:
+        identity = str(row.get("id", ""))
+        item_url = urlparse(row.get("url", ""))
+        if (
+            not identity.isdigit()
+            or identity in seen
+            or not row.get("name")
+            or item_url.scheme != "https"
+            or item_url.netloc != "aru.ooo"
+        ):
+            raise ValueError("aru_account: duplicate or invalid product")
+        seen.add(identity)
+        stamp = datetime.fromisoformat(row["captured_at"].replace("Z", "+00:00"))
+        if stamp.tzinfo is None:
+            raise ValueError("aru_account: timezone missing")
+        if identity in known:
+            continue
+        item = _eligible_item(identity, row, stamp)
+        if item is None:
+            excluded += 1
+        else:
+            added.append(item)
+    merged = {k: v for k, v in base.items() if k != "items"}
+    merged["scanned_products"] = base["scanned_products"] + len(seen - known)
+    merged["excluded_products"] = base["excluded_products"] + excluded
+    merged["supplement"] = {
+        "items": len(added),
+        "sections": sorted({item["category_path"][0] for item in added if item["category_path"]}),
+        "captured_at": max((i["captured_at"] for i in added), default=None),
+    }
+    merged["items"] = [*base["items"], *added]
+    return merged
+
+
 def build_account_snapshot(
     pages: list[dict], *, allow_partial=False, reconcile_moved=False
 ) -> dict:
@@ -66,37 +146,11 @@ def build_account_snapshot(
                     continue
             observations[identity] = (row, stamp, page["page"])
     for identity, (row, stamp, _) in observations.items():
-        item_url = urlparse(row["url"])
-        price = _price(row.get("price_text", ""))
-        # Exact stock text avoids matching "Нет в наличии" or unknown states.
-        if row.get("stock_text", "").strip().casefold() != "в наличии" or price is None:
+        item = _eligible_item(identity, row, stamp)
+        if item is None:
             excluded += 1
-            continue
-        sale = Decimal(price) * Decimal("1.10")
-        eligible.append(
-            {
-                "id": identity,
-                "article": row.get("article", ""),
-                "name": row["name"],
-                "url": row["url"],
-                "brand": row.get("brand", ""),
-                "category_path": item_url.path.strip("/").split("/")[:-1],
-                "available": True,
-                "price": price,
-                "price_basis": "account_price",
-                "content_markup_pct": "10",
-                "content_price": str(
-                    sale.quantize(Decimal(".01"), rounding=ROUND_HALF_UP)
-                ),
-                "content_price_rub": int(
-                    sale.quantize(Decimal("1"), rounding=ROUND_CEILING)
-                ),
-                "captured_at": stamp.isoformat(),
-                "specifications": row.get("specifications", {}),
-                "image_urls": row.get("image_urls", []),
-                "description": row.get("description", ""),
-            }
-        )
+        else:
+            eligible.append(item)
     return {
         "schema_version": 1,
         "source": "aru",
