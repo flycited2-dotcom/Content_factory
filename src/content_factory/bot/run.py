@@ -648,6 +648,39 @@ def finalize_preview(http, token: str, cq: dict, verdict: str) -> None:
         pass
 
 
+# --- журнал времени обновлений ---
+def _upd_label(u: dict) -> tuple[str, str]:
+    """Вид обновления для журнала: только тип и имя команды/префикс кнопки, без текстов."""
+    cq = u.get("callback_query")
+    if cq:
+        return "cb", ((cq.get("data") or "").split(":", 1)[0][:20] or "-")
+    m = u.get("message") or u.get("edited_message") or {}
+    t = (m.get("text") or "").strip()
+    if t.startswith("/"):
+        return "cmd", t.split()[0][:24]
+    for kind in ("document", "photo", "voice"):
+        if m.get(kind):
+            return kind, "-"
+    return ("text" if t else "other"), "-"
+
+
+def _upd_timing_done(prev):
+    """Записать, сколько заняла обработка предыдущего обновления."""
+    if prev:
+        kind, what, t0, age = prev
+        print(f"upd {kind} {what} work={time.monotonic() - t0:.2f}s pickup_age={age}",
+              flush=True)
+    return None
+
+
+def _upd_timing_start(prev, u):
+    _upd_timing_done(prev)
+    kind, what = _upd_label(u)
+    m = u.get("message") or u.get("edited_message") or {}
+    age = f"{max(0, int(time.time() - m['date']))}s" if m.get("date") else "-"
+    return (kind, what, time.monotonic(), age)
+
+
 def get_updates(token: str, offset: int, timeout: int = 30, http=None) -> list:
     client = http or telegram_client(timeout + 10)
     r = client.get(f"{TG_API}/bot{token}/getUpdates",
@@ -916,7 +949,9 @@ def main():
     setup_bot_commands(http, token, owner)   # управляющее меню — только владельцу
     offset = 0
     print("bot: long-poll запущен")
+    _upd_prev = None                     # журнал времени: последнее обработанное обновление
     while True:
+        _upd_prev = _upd_timing_done(_upd_prev)
         try:
             updates = get_updates(token, offset, http=http)
         except httpx.HTTPError:
@@ -924,6 +959,7 @@ def main():
             continue
         for u in updates:
             offset = u["update_id"] + 1
+            _upd_prev = _upd_timing_start(_upd_prev, u)
 
             # --- Нажатие inline-кнопки (✅/❌ под превью) ---
             cq = u.get("callback_query")
@@ -950,6 +986,16 @@ def main():
                     except httpx.HTTPError:
                         pass
                     continue
+                # мгновенно подтверждаем нажатие (кнопка перестаёт «крутиться»), тяжёлая работа — ниже;
+                # повторный answerCallbackQuery в ветках Telegram игнорирует (текст приходит сообщением)
+                _t_ack = time.monotonic()
+                try:
+                    http.post(f"{TG_API}/bot{token}/answerCallbackQuery",
+                              data={"callback_query_id": cq.get("id")})
+                except httpx.HTTPError:
+                    pass
+                print(f"ack {data_cq.split(':', 1)[0][:20]} {time.monotonic() - _t_ack:.2f}s",
+                      flush=True)
                 if (cq.get("data") or "").startswith("srctg:"):
                     msg_s = cq.get("message") or {}
                     note = toggle_tg_source(prices_dir, cq.get("data"))

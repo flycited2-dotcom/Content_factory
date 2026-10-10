@@ -204,3 +204,39 @@ def test_run_once_gives_up_after_max_tries(tmp_path):
     http = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://x")
     submitted, _ = run_once(groups, cfg, store, http=http, fetch_photo=lambda u: b"img")
     assert submitted == 0                                  # больше не долбим агента
+
+
+def test_run_once_warns_when_max_total_exhausted(tmp_path, caplog):
+    # лимит max_total исчерпан → submitted=0, но причина видна в журнале (раньше было молча)
+    import logging
+    from content_factory.content.cards import card_key
+    out = tmp_path / "out"; out.mkdir()
+    cfg = _cfg(tmp_path, queue_db=_make_queue_db(tmp_path, []), output_dir=str(out), max_total=1)
+    store = CardJobStore(tmp_path / "s.db")
+    store.record(card_key("breeze:NC1"), "done.jpg", "done")        # записей уже 1 из 1
+    groups = group_by_series([_o("breeze:NC2", 9, "http://p/2.jpg", series="Gloria")])
+
+    def handler(req):
+        return httpx.Response(200, json={"queued": "x"})
+    http = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://x")
+    with caplog.at_level(logging.WARNING, logger="content_factory.cards_pipeline"):
+        submitted, _ = run_once(groups, cfg, store, http=http, fetch_photo=lambda u: b"img")
+    assert submitted == 0
+    assert "max_total" in caplog.text
+
+
+def test_run_once_logs_submit_failure(tmp_path, caplog):
+    # сбой отправки в очередь больше не глотается молча
+    import logging
+    out = tmp_path / "out"; out.mkdir()
+    cfg = _cfg(tmp_path, queue_db=_make_queue_db(tmp_path, []), output_dir=str(out))
+    store = CardJobStore(tmp_path / "s.db")
+    groups = group_by_series([_o("breeze:NC2", 9, "http://p/2.jpg", series="Gloria")])
+
+    def handler(req):
+        return httpx.Response(500, json={"detail": "boom"})
+    http = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://x")
+    with caplog.at_level(logging.WARNING, logger="content_factory.cards_pipeline"):
+        submitted, _ = run_once(groups, cfg, store, http=http, fetch_photo=lambda u: b"img")
+    assert submitted == 0
+    assert "не удалась" in caplog.text

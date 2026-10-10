@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 import io
+import logging
 import shutil
 import sqlite3
 from dataclasses import dataclass
@@ -16,6 +17,8 @@ from pathlib import Path
 import httpx
 
 from content_factory.content.cards import card_key
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -197,6 +200,10 @@ def run_once(groups, cfg: FotogenConfig, store: CardJobStore,
     outstanding = len(store.pending())
     total_slots = max(0, cfg.max_total - store.count())   # глобальный лимит карточек (тест ~20)
     budget = max(0, min(cfg.per_run, cfg.max_pending - outstanding, total_slots))
+    if total_slots == 0:
+        # раньше это молча давало «submitted=0» навсегда — теперь причина видна в журнале
+        log.warning("cards: достигнут лимит max_total (%s записей из %s) — новые карточки "
+                    "не ставятся; поднимите FOTOGEN_MAX_TOTAL", store.count(), cfg.max_total)
     for g in groups:
         if submitted >= budget:
             break
@@ -224,7 +231,8 @@ def run_once(groups, cfg: FotogenConfig, store: CardJobStore,
         try:
             in_fn = submit_card_job(cfg, fetch_photo(photo_url), g.brand, g.series,
                                     specs, http=http, mode=mode)
-        except Exception:
+        except Exception as e:
+            log.warning("cards: отправка серии %s не удалась: %r", key, e)
             continue
         if in_fn:
             store.record(key, in_fn, "pending", tries=next_tries)

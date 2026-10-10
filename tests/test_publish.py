@@ -1,7 +1,21 @@
 from urllib.parse import parse_qs
 import httpx
 from content_factory.publish.telegram import (
-    publish_post, PublishState, send_message, edit_caption)
+    publish_post, PublishState, send_message, edit_caption,
+    telegram_client, TELEGRAM_CONNECT_TIMEOUT, TELEGRAM_RETRIES, TELEGRAM_KEEPALIVE_EXPIRY)
+
+
+def test_telegram_client_is_resilient_to_dropped_connections():
+    # сервер теряет 25–80% новых TCP-соединений к Telegram: короткий connect, много повторов
+    # и долгий keep-alive, чтобы ответ шёл по уже установленному соединению
+    c = telegram_client(40)
+    try:
+        assert c.timeout.connect == TELEGRAM_CONNECT_TIMEOUT <= 3.0
+        assert c.timeout.read == 40
+        assert TELEGRAM_RETRIES >= 6
+        assert TELEGRAM_KEEPALIVE_EXPIRY >= 60
+    finally:
+        c.close()
 
 
 def _client(handler):

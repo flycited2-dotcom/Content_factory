@@ -17,17 +17,25 @@ import httpx
 TG_API = "https://api.telegram.org"
 CAPTION_MAX = 1024
 # Сервер теряет заметную долю TCP-соединений к api.telegram.org (на замере 01.10.2026
-# зависали 25–60% попыток). Короткий connect-таймаут и повтор превращают зависшее
-# соединение из 40-секундной паузы в 4 секунды.
-TELEGRAM_CONNECT_TIMEOUT = 4.0
-TELEGRAM_RETRIES = 4
+# зависали 25–60% попыток, 10.10.2026 — до ~80%: стандартный клиент дозванивался 2 раза из 12).
+# Успешное соединение занимает 40–100 мс, поэтому connect-таймаут короткий, а повторов много:
+# зависшее соединение из 40-секундной паузы превращается в пару секунд. Плюс долгий keep-alive
+# (httpx по умолчанию закрывает простаивающее соединение через 5 с — и каждый ответ шёл бы
+# через новое, теряемое соединение).
+TELEGRAM_CONNECT_TIMEOUT = 2.0
+TELEGRAM_RETRIES = 7
+TELEGRAM_KEEPALIVE_EXPIRY = 120.0
 
 
 def telegram_client(timeout: float = 40.0) -> httpx.Client:
     """HTTP-клиент для Bot API, устойчивый к зависающим соединениям."""
     return httpx.Client(
         timeout=httpx.Timeout(timeout, connect=TELEGRAM_CONNECT_TIMEOUT),
-        transport=httpx.HTTPTransport(retries=TELEGRAM_RETRIES),
+        transport=httpx.HTTPTransport(
+            retries=TELEGRAM_RETRIES,
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10,
+                                keepalive_expiry=TELEGRAM_KEEPALIVE_EXPIRY),
+        ),
     )
 
 
