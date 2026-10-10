@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-STEPS = ("awaiting_category", "awaiting_pick", "awaiting_list", "awaiting_time",
+STEPS = ("awaiting_source", "awaiting_count", "awaiting_category", "awaiting_pick", "awaiting_list", "awaiting_time",
          "awaiting_photo", "awaiting_utp", "awaiting_confirm",
          "awaiting_manual_name", "awaiting_manual_price", "awaiting_markup")
 
@@ -34,6 +34,9 @@ class WizardState:
     # [(key, brand, model, name, price), …]
     candidates: list | None = None
     due_at: float | None = None        # None = «сейчас», иначе unix-время выгрузки
+    page: int = 0
+    selected_keys: list[str] | None = None
+    source_slot: str | None = None
 
 
 class WizardStore:
@@ -46,7 +49,8 @@ class WizardStore:
                       "lines_json TEXT, photo_path TEXT, utp_text TEXT, "
                       "candidates_json TEXT, due_at REAL, ts REAL)")
             for col, typ in (("candidates_json", "TEXT"), ("due_at", "REAL"),
-                             ("ts", "REAL")):
+                             ("ts", "REAL"), ("page", "INTEGER DEFAULT 0"),
+                             ("selected_json", "TEXT"), ("source_slot", "TEXT")):
                 try:      # миграция прод-таблицы (SQLite: колонку — только ALTER)
                     c.execute(f"ALTER TABLE wizard_state ADD COLUMN {col} {typ}")
                 except sqlite3.OperationalError:
@@ -55,22 +59,55 @@ class WizardStore:
     def _c(self):
         return state_connection(self.path)
 
-    def start(self, chat_id: str) -> None:
+    def start(self, chat_id: str, source_slot: str | None = None) -> None:
         """Начать (или перезапустить с нуля) диалог для chat_id."""
         with self._c() as c:
-            c.execute("INSERT INTO wizard_state(chat_id, step, ts) VALUES(?, ?, ?) "
+            c.execute("INSERT INTO wizard_state(chat_id, step, ts, source_slot) VALUES(?, ?, ?, ?) "
                       "ON CONFLICT(chat_id) DO UPDATE SET step=excluded.step, "
                       "category=NULL, lines_json=NULL, photo_path=NULL, utp_text=NULL, "
-                      "candidates_json=NULL, due_at=NULL, ts=excluded.ts",
-                      (chat_id, "awaiting_category", time.time()))
+                      "candidates_json=NULL, due_at=NULL, page=0, selected_json=NULL, "
+                      "source_slot=excluded.source_slot, ts=excluded.ts",
+                      (chat_id, "awaiting_category", time.time(), source_slot))
+
+    def to_source(self, chat_id: str) -> None:
+        """New /task starts from suppliers, clearing an earlier draft."""
+        self.start(chat_id)
+        with self._c() as c:
+            c.execute("UPDATE wizard_state SET step=? WHERE chat_id=?",
+                      ("awaiting_source", chat_id))
+
+    def set_source(self, chat_id: str, source_slot: str) -> None:
+        """Persist the supplier; subsequent category resets keep this scope."""
+        self.start(chat_id, source_slot=source_slot)
+
+    def to_count(self, chat_id: str) -> None:
+        with self._c() as c:
+            c.execute("UPDATE wizard_state SET step=?, ts=? WHERE chat_id=?",
+                      ("awaiting_count", time.time(), chat_id))
+
+    def to_pick(self, chat_id: str) -> None:
+        with self._c() as c:
+            c.execute("UPDATE wizard_state SET step=?, ts=? WHERE chat_id=?",
+                      ("awaiting_pick", time.time(), chat_id))
 
     def set_candidates(self, chat_id: str, category: str, candidates: list) -> None:
         """Автосписок по категории показан — ждём выбора номеров."""
         with self._c() as c:
             c.execute("UPDATE wizard_state SET category=?, candidates_json=?, step=?, "
+                      "page=0, selected_json=NULL, "
                       "ts=? WHERE chat_id=?",
                       (category, json.dumps(candidates, ensure_ascii=False),
                        "awaiting_pick", time.time(), chat_id))
+
+    def set_browse(self, chat_id: str, *, page=None, selected_keys=None) -> None:
+        """Persist catalogue page and basket without changing the candidate list."""
+        with self._c() as c:
+            if page is not None:
+                c.execute("UPDATE wizard_state SET page=?, ts=? WHERE chat_id=?",
+                          (max(0, int(page)), time.time(), chat_id))
+            if selected_keys is not None:
+                c.execute("UPDATE wizard_state SET selected_json=?, ts=? WHERE chat_id=?",
+                          (json.dumps(list(dict.fromkeys(selected_keys))), time.time(), chat_id))
 
     def set_pick(self, chat_id: str, picked: list) -> None:
         """Выбранные позиции автосписка — дальше время выгрузки."""
@@ -143,11 +180,11 @@ class WizardStore:
     def snapshot(self, chat_id: str, now: float | None = None) -> WizardState | None:
         with self._c() as c:
             row = c.execute("SELECT step, category, lines_json, photo_path, utp_text, "
-                            "candidates_json, due_at, ts FROM wizard_state "
+                            "candidates_json, due_at, ts, page, selected_json, source_slot FROM wizard_state "
                             "WHERE chat_id=?", (chat_id,)).fetchone()
         if not row:
             return None
-        step, category, lines_json, photo_path, utp_text, cand_json, due_at, ts = row
+        step, category, lines_json, photo_path, utp_text, cand_json, due_at, ts, page, selected, source_slot = row
         # брошенный диалог (без активности дольше TTL, либо строка до миграции
         # без ts) — чистим: иначе бот вечно ждёт ответ на древний вопрос
         if ts is None or (now if now is not None else time.time()) - ts > WIZARD_TTL_SECONDS:
@@ -158,4 +195,5 @@ class WizardStore:
             lines=json.loads(lines_json) if lines_json is not None else None,
             photo_path=photo_path, utp_text=utp_text,
             candidates=json.loads(cand_json) if cand_json is not None else None,
-            due_at=due_at)
+            due_at=due_at, page=page or 0,
+            selected_keys=json.loads(selected) if selected else [], source_slot=source_slot)

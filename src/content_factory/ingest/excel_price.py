@@ -16,6 +16,9 @@ class PriceItem:
     brand: str
     name: str             # полное наименование позиции
     price: int
+    # Optional supplier hierarchy; spreadsheets retain their existing flat section.
+    category_path: tuple[str, ...] = ()
+    category_ids: tuple[str, ...] = ()
 
 
 _PAREN_RE = re.compile(r"\([^)]*\)")
@@ -305,7 +308,7 @@ def top_sections(prices_dir, n: int | None = None) -> list[str]:
     for _, items in load_price_slots(prices_dir, for_telegram=True):
         for i in items:
             sec = (i.section or "").strip()
-            if sec and len(sec) <= _MAX_SECTION_LEN:
+            if sec and (i.category_path or len(sec) <= _MAX_SECTION_LEN):
                 counts[sec] += 1
     return [s for s, _ in counts.most_common(n)]
 

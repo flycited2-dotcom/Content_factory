@@ -83,6 +83,10 @@ def test_real_main_controls_and_wizard(tmp_path, monkeypatch):
     def enabled():
         assert generation_enabled(cfg.state.db)
         assert 'generation:off' in messages[-1]['reply_markup']
+    def suppliers():
+        assert WizardStore(cfg.state.db).snapshot('123').step == 'awaiting_source'
+        assert 'wizard:source:' in messages[-1]['reply_markup']
+        assert 'wizard:cat:' not in messages[-1]['reply_markup']
     def draft():
         assert WizardStore(cfg.state.db).snapshot('123').step == 'awaiting_category'
         assert 'wizard:cat:' in messages[-1]['reply_markup']
@@ -137,11 +141,12 @@ def test_real_main_controls_and_wizard(tmp_path, monkeypatch):
         (message('/generation off'), disabled),
         (message('🎬 Контент-завод'), None),
         (message('🎛 Генерация'), disabled),
-        (message('/task'), draft),
-        (callback('wizard:cat:0'), draft),
-        (callback('wizard:cat:' + _category_key('Стиральные машины')), picks),
-        (callback('wizard:catpage:0'), draft),
-        (callback('wizard:cat:' + _category_key('Стиральные машины')), picks),
+        (message('/task'), suppliers),
+        (callback('wizard:source:' + _category_key('manual')), draft),
+        (callback('wizard:cat:' + _category_key('manual') + ':0'), draft),
+        (callback('wizard:cat:' + _category_key('manual') + ':' + _category_key('Стиральные машины')), picks),
+        (callback('wizard:catpage:' + _category_key('manual') + ':0'), draft),
+        (callback('wizard:cat:' + _category_key('manual') + ':' + _category_key('Стиральные машины')), picks),
         (message('/find'), None),
         (message('Candy'), found),
         (callback('wizard:pick_first:1'), None),
@@ -153,7 +158,8 @@ def test_real_main_controls_and_wizard(tmp_path, monkeypatch):
         (callback('wizard:confirm'), submitted),
         (message('📋 Очередь'), queue_is_current),
         (callback('excancel:latest'), only_latest_cancelled),
-        (message('/task'), draft),
+        (message('/task'), suppliers),
+        (callback('wizard:source:' + _category_key('manual')), draft),
         (message('Beko'), picks),
         (callback('wizard:pick_first:1'), None),
         (callback('wizard:time_now'), None),

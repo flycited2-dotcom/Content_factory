@@ -33,6 +33,13 @@ ROWS = [
 ]
 
 
+def _choose_source(start, callback, chat):
+    sources = start(chat)
+    button = next((button for row in sources.markup["inline_keyboard"] for button in row
+                   if button["callback_data"].startswith("wizard:source:")), None)
+    return callback(chat, button["callback_data"]) if button else sources
+
+
 def _flow(tmp_path, submit_card=None):
     prices = _price(tmp_path, ROWS)
     store = WizardStore(tmp_path / "wizard.db")
@@ -51,10 +58,12 @@ def _flow(tmp_path, submit_card=None):
     start, handle_text, handle_photo, handle_callback = make_wizard_flow(
         tmp_path / "state.db", prices, store, _submit_card, save_photo,
         excel_fn=lambda: "СТАТУС", now_fn=lambda: NOW)
-    return start, handle_text, handle_photo, handle_callback, calls, store
+    def start_selected(chat):
+        return _choose_source(start, handle_callback, chat)
+    return start_selected, handle_text, handle_photo, handle_callback, calls, store
 
 
-def test_start_offers_category_buttons(tmp_path):
+def test_selected_supplier_offers_category_buttons(tmp_path):
     start, *_ = _flow(tmp_path)
     r = start("1")
     flat = [b for row in r.markup["inline_keyboard"] for b in row]
@@ -121,7 +130,7 @@ def test_wizard_respects_supplier_excluded_from_telegram(tmp_path):
 def test_obsolete_ordinal_menu_does_not_guess_category(tmp_path):
     start, _, _, callback, _, store = _flow(tmp_path)
     start("1")
-    result = callback("1", "wizard:cat:0")
+    result = callback("1", f"wizard:cat:{__import__('hashlib').sha256(b'manual').hexdigest()[:12]}:0")
     assert "устарела" in result.text
     assert store.snapshot("1").step == "awaiting_category"
 
@@ -159,15 +168,22 @@ def test_category_buttons_paginated_when_many(tmp_path, monkeypatch):
 
 def test_catpage_callback_flips_page(tmp_path, monkeypatch):
     import content_factory.bot.wizard_flow as wf
-    many = [f"Группа {i:03d}" for i in range(60)]
-    monkeypatch.setattr(wf, "top_sections", lambda pd: many)
     start, _, _, handle_callback, _, store = _flow(tmp_path)
-    start("1")
-    r = handle_callback("1", "wizard:catpage:2")
-    flat = [b for row in r.markup["inline_keyboard"] for b in row]
-    cats = [b for b in flat if b["callback_data"].startswith("wizard:cat:")]
-    assert cats[0]["callback_data"] == f"wizard:cat:{wf._category_key(many[2 * wf._CATS_PER_PAGE])}"
-    assert store.snapshot("1").step == "awaiting_category"   # шаг не сломан
+    many = [f"Группа {i:03d}" for i in range(60)]
+    from content_factory.ingest.excel_price import PriceItem
+    monkeypatch.setattr(wf, "load_price_slots", lambda *a, **kw: [
+        ("manual", [PriceItem(name, str(i), "B", f"B M{i}", 100) for i, name in enumerate(many)])])
+    menu = start("1")
+    for _ in range(2):
+        data = next(button["callback_data"] for row in menu.markup["inline_keyboard"]
+                    for button in row if button["text"] == "Ещё ▸")
+        menu = handle_callback("1", data)
+    cats = [button for row in menu.markup["inline_keyboard"] for button in row
+            if button["callback_data"].startswith("wizard:cat:")]
+    assert cats[0]["text"] == many[2 * wf._CATS_PER_PAGE]
+    assert len(cats) == 10
+    assert store.snapshot("1").step == "awaiting_category"
+    assert store.snapshot("1").source_slot == "manual"
 
 
 def test_pick_numbers_then_now_then_confirm(tmp_path):
@@ -415,7 +431,7 @@ def test_confirm_submit_failure_keeps_item_out_of_research(tmp_path):
         tmp_path / "state2.db", prices, store2, boom,
         lambda cid, b: str(tmp_path / "p.jpg"), excel_fn=lambda: "S")
     (tmp_path / "p.jpg").write_bytes(b"IMG")
-    start2("1")
+    _choose_source(start2, hcb2, "1")
     htext2("1", "телевизоры")
     htext2("1", "1")
     hcb2("1", "wizard:time_now")

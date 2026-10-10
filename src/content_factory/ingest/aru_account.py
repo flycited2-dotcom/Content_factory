@@ -203,6 +203,8 @@ def load_account_items(prices_dir: Path, markup_pct=10):
     if not markup.is_finite() or markup <= -100:
         raise ValueError("aru_account: invalid markup")
     items, seen = [], set()
+    categories = {str(category["id"]): category
+                  for category in data.get("categories", []) if category.get("id")}
     for row in data["items"]:
         identity = str(row["id"])
         if identity in seen:
@@ -211,6 +213,7 @@ def load_account_items(prices_dir: Path, markup_pct=10):
         if (
             row.get("available") is not True
             or row.get("price_basis") != "account_price"
+            or "pod-zakaz" in urlparse(row.get("url", "")).path.strip("/").split("/")
         ):
             continue
         price = Decimal(str(row["price"]))
@@ -219,13 +222,23 @@ def load_account_items(prices_dir: Path, markup_pct=10):
         sale = int(
             (price * (1 + markup / 100)).quantize(Decimal("1"), rounding=ROUND_CEILING)
         )
+        category_path = tuple(str(part).strip() for part in row.get("category_path", [])
+                              if str(part).strip())
+        category_ids = tuple(str(part) for part in row.get("category_ids", []))
+        # Snapshot taxonomy is authoritative and can label older slug-only rows.
+        if category_ids and category_ids[-1] in categories:
+            leaf = categories[category_ids[-1]]
+            category_path = tuple(leaf.get("path_names") or category_path)
+            category_ids = tuple(leaf.get("path_ids") or category_ids)
         items.append(
             PriceItem(
-                section=" / ".join(row.get("category_path", [])),
+                section=" / ".join(category_path),
                 article=row.get("article", ""),
                 brand=row.get("brand", ""),
                 name=row["name"],
                 price=sale,
+                category_path=category_path,
+                category_ids=category_ids,
             )
         )
     return items

@@ -62,11 +62,14 @@ def _fixture(tmp_path, timeout_after_accept=False):
 
 def _draft(flow, wizard, chat, count=6, photo=False):
     start, text, receive_photo, callback = flow
-    menu = start(chat)
+    sources = start(chat)
+    source = next(button for row in sources.markup["inline_keyboard"] for button in row
+                  if button["callback_data"].startswith("wizard:source:"))
+    menu = callback(chat, source["callback_data"])
     button = next(button for row in menu.markup["inline_keyboard"] for button in row
                   if button["text"] == CATEGORY)
     listed = callback(chat, button["callback_data"])
-    assert "найдено 6" in listed.text
+    assert "доступно 6" in listed.text
     assert len(wizard.snapshot(chat).candidates) == 6
     text(chat, " ".join(str(i) for i in range(1, count + 1)))
     callback(chat, "wizard:time_now")
