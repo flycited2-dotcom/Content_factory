@@ -21,7 +21,7 @@ from content_factory.bot.catalog_tree import build_tree, find_node
 from content_factory.ingest.source_names import source_name
 from content_factory.ingest.excel_price import (
     load_price_slots, match_model_lines, search_items, top_sections,
-    item_key, extract_model)
+    item_key, item_is_taken, legacy_item_key, PriceItem, extract_model)
 from content_factory.orchestrator.excel_pipeline import ExcelStore
 from content_factory.orchestrator.confirm_store import ConfirmStore
 from content_factory.publish.telegram import PublishState
@@ -261,7 +261,7 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
             found = search_items(_price_items(chat_id), category, blocked, limit=10 ** 9)
         else:
             found = list({item_key(item): item for item in exact_items
-                          if item_key(item) not in blocked}.values())
+                          if not item_is_taken(item, blocked)}.values())
         if not found:
             return WizardReply(f"По «{category}» нет свободных позиций для новой задачи. "
                                "Товары могут быть уже в работе или иметь готовые карточки. "
@@ -439,7 +439,9 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
                                    _SKIP_PHOTO_KB)
         requested = len({row[0] for row in rows})
         blocked = _taken(excel_store)
-        rows = [row for row in rows if row[0] not in blocked]
+        rows = [row for row in rows if row[0] not in blocked
+                and not (row[0].startswith("excel|aru:") and legacy_item_key(
+                    PriceItem("", "", row[1], row[3], row[4])) in blocked)]
         start_at = None
         if st.due_at is not None:
             lead = max(TASK_LEAD_SECONDS, _LEAD_PER_ITEM_SECONDS * len(rows))

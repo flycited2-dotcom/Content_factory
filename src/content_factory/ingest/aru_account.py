@@ -239,6 +239,7 @@ def load_account_items(prices_dir: Path, markup_pct=10):
                 price=sale,
                 category_path=category_path,
                 category_ids=category_ids,
+                supplier_product_id=f"aru:{identity}",
             )
         )
     return items

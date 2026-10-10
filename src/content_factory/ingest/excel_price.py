@@ -19,6 +19,7 @@ class PriceItem:
     # Optional supplier hierarchy; spreadsheets retain their existing flat section.
     category_path: tuple[str, ...] = ()
     category_ids: tuple[str, ...] = ()
+    supplier_product_id: str = ""  # Stable supplier identity; independent of research model.
 
 
 _PAREN_RE = re.compile(r"\([^)]*\)")
@@ -326,6 +327,19 @@ def extract_model(name: str, brand: str) -> str:
 
 
 def item_key(item: PriceItem) -> str:
+    """Stable supplier ID where available; retain legacy spreadsheet keys."""
+    if item.supplier_product_id:
+        return f"excel|{item.supplier_product_id}"
+    return legacy_item_key(item)
+
+
+def item_is_taken(item: PriceItem, taken: set) -> bool:
+    """Historical model-based tasks still block variants; new IDs block one SKU."""
+    return item_key(item) in taken or (bool(item.supplier_product_id)
+                                     and legacy_item_key(item) in taken)
+
+
+def legacy_item_key(item: PriceItem) -> str:
     """Ключ анти-дубля (как у пилота): excel|<бренд>|<модель> (lower).
     Прайсы без колонки бренда → excel|<наименование без скобок> (lower)."""
     if item.brand.strip():
@@ -401,7 +415,7 @@ def match_model_lines(items: list[PriceItem], lines: list[str],
     каждая строка — отдельный товар и ищется отдельно. Уверенный матч (в наименовании
     найдены ВСЕ слова строки) — берём сразу; иначе не угадываем — топ-3 кандидата на
     решение владельца. Пустые строки пропускаются, порядок непустых сохраняется."""
-    pool = [it for it in items if item_key(it) not in taken]
+    pool = [it for it in items if not item_is_taken(it, taken)]
     out: list[LineMatch] = []
     for raw in lines:
         line = (raw or "").strip()
@@ -441,7 +455,7 @@ def search_items(items: list[PriceItem], phrase: str, taken: set,
     холодильники из секции «Холодильники и морозильные камеры»); секция —
     только фолбэк, когда по именам пусто. aliases — см. load_search_aliases."""
     scored = [(match_phrase(i, phrase, aliases), i) for i in items]
-    alive = [(s, i) for s, i in scored if s and item_key(i) not in taken]
+    alive = [(s, i) for s, i in scored if s and not item_is_taken(i, taken)]
     by_name = [i for s, i in alive if s == 2]
     # The same model in several supplier slots is one selectable task.
     unique = {}
