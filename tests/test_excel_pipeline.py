@@ -124,12 +124,13 @@ def test_failure_notification_deduplicates_retry_and_excludes_old_items(tmp_path
     db = tmp_path / "s.db"
     sent = []
     monkeypatch.setattr(excel_run, "send_message",
-                        lambda token, chat, message, http=None: sent.append(message) or True)
+                        lambda token, chat, message, http=None, reply_markup=None:
+                        sent.append(message) or True)
     current = [("ready-price|1", "Аэрогриль BQ", "research: Locator.wait_for: Timeout 30000ms exceeded.\nCall log:" )]
     assert excel_run.notify_new_failures(db, current, "token", "chat") == 1
     assert excel_run.notify_new_failures(db, current, "token", "chat") == 0
     assert len(sent) == 1
-    assert "(1)" in sent[0] and "Аэрогриль BQ" in sent[0]
+    assert "Аэрогриль BQ" in sent[0]                     # одно сообщение на позицию
     assert "Call log" not in sent[0]
     other = [("ready-price|2", "Пылесос Blackton", "research без фото")]
     assert excel_run.notify_new_failures(db, other, "token", "chat") == 1

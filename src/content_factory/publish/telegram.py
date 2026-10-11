@@ -122,12 +122,15 @@ class PublishState:
 
 
 def send_message(bot_token: str, chat_id: str, text: str,
-                 http: httpx.Client | None = None) -> bool:
-    """Текстовое сообщение владельцу (алерты fail-ревизии/ошибок). Возвращает ok."""
+                 http: httpx.Client | None = None, reply_markup: str | None = None) -> bool:
+    """Текстовое сообщение владельцу (алерты fail-ревизии/ошибок). Возвращает ok.
+    reply_markup — JSON inline-клавиатуры (кнопки под алертом)."""
     client = http or telegram_client(30)
+    data = {"chat_id": str(chat_id), "text": text}
+    if reply_markup:
+        data["reply_markup"] = reply_markup
     try:
-        r = client.post(f"{TG_API}/bot{bot_token}/sendMessage",
-                        data={"chat_id": str(chat_id), "text": text})
+        r = client.post(f"{TG_API}/bot{bot_token}/sendMessage", data=data)
         return bool((r.json() or {}).get("ok"))
     except (httpx.HTTPError, ValueError):
         return False

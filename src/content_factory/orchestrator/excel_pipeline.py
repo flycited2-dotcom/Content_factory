@@ -394,11 +394,57 @@ class ExcelStore:
         tries 0, error снят) — команда /excel retry (запрос владельца 2026-07-07:
         «research без фото»/таймауты не терять, а перезапускать одной командой)."""
         with self._c() as c:
+            keys = [r[0] for r in c.execute("SELECT key FROM excel_items WHERE status='failed'")]
             cur = c.execute("UPDATE excel_items SET status='new', tries=0, "
                             "error=NULL, research_job=NULL, card_job=NULL, "
                             "research_request_key=NULL, card_request_key=NULL "
                             "WHERE status='failed'")
-            return cur.rowcount
+            count = cur.rowcount
+        self.forget_failure_notices(keys)
+        return count
+
+    def retry_item(self, key: str, now: float | None = None) -> str | None:
+        """Кнопка «повторить» под сообщением об ошибке (запрос владельца 2026-10-11).
+        failed → чистый заход, как /excel retry, но для одной позиции → 'retried'.
+        new с отложенным автоповтором (ready-price возвращает failed в new на 30 мин /
+        6 ч) → снять ожидание → 'started_now'; request_key НЕ трогаем: платное задание
+        могло быть принято очередью, а ответ потерян. Позиция уже ждёт тик → 'queued'.
+        Любой другой статус (research/card/preview/cancelled…) — None, ничего не меняем."""
+        now = time.time() if now is None else now
+        with self._c() as c:
+            c.execute("BEGIN IMMEDIATE")
+            row = c.execute("SELECT status, due_at FROM excel_items WHERE key=?",
+                            (key,)).fetchone()
+            if row is None:
+                return None
+            status, due_at = row
+            if status == "failed":
+                c.execute("UPDATE excel_items SET status='new', tries=0, error=NULL, "
+                          "research_job=NULL, card_job=NULL, research_request_key=NULL, "
+                          "card_request_key=NULL, due_at=NULL WHERE key=?", (key,))
+                outcome = "retried"
+            elif status == "new":
+                c.execute("UPDATE excel_items SET due_at=NULL WHERE key=?", (key,))
+                outcome = "started_now" if due_at is not None and due_at > now else "queued"
+            else:
+                return None
+        if outcome != "queued":
+            self.forget_failure_notices([key])
+        return outcome
+
+    def forget_failure_notices(self, keys) -> None:
+        """Забыть «об ошибке уже сообщали» (excel_failure_notifications, ведёт excel_run):
+        после ручного повтора та же ошибка должна прийти владельцу снова, иначе
+        неудавшийся повтор выглядит как тишина. Таблицы может ещё не быть — не ошибка."""
+        keys = list(keys)
+        if not keys:
+            return
+        try:
+            with self._c() as c:
+                c.executemany("DELETE FROM excel_failure_notifications WHERE item_key=?",
+                              [(key,) for key in keys])
+        except sqlite3.OperationalError:
+            pass
 
     # ── кэш research (волна 1в): повторные модели не дёргают ChatGPT ──────────
     def cache_get(self, model_key: str):

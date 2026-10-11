@@ -480,6 +480,28 @@ def make_markup_fn(prices_dir, state_db=None):
 _EXCEL_ACTIVE_STATUSES = ("new", "research", "card", "submission", "submission_failed")
 
 
+def make_retry_excel_fn(state_db, wake_fn=None):
+    """retry_fn(key) → текст ответа на кнопку «🔁 повторить» под алертом об ошибке
+    конвейера (запрос владельца 2026-10-11: сбой мог быть разовым — дать второй круг
+    без /excel retry для всей очереди). Конвейер будим, чтобы не ждать таймер."""
+    def retry_fn(key: str) -> str:
+        from content_factory.orchestrator.excel_pipeline import ExcelStore
+        store = ExcelStore(state_db)
+        item = store.get(key)
+        if item is None:
+            return "❌ позиция не найдена — вернуть все ошибки разом: /excel retry"
+        name = item.name[:60]
+        outcome = store.retry_item(key)
+        if outcome == "queued":
+            return f"⏳ Уже ждёт запуска: {name}"
+        if outcome is None:
+            return f"ℹ️ Повтор не нужен: {name} — сейчас статус «{item.status}». Статус: /excel"
+        head = ("🔁 Повтор поставлен" if outcome == "retried"
+                else "▶️ Запускаю сейчас, не жду таймер")
+        return f"{head}: {name}" + _wake_note(wake_fn, state_db)
+    return retry_fn
+
+
 def make_cancel_excel_fn(state_db, queue_db):
     """cancel_fn(key|'*') → отмена товаров excel-конвейера (запрос владельца
     2026-07-06: «нет кнопки остановить задачу»). Товар → status='cancelled'
@@ -767,6 +789,7 @@ def main():
         cfg.state.db, prices_dir, wake_fn=worker_control.request_run,
         worker_status_fn=worker_control.status_lines)
     cancel_excel_fn = make_cancel_excel_fn(cfg.state.db, config("FOTOGEN_QUEUE_DB"))
+    retry_excel_fn = make_retry_excel_fn(cfg.state.db, wake_fn=worker_control.request_run)
     # Связь VPS→Telegram рвётся: ~30% соединений не устанавливаются (2026-09-22).
     # connect=40с замораживал однопоточного бота на 40с и терял ответ — короткий
     # connect + повтор соединения (retries) даёт ответ за секунды.
@@ -1034,6 +1057,18 @@ def main():
                     except httpx.HTTPError:
                         pass
                     finalize_preview(http, token, cq, reply)
+                    continue
+                if data_cq.startswith("exretry:"):     # «🔁 повторить» под алертом об ошибке
+                    key_r = links.key_for(data_cq.split(":", 1)[1])
+                    reply = (retry_excel_fn(key_r) if key_r else
+                             "❌ позиция не найдена — вернуть все ошибки разом: /excel retry")
+                    try:
+                        http.post(f"{TG_API}/bot{token}/answerCallbackQuery",
+                                  data={"callback_query_id": cq.get("id"), "text": reply[:180]})
+                    except httpx.HTTPError:
+                        pass
+                    if not reply.startswith("❌"):     # кнопка отработала → вердикт вместо неё
+                        finalize_preview(http, token, cq, reply.splitlines()[0])
                     continue
                 if data_cq.startswith("excancel:"):    # отмена задач excel-конвейера
                     target = data_cq.split(":", 1)[1]
