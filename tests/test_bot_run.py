@@ -283,8 +283,27 @@ def test_excel_fn_truncates_multiline_errors_and_separates_sections(tmp_path):
     text = excel_fn()
 
     assert "Call log" not in text                  # простыня ошибки обрезана
-    assert "Timeout 20000ms" in text               # суть ошибки осталась
+    assert "время ожидания" in text                # суть ошибки — по-русски (2026-10-11)
+    assert "Timeout 20000ms" not in text
     assert "─" in text or "—" in text or "━" in text   # есть разделители секций
+
+
+def test_excel_fn_explains_failure_cause_in_plain_russian(tmp_path):
+    # жалоба владельца 2026-10-11: «Client error '403 Forbidden' for url …» в статусе
+    # непонятна — нужна причина, а не текст исключения со ссылкой
+    from content_factory.orchestrator.excel_pipeline import ExcelStore
+    es = ExcelStore(tmp_path / "state.db")
+    es.add_items([("ready-price|1", "Gruwatt", "KR-50-2BM", "Компрессор KP-50-2БМ", 22990)])
+    es.update("ready-price|1", status="failed",
+              error="research: Client error '403 Forbidden' for url "
+                    "'https://www.vseinstrumenti.ru/product/x-1/'")
+
+    _, _, excel_fn = botrun.make_find_pick_fns(tmp_path / "state.db", tmp_path)
+    text = excel_fn()
+
+    assert "не пустил робота (403 Forbidden)" in text
+    assert "Client error" not in text and "vseinstrumenti" not in text
+    assert "/excel retry" in text                  # общий способ вернуть ошибки остался
 
 
 def test_excel_fn_explains_ready_price_delivery_and_lane(tmp_path):

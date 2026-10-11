@@ -380,7 +380,9 @@ def make_find_pick_fns(state_db, prices_dir, publication_status_path=None, queue
             for i in items:
                 extra = ""
                 if s == "failed" and i.error:
-                    extra = f" — {i.error.splitlines()[0][:70]}"
+                    # причина по-русски (как в алерте), а не текст исключения со ссылкой
+                    from content_factory.orchestrator.excel_run import describe_failure
+                    extra = f" — {describe_failure(i.error)[0][:90]}"
                 lane = assigned_account(
                     i.brand, i.model,
                     queue_db=config("FOTOGEN_QUEUE_DB", default="")).upper()
