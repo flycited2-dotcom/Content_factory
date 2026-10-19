@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh VK storefront manifest daily
+
+[Timer]
+OnCalendar=*-*-* 07:20:00
+RandomizedDelaySec=10m
+Persistent=true
+Unit=cf-vk-storefront.service
+
+[Install]
+WantedBy=timers.target

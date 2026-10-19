@@ -1,0 +1,11 @@
+[Unit]
+Description=Content Factory: collect VK analytics daily
+
+[Timer]
+OnCalendar=*-*-* 21:30:00 Europe/Moscow
+Persistent=true
+RandomizedDelaySec=10m
+Unit=cf-vk-analytics.service
+
+[Install]
+WantedBy=timers.target

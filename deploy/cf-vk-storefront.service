@@ -1,0 +1,12 @@
+[Unit]
+Description=Content Factory: refresh VK storefront anchor manifest
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/content-factory-vk
+EnvironmentFile=/opt/content-factory/.env
+EnvironmentFile=/opt/content-factory-vk/.env
+Environment=PYTHONPATH=src
+ExecStart=/opt/content-factory/.venv/bin/python -m content_factory.storefront.vk_catalog --apply

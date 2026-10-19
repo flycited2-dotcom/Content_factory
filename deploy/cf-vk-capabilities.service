@@ -1,0 +1,16 @@
+[Unit]
+Description=Content Factory: safely probe native VK photo capability
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/content-factory-vk
+EnvironmentFile=/opt/content-factory/.env
+EnvironmentFile=/opt/content-factory-vk/.env
+Environment=PYTHONPATH=src
+Environment=VK_CAPABILITY_STATE=/opt/content-factory-vk/state/vk-capabilities.json
+ExecStart=/opt/content-factory/.venv/bin/python -m content_factory.publish.vk_capabilities
+
+[Install]
+WantedBy=multi-user.target

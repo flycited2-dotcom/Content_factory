@@ -1,0 +1,14 @@
+[Unit]
+Description=Content Factory: send weekly VK analytics report
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/content-factory-vk
+EnvironmentFile=/opt/content-factory/.env
+EnvironmentFile=/opt/content-factory-vk/.env
+Environment=PYTHONPATH=src
+Environment=VK_PLAN_STATE_DB=/opt/content-factory-vk/state/vk-plan.db
+Environment=CF_SOURCE_DB=/opt/content-factory/state/content_factory.db
+ExecStart=/opt/content-factory/.venv/bin/python -m content_factory.analytics.vk report

@@ -1,0 +1,11 @@
+[Unit]
+Description=Content Factory: daily VK photo capability probe
+
+[Timer]
+OnCalendar=*-*-* 08:15:00 Europe/Moscow
+Persistent=true
+RandomizedDelaySec=10m
+Unit=cf-vk-capabilities.service
+
+[Install]
+WantedBy=timers.target
