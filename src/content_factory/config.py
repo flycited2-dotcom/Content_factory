@@ -103,6 +103,7 @@ class AppConfig:
     auto_tasks: list = field(default_factory=list)   # постоянные авто-задачи (сырые dict из yaml;
                                                      # разбор — orchestrator/auto.py)
     channel_sync: dict = field(default_factory=dict) # «живой канал» (publish/channel_sync_run)
+    splithub: dict = field(default_factory=dict)     # живой каталог сайта (splithub_sync)
 
 
 def load_config(path: str | Path) -> AppConfig:
@@ -200,4 +201,5 @@ def load_config(path: str | Path) -> AppConfig:
                      cards_modes_by_category=modes_by_category, fotogen=fotogen,
                      telegram=telegram, vk=vk, review=review, state=state,
                      auto_tasks=d.get("auto_tasks", []) or [],
-                     channel_sync=d.get("channel_sync", {}) or {})
+                     channel_sync=d.get("channel_sync", {}) or {},
+                     splithub=d.get("splithub", {}) or {})

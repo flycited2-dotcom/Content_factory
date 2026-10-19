@@ -140,6 +140,10 @@ class ExcelStore:
     def _cancelled_selection_stage(row, jobs) -> tuple | None:
         """Choose a safe stage, retaining completed work rather than buying it again."""
         key, status, research_job, card_job = row[:4]
+        if status == "failed" and not key.startswith("ready-price|"):
+            # упавшая ручная позиция: явный повторный выбор = «🔁 повторить» (чистый
+            # заход). Иначе мастер отвечал «нет свободных позиций» (владелец, 2026-10-11)
+            return "new", None, None
         if status != "cancelled" or key.startswith("ready-price|"):
             return None
         if any(job_id is None and request_key for job_id, request_key
@@ -263,6 +267,10 @@ class ExcelStore:
             if accepted:
                 c.execute("INSERT INTO excel_selections(ts,keys_json,requested) VALUES(?,?,?)",
                           (ts, json.dumps([row[0] for row in accepted]), len(requested_rows)))
+        # перезапущенные упавшие: новая ошибка должна снова прийти владельцу
+        self.forget_failure_notices(row[0] for row in accepted
+                                    if existing.get(row[0]) is not None
+                                    and existing[row[0]][1] == "failed")
         return accepted
 
     def latest_selection(self) -> dict | None:
@@ -389,16 +397,71 @@ class ExcelStore:
             bound = c.execute(f"UPDATE excel_items SET {','.join(sets)} WHERE {where}", args).rowcount
             return bool(bound and previous and previous[0] == expected_status)
 
+    def normalize_unsubmitted_model(self, key: str, old: str, model: str) -> bool:
+        """Не менять payload уже принятого запроса при потерянном ответе."""
+        with self._c() as c:
+            changed = c.execute(
+                "UPDATE excel_items SET model=? WHERE key=? AND model=? AND status='new' "
+                "AND research_request_key IS NULL AND card_request_key IS NULL "
+                "AND research_job IS NULL AND card_job IS NULL", (model, key, old))
+            return changed.rowcount == 1
+
     def retry_failed(self) -> int:
         """Вернуть все failed-позиции в конвейер с чистого листа (status new,
         tries 0, error снят) — команда /excel retry (запрос владельца 2026-07-07:
         «research без фото»/таймауты не терять, а перезапускать одной командой)."""
         with self._c() as c:
+            keys = [r[0] for r in c.execute("SELECT key FROM excel_items WHERE status='failed'")]
             cur = c.execute("UPDATE excel_items SET status='new', tries=0, "
                             "error=NULL, research_job=NULL, card_job=NULL, "
                             "research_request_key=NULL, card_request_key=NULL "
                             "WHERE status='failed'")
-            return cur.rowcount
+            count = cur.rowcount
+        self.forget_failure_notices(keys)
+        return count
+
+    def retry_item(self, key: str, now: float | None = None) -> str | None:
+        """Кнопка «повторить» под сообщением об ошибке (запрос владельца 2026-10-11).
+        failed → чистый заход, как /excel retry, но для одной позиции → 'retried'.
+        new с отложенным автоповтором (ready-price возвращает failed в new на 30 мин /
+        6 ч) → снять ожидание → 'started_now'; request_key НЕ трогаем: платное задание
+        могло быть принято очередью, а ответ потерян. Позиция уже ждёт тик → 'queued'.
+        Любой другой статус (research/card/preview/cancelled…) — None, ничего не меняем."""
+        now = time.time() if now is None else now
+        with self._c() as c:
+            c.execute("BEGIN IMMEDIATE")
+            row = c.execute("SELECT status, due_at FROM excel_items WHERE key=?",
+                            (key,)).fetchone()
+            if row is None:
+                return None
+            status, due_at = row
+            if status == "failed":
+                c.execute("UPDATE excel_items SET status='new', tries=0, error=NULL, "
+                          "research_job=NULL, card_job=NULL, research_request_key=NULL, "
+                          "card_request_key=NULL, due_at=NULL WHERE key=?", (key,))
+                outcome = "retried"
+            elif status == "new":
+                c.execute("UPDATE excel_items SET due_at=NULL WHERE key=?", (key,))
+                outcome = "started_now" if due_at is not None and due_at > now else "queued"
+            else:
+                return None
+        if outcome != "queued":
+            self.forget_failure_notices([key])
+        return outcome
+
+    def forget_failure_notices(self, keys) -> None:
+        """Забыть «об ошибке уже сообщали» (excel_failure_notifications, ведёт excel_run):
+        после ручного повтора та же ошибка должна прийти владельцу снова, иначе
+        неудавшийся повтор выглядит как тишина. Таблицы может ещё не быть — не ошибка."""
+        keys = list(keys)
+        if not keys:
+            return
+        try:
+            with self._c() as c:
+                c.executemany("DELETE FROM excel_failure_notifications WHERE item_key=?",
+                              [(key,) for key in keys])
+        except sqlite3.OperationalError:
+            pass
 
     # ── кэш research (волна 1в): повторные модели не дёргают ChatGPT ──────────
     def cache_get(self, model_key: str):
@@ -461,7 +524,8 @@ def tick(store: ExcelStore, submit_research, read_job, submit_card, preview,
          max_new: int | None = None, new_key_prefix: str | None = None,
          allowed_keys: set[str] | None = None,
          failed_events: list[tuple[str, str, str]] | None = None,
-         resolve_photo=None, prepare=None) -> dict:
+         resolve_photo=None, prepare=None, research_model_for=None,
+         reuse_card=None, find_cached=None) -> dict:
     """Один проход конвейера. Инъекции:
     submit_research(brand, model, category) -> job_id
     read_job(job_id) -> (status, output_filename, result_specs, error)
@@ -470,8 +534,15 @@ def tick(store: ExcelStore, submit_research, read_job, submit_card, preview,
     resolve_photo(item, photo_path) -> usable path or None (optional, no paid I/O)
     prepare(item) -> None: перед проверкой кэша позиции new (источник с готовыми фото/УТП,
     напр. АРУ, кладёт их в research_cache); сбой не ломает позицию — уйдёт в research
+    research_model_for(item) -> str | None: модель для сверки research (у АРУ — артикул
+    производителя); поле model позиции (текст карточки) не меняется
+    reuse_card(item) -> (файл в выходе фотоагента, УТП) | None: готовая карточка того же
+    товара из архива — сразу превью, без заданий ChatGPT
+    find_cached(item) -> (УТП, фото) | None: исходное фото того же бренда и кода модели —
+    без research, только карточка
     """
-    stats = {"research": 0, "card": 0, "preview": 0, "failed": 0}
+    stats = {"research": 0, "card": 0, "preview": 0, "failed": 0,
+             "reused_card": 0, "reused_photo": 0}
 
     def _fail_or_retry(item, stage_reset: dict, err: str):
         key_reset = {key: value for key, value in stage_reset.items()
@@ -522,12 +593,41 @@ def tick(store: ExcelStore, submit_research, read_job, submit_card, preview,
         try:
             if not _current(item):
                 continue
+            # Старые прайсы без бренда передавали всё название как модель.
+            # Исправляем только ещё не отправленный payload, сохраняя ключ товара.
+            if item.model == item.name:
+                from content_factory.ingest.excel_price import research_model
+                model = research_model(item.model)
+                if model != item.model and store.normalize_unsubmitted_model(item.key, item.model, model):
+                    item.model = model
             if prepare is not None:
                 try:
                     prepare(item)
                 except Exception as exc:
                     _LOG.warning("Excel prepare failed: %s", type(exc).__name__)
+            if reuse_card is not None and not item.key.startswith("ready-price|"):
+                operation = "archive_card"           # товар уже генерировался — карточка из архива
+                reused = reuse_card(item)
+                if reused and _current(item):
+                    card_output, card_utp = reused
+                    if not store.cache_get(_cache_key(item)):
+                        store.cache_put(_cache_key(item), card_utp, None, source="archive")
+                    operation = "preview"
+                    result = preview(item, card_output)
+                    accepted = result[0] if isinstance(result, tuple) else bool(result)
+                    if accepted and store.update_if_status(item.key, "new", status="preview",
+                                                           error=None):
+                        stats["preview"] += 1
+                        stats["reused_card"] += 1
+                        continue
             cached = store.cache_get(_cache_key(item))
+            if not cached and find_cached is not None and not item.key.startswith("ready-price|"):
+                found = find_cached(item)          # исходное фото того же товара — без research
+                if found:
+                    store.cache_put(_cache_key(item), found[0], found[1], source="archive")
+                    cached = store.cache_get(_cache_key(item))
+                    if cached:
+                        stats["reused_photo"] += 1
             if cached:
                 utp, cached_photo = cached
                 evidence = store.cache_evidence(_cache_key(item))
@@ -552,7 +652,8 @@ def tick(store: ExcelStore, submit_research, read_job, submit_card, preview,
                 continue
             operation = "research_submit"
             request_key = store.get_or_create_request_key(item.key, "research")
-            job = submit_research(item.brand, item.model, _category_word(item),
+            search_model = (research_model_for(item) if research_model_for else None) or item.model
+            job = submit_research(item.brand, search_model, _category_word(item),
                                   request_key=request_key)
             if store.bind_submitted_job(item.key, "research", job, "new", request_key=request_key):
                 stats["research"] += 1

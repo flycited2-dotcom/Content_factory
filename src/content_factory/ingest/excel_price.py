@@ -292,11 +292,16 @@ def load_price_slots(prices_dir, for_telegram: bool = False
         if label in off:                  # выключен для Telegram — даже не читаем
             continue
         out.append((label, _apply_markup(_parse_cached(p), markups.get(label, 0))))
+    from content_factory.ingest import splithub_catalog     # поздний импорт: цикл
+    sh_items = [] if splithub_catalog.SLOT in off else splithub_catalog.load_items(prices_dir)
+    if sh_items:                                            # живой каталог SplitHub
+        out.append((splithub_catalog.SLOT,
+                    _apply_markup(sh_items, markups.get(splithub_catalog.SLOT, 0))))
     if 'aru' not in off:
         from content_factory.ingest.aru_account import load_account_items
         aru_items = load_account_items(pdir, markups.get('aru', 10))
         if aru_items:
-            out.append(('aru', aru_items))  # account price +10%, applied exactly once
+            out.append(('aru', aru_items))
     return out
 
 
@@ -306,7 +311,10 @@ def top_sections(prices_dir, n: int | None = None) -> list[str]:
     большинство групп товаров (жалоба владельца 2026-07-07). n — опц. лимит."""
     from collections import Counter
     counts: Counter = Counter()
-    for _, items in load_price_slots(prices_dir, for_telegram=True):
+    from content_factory.ingest import splithub_catalog
+    for label, items in load_price_slots(prices_dir, for_telegram=True):
+        if label == splithub_catalog.SLOT:      # SplitHub — своё иерархическое меню
+            continue
         for i in items:
             sec = (i.section or "").strip()
             if sec and (i.category_path or len(sec) <= _MAX_SECTION_LEN):
@@ -324,6 +332,31 @@ def extract_model(name: str, brand: str) -> str:
         if tail:
             return re.sub(r"\s+", " ", tail)
     return re.sub(r"\s+", " ", clean)
+
+
+def research_model(value: str) -> str:
+    """Артикул для поиска из старого полного названия; ключи товара не меняем.
+
+    При нескольких артикулах не угадываем модификацию. Размеры/напряжение
+    не считаем моделью. Раздельный буквенный префикс сохраняем у цифрового SKU.
+    """
+    clean = re.split(r"[()]", value or "", maxsplit=1)[0]
+    tokens = list(re.finditer(r"[A-Za-zА-Яа-яЁё0-9]+(?:[-/.,][A-Za-zА-Яа-яЁё0-9]+)*", clean))
+    candidates = []
+    for index, match in enumerate(tokens):
+        token = match.group()
+        if not (re.search(r"[A-Za-zА-Яа-яЁё]", token) and re.search(r"\d", token)):
+            continue
+        if re.fullmatch(r"\d+(?:[.,]\d+)?(?:в|v|вт|w|квт|kw|мм|см|кг|л|мл|бар|м|лс)", token, re.I):
+            continue
+        if len(re.sub(r"\W", "", token)) < 3:
+            continue
+        if token[0].isdigit() and index:
+            prefix = tokens[index - 1].group()
+            if re.fullmatch(r"[A-ZА-ЯЁ]{2,8}", prefix):
+                token = prefix + ' ' + token
+        candidates.append(token)
+    return candidates[0] if len(candidates) == 1 else value
 
 
 def item_key(item: PriceItem) -> str:
@@ -454,6 +487,12 @@ def search_items(items: list[PriceItem], phrase: str, taken: set,
     ВЫТЕСНЯЮТ секционные (грабля 2026-07-09: «морозильные камеры» выдавали
     холодильники из секции «Холодильники и морозильные камеры»); секция —
     только фолбэк, когда по именам пусто. aliases — см. load_search_aliases."""
+    # точное имя раздела (кнопка категории в /task) — берём раздел целиком: нечёткий
+    # поиск по основам путал «инверторные» с «неинверторные» и терял «on/off»
+    exact = [i for i in items if (i.section or "").strip().lower() == phrase.strip().lower()
+             and item_key(i) not in taken]
+    if exact:
+        return list({item_key(i): i for i in reversed(exact)}.values())[::-1][:limit]
     scored = [(match_phrase(i, phrase, aliases), i) for i in items]
     alive = [(s, i) for s, i in scored if s and not item_is_taken(i, taken)]
     by_name = [i for s, i in alive if s == 2]

@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import html
+import mimetypes
 import re
+import time
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
@@ -104,11 +106,13 @@ class VkPublishResult:
 
 class VkPublisher:
     def __init__(self, token: str, owner_id: int, *, api_version: str = "5.199",
-                 dry_run: bool = True, http: httpx.Client | None = None):
+                 dry_run: bool = True, http: httpx.Client | None = None,
+                 upload_retry_delay: float = 1.5):
         self.token = token
         self.owner_id = int(owner_id)
         self.api_version = api_version
         self.dry_run = dry_run
+        self.upload_retry_delay = upload_retry_delay
         self.http = http or httpx.Client(timeout=60, follow_redirects=True)
 
     def preview(self, image: str, caption: str, *, publish_at: int | None = None) -> dict:
@@ -127,6 +131,51 @@ class VkPublisher:
             err = body["error"]
             raise RuntimeError(f"VK {err.get('error_code')}: {err.get('error_msg')}")
         return body.get("response")
+
+    UPLOAD_ATTEMPTS = 5
+
+    def _upload_wall_photo(self, path: Path, target: dict) -> str:
+        """Загрузить файл на стену и вернуть вложение ``photo<owner>_<id>[_<key>]``.
+
+        Сервер загрузки VK изредка принимает файл «вхолостую» (photo=[]), и тогда
+        saveWallPhoto отвечает ``100: photo is undefined``, а иногда сам отвечает 504.
+        Это разовые сбои: на боевой стене они выпадали на каждой второй-третьей попытке
+        (однажды четыре подряд) и проходили при повторе с новым адресом загрузки, пауза
+        между попытками растёт. Повторяем только их; ошибки
+        прав (5, 15, 27) и 4xx сервера загрузки не повторяются.
+        """
+        data = path.read_bytes()
+        mime = mimetypes.guess_type(path.name)[0] or "image/png"
+        for attempt in range(1, self.UPLOAD_ATTEMPTS + 1):
+            upload = self._api("photos.getWallUploadServer", target)
+            try:
+                reply = self.http.post(upload["upload_url"],
+                                       files={"photo": (path.name, data, mime)})
+                reply.raise_for_status()
+            except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+                # Сбой самого сервера загрузки (504, обрыв соединения) тоже разовый;
+                # 4xx — ошибка запроса, повтор ничего не изменит.
+                transient = (isinstance(exc, httpx.TransportError)
+                             or exc.response.status_code >= 500)
+                if transient and attempt < self.UPLOAD_ATTEMPTS:
+                    time.sleep(self.upload_retry_delay * attempt)
+                    continue
+                raise
+            uploaded = reply.json()
+            try:
+                saved = self._api("photos.saveWallPhoto", {
+                    **{k: uploaded[k] for k in ("server", "photo", "hash")}, **target})
+            except RuntimeError as exc:
+                if "photo is undefined" in str(exc) and attempt < self.UPLOAD_ATTEMPTS:
+                    time.sleep(self.upload_retry_delay * attempt)
+                    continue
+                raise
+            photo = saved[0]
+            attachment = f"photo{photo['owner_id']}_{photo['id']}"
+            if photo.get("access_key"):
+                attachment += f"_{photo['access_key']}"
+            return attachment
+        raise RuntimeError("VK: загрузка фото не удалась")  # недостижимо: последняя попытка raise
 
     def publish(self, image: str, caption: str,
                 *, publish_at: int | None = None) -> VkPublishResult:
@@ -149,19 +198,7 @@ class VkPublisher:
         try:
             target = ({"group_id": abs(self.owner_id)}
                       if self.owner_id < 0 else {"user_id": self.owner_id})
-            upload = self._api("photos.getWallUploadServer", target)
-            with path.open("rb") as fh:
-                upload_response = self.http.post(
-                    upload["upload_url"], files={"photo": (path.name, fh.read(), "image/png")})
-            upload_response.raise_for_status()
-            uploaded = upload_response.json()
-            save_params = {k: uploaded[k] for k in ("server", "photo", "hash")}
-            save_params.update(target)
-            saved = self._api("photos.saveWallPhoto", save_params)
-            photo = saved[0]
-            attachment = f"photo{photo['owner_id']}_{photo['id']}"
-            if photo.get("access_key"):
-                attachment += f"_{photo['access_key']}"
+            attachment = self._upload_wall_photo(path, target)
             post = self._api("wall.post", {
                 "owner_id": self.owner_id,
                 "from_group": 1 if self.owner_id < 0 else 0,
@@ -206,12 +243,29 @@ class VkPublisher:
         except (KeyError, ValueError, RuntimeError, httpx.HTTPError) as exc:
             return VkPublishResult(ok=False, error=str(exc), payload=payload)
 
+    def _attachments_of(self, post_id: int) -> str:
+        """Вложения записи в формате параметра ``attachments`` (через запятую)."""
+        got = self._api("wall.getById", {"posts": f"{self.owner_id}_{int(post_id)}"})
+        items = got.get("items", got) if isinstance(got, dict) else got
+        parts: list[str] = []
+        for attachment in (items[0].get("attachments") or []) if items else []:
+            kind = attachment.get("type")
+            body = attachment.get(kind) or {}
+            if kind == "link":
+                if body.get("url"):
+                    parts.append(body["url"])
+            elif body.get("owner_id") is not None and body.get("id") is not None:
+                ref = f"{kind}{body['owner_id']}_{body['id']}"
+                parts.append(ref + (f"_{body['access_key']}" if body.get("access_key") else ""))
+        return ",".join(parts)
+
     def edit_text(self, post_id: int, caption: str,
                   *, publish_at: int | None = None) -> VkPublishResult:
         """Обновить текст существующей или отложенной записи без создания дубля.
 
-        ``attachments`` намеренно не передаётся: уже прикреплённая вручную или
-        автоматически фотография остаётся частью существующей записи.
+        wall.edit без ``attachments`` стирает вложения записи (проверено на боевой стене:
+        фото пропало после правки текста). Поэтому текущие вложения читаются и передаются
+        явно. Не удалось прочитать — запись не правим: лучше старый текст, чем пост без фото.
         """
         payload = {
             "owner_id": self.owner_id,
@@ -225,7 +279,8 @@ class VkPublisher:
         if not self.token:
             return VkPublishResult(ok=False, error="VK_ACCESS_TOKEN не задан", payload=payload)
         try:
-            self._api("wall.edit", payload)
+            attachments = self._attachments_of(post_id)
+            self._api("wall.edit", {**payload, **({"attachments": attachments} if attachments else {})})
             return VkPublishResult(ok=True, post_id=int(post_id), payload=payload)
-        except (ValueError, RuntimeError, httpx.HTTPError) as exc:
+        except (KeyError, IndexError, ValueError, RuntimeError, httpx.HTTPError) as exc:
             return VkPublishResult(ok=False, error=str(exc), payload=payload)

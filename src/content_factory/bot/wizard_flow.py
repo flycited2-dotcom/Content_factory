@@ -19,6 +19,7 @@ from pathlib import Path
 from content_factory.bot.commands import parse_due_at
 from content_factory.bot.catalog_tree import build_tree, find_node
 from content_factory.ingest.source_names import source_name
+from content_factory.ingest import splithub_catalog
 from content_factory.ingest.excel_price import (
     load_price_slots, match_model_lines, search_items, top_sections,
     item_key, item_is_taken, legacy_item_key, PriceItem, extract_model)
@@ -85,7 +86,8 @@ def _pick_keyboard(count: int) -> dict:
 
 def _catalog(prices_dir, source_slot=None):
     items = [item for slot, rows in load_price_slots(prices_dir, for_telegram=True)
-             if source_slot is None or slot == source_slot for item in rows]
+             if slot != splithub_catalog.SLOT and (source_slot is None or slot == source_slot)
+             for item in rows]
     if source_slot is None:  # migration: already active legacy drafts
         sections = top_sections(prices_dir)
     else:
@@ -133,6 +135,25 @@ def _numbered_selection(text, count):
 
 def _category_keyboard(prices_dir, page: int = 0, node_id: str = "", source_slot=None) -> dict | None:
     """Root → subgroups → products, with stable supplier ids and full pagination."""
+    if source_slot == splithub_catalog.SLOT:
+        groups = splithub_catalog.group_menu(prices_dir)
+        pages = max(1, -(-len(groups) // _CATS_PER_PAGE))
+        page = max(0, min(page, pages - 1))
+        lo = page * _CATS_PER_PAGE
+        prefix = _category_key(source_slot)
+        rows = [[{"text": f"{label} · {count}",
+                  "callback_data": f"wizard:shg:{prefix}:{group}"}]
+                for group, label, count in groups[lo:lo + _CATS_PER_PAGE]]
+        if pages > 1:
+            nav = []
+            if page:
+                nav.append({"text": "◂ Назад", "callback_data": f"wizard:catpage:{prefix}:{page - 1}"})
+            if page < pages - 1:
+                nav.append({"text": "Ещё ▸", "callback_data": f"wizard:catpage:{prefix}:{page + 1}"})
+            rows.append(nav)
+        rows.append([{"text": "◀️ Поставщики", "callback_data": "wizard:sources"},
+                     {"text": "➕ Свой товар", "callback_data": "wizard:manual"}])
+        return {"inline_keyboard": rows} if groups else None
     items, nodes = _catalog(prices_dir, source_slot)
     source_prefix = f"{_category_key(source_slot)}:" if source_slot else ""
     node = nodes.get(node_id, nodes[""])
@@ -180,6 +201,13 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
                 | ConfirmStore(state_db).blocked_keys()
                 | excel_store.selection_blocked_keys(queue_db))
 
+    def _apply_splithub_mode(excel_store: ExcelStore, rows) -> None:
+        # позиции живого каталога SplitHub — свой (премиум) стиль карточки
+        sh_keys = splithub_catalog.card_mode_keys(prices_dir)
+        for row in rows:
+            if row[0] in sh_keys:
+                excel_store.update(row[0], card_mode=splithub_catalog.card_mode())
+
     def _price_items(chat_id):
         st = store.snapshot(chat_id)
         slots = load_price_slots(prices_dir, for_telegram=True)
@@ -209,6 +237,37 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
 
     def start(chat_id: str) -> WizardReply:
         return _source_prompt(chat_id)
+
+    def _splithub_brand_reply(chat_id, group, page=0):
+        if group not in splithub_catalog.GROUP_BUTTONS:
+            return WizardReply("Группа устарела. Выберите заново.",
+                               _category_keyboard(prices_dir, source_slot=splithub_catalog.SLOT))
+        brands = splithub_catalog.brand_menu(prices_dir, group)
+        store.start(chat_id, source_slot=splithub_catalog.SLOT)
+        if not brands:
+            return _autolist(chat_id, splithub_catalog.group_section(group))
+        prefix = _category_key(splithub_catalog.SLOT)
+        total = sum(count for _, _, count in brands)
+        pages = max(1, -(-len(brands) // _CATS_PER_PAGE))
+        page = max(0, min(page, pages - 1))
+        lo = page * _CATS_PER_PAGE
+        rows = [[{"text": f"📋 Все бренды · {total}",
+                  "callback_data": f"wizard:shb:{prefix}:{group}:all"}]]
+        rows += [[{"text": f"{brand} · {count}",
+                   "callback_data": f"wizard:shb:{prefix}:{group}:{_category_key(section)}"}]
+                 for section, brand, count in brands[lo:lo + _CATS_PER_PAGE]]
+        if pages > 1:
+            nav = []
+            if page:
+                nav.append({"text": "◂ Назад", "callback_data": f"wizard:shbrandpage:{prefix}:{group}:{page - 1}"})
+            if page < pages - 1:
+                nav.append({"text": "Ещё ▸", "callback_data": f"wizard:shbrandpage:{prefix}:{group}:{page + 1}"})
+            rows.append(nav)
+        rows.append([{"text": "◀️ Другие категории", "callback_data": "wizard:categories"},
+                     {"text": "❌ Отмена", "callback_data": "wizard:cancel"}])
+        return WizardReply(f"{splithub_catalog.GROUP_BUTTONS[group]}\n"
+                           f"Выберите бренд (в наличии на складе). Стр. {page + 1}/{pages}.",
+                           {"inline_keyboard": rows})
 
     def _count_prompt(st):
         return WizardReply(f"✏️ Сколько первых товаров взять? Введите целое число "
@@ -456,6 +515,7 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
             audit_task_event(state_db, "selection", detail={"requested": requested, "accepted": 0})
             return WizardReply("Новых задач добавлено: 0. Выбранные позиции уже "
                                "заняты или ждут завершения фотоагента. Статус: /excel")
+        _apply_splithub_mode(excel_store, rows)
         n_override = 0
         if photo is not None:
             try:
@@ -550,7 +610,8 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
             if action == "categories" or action.startswith(("cat:", "catpage:", "treepage:", "catitems:")):
                 return _source_prompt(chat_id)
             return WizardReply("❌ нет активного диалога — начните /task")
-        category_action = action.startswith(("cat:", "catitems:", "catpage:", "treepage:"))
+        category_action = action.startswith(("cat:", "catitems:", "catpage:", "treepage:",
+                                              "shg:", "shb:", "shbrandpage:"))
         if category_action and st.source_slot:
             parts = action.split(":")
             if len(parts) < 3 or parts[1] != _category_key(st.source_slot):
@@ -576,6 +637,31 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
             except ValueError:
                 page = 0
             return _category_prompt(chat_id, page, node_id)
+        if action.startswith(("shg:", "shbrandpage:", "shb:")):
+            if st.source_slot != splithub_catalog.SLOT:
+                return WizardReply("Меню другого поставщика устарело. Выберите поставщика заново.",
+                                   _source_keyboard(prices_dir))
+            if action.startswith("shg:"):
+                return _splithub_brand_reply(chat_id, action.split(":", 1)[1])
+            if action.startswith("shbrandpage:"):
+                _, group, raw_page = action.split(":", 2)
+                try:
+                    page = int(raw_page)
+                except ValueError:
+                    page = 0
+                return _splithub_brand_reply(chat_id, group, page)
+            _, group, key = action.split(":", 2)
+            if group not in splithub_catalog.GROUP_BUTTONS:
+                return WizardReply("Группа устарела. Выберите заново.",
+                                   _category_keyboard(prices_dir, source_slot=st.source_slot))
+            section = (splithub_catalog.group_section(group) if key == "all" else
+                       next((section for section, _, _ in splithub_catalog.brand_menu(prices_dir, group)
+                             if _category_key(section) == key), None))
+            if section is None:
+                return WizardReply("Бренд устарел (остатки обновились). Выберите заново.",
+                                   _category_keyboard(prices_dir, source_slot=st.source_slot))
+            store.start(chat_id, source_slot=st.source_slot)
+            return _autolist(chat_id, section)
         if action.startswith(("cat:", "catitems:")):
             items, nodes = _catalog(prices_dir, st.source_slot)
             key = action.split(":", 1)[1]

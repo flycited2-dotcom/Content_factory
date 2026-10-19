@@ -19,7 +19,8 @@ import httpx
 from decouple import config
 
 from content_factory.config import load_config
-from content_factory.ingest.aru_details import load_aru_details, make_aru_prepare
+from content_factory.ingest.aru_details import (
+    load_aru_details, load_aru_research_models, make_aru_prepare)
 from content_factory.orchestrator.excel_pipeline import ExcelStore, tick
 from content_factory.orchestrator.confirm_store import ConfirmStore
 from content_factory.orchestrator.card_submit import (
@@ -221,34 +222,129 @@ def telegram_starting_items(store: ExcelStore, global_enabled: bool) -> list[dic
             if not item["key"].startswith("ready-price|")]
 
 
+# Причины ошибок для владельца: (подстрока в нижнем регистре, причина, совет).
+# Порядок важен — первое совпадение. Тексты ошибок приходят от фотоагента как есть.
+_FAILURE_HINTS = (
+    ("401 unauthorized", "сайт-источник ограничил доступ (401 Unauthorized)",
+     "Обычный браузер может открывать страницу, а автоматический запрос — получать отказ. "
+     "Повтор может найти другой источник."),
+    ("403 forbidden", "сайт-источник не пустил робота (403 Forbidden)",
+     "Это защита сайта от роботов, а не обрыв интернета: обычный браузер страницу "
+     "открывает, а запрос поиска получает отказ. Повтор может не помочь."),
+    ("429", "лимит запросов (слишком частые обращения)",
+     "Обычно временно — повтор через несколько минут уместен."),
+    ("слишком много запросов", "лимит запросов ChatGPT",
+     "Обычно временно — повтор через несколько минут уместен."),
+    ("does not contain exact model", "на найденной странице нет точной модели",
+     "Страница найдена, но точной модели в её тексте нет (возможно, модель записана "
+     "иначе: латиница/кириллица, пробелы, дефисы). Повтор может найти другую страницу."),
+    ("no verified exact-model evidence", "не найден подтверждённый источник точной модели",
+     "Повтор может найти другую страницу товара."),
+    ("без проверяемого источника", "не найден подтверждённый источник точной модели",
+     "Повтор может найти другую страницу товара."),
+    ("timeout", "истекло время ожидания страницы или ChatGPT",
+     "Обычно временный сбой — повтор уместен."),
+    ("photo url is not an image", "по ссылке на фото оказалась не картинка",
+     "Повтор может найти другое фото."),
+    ("photo resolution is below", "найденное фото слишком маленькое",
+     "Нужен оригинал фото с размером не меньше 400 пикселей по каждой стороне. "
+     "Повтор может найти другое фото."),
+    ("source has no model-bound product photo", "на странице не найдено фото этой модели",
+     "Повтор может найти другой источник с исходным фото товара."),
+    ("без доступного фото", "поиск завершился, но файла с фото нет",
+     "Повтор запустит поиск заново."),
+    ("без фото", "поиск завершился, но файла с фото нет",
+     "Повтор запустит поиск заново."),
+    ("card audit", "карточка не прошла проверку текста на изображении",
+     "Повтор нарисует карточку заново."),
+)
+_URL_RE = re.compile(r"https?://[^\s'\"<>]+")
+
+
+def describe_failure(error: str) -> tuple[str, str, str | None]:
+    """Ошибка этапа конвейера → (причина, совет, ссылка со страницы-источника)."""
+    clean = (error or "ошибка").splitlines()[0].strip()
+    while clean.startswith("research: research:"):     # агент уже пишет «research: …»
+        clean = clean[len("research: "):]
+    url = _URL_RE.search(clean)
+    low = _URL_RE.sub("", clean).casefold()           # цифры из ссылки не должны влиять
+    for needle, cause, advice in _FAILURE_HINTS:
+        if needle in low:
+            return cause, advice, url.group(0) if url else None
+    return f"ошибка этапа: {clean[:200]}", "Повтор запустит этап заново.", \
+        url.group(0) if url else None
+
+
+def _short_name(name: str, limit: int = 120) -> str:
+    """Название из прайса бывает длиннее строки; режем по слову, а не посреди слова."""
+    name = " ".join((name or "").split())
+    if len(name) <= limit:
+        return name
+    cut = name[:limit]
+    if " " in cut[limit // 2:]:
+        cut = cut.rsplit(" ", 1)[0]
+    return cut.rstrip(" ,;(") + "…"
+
+
+def failure_markup(code: str, error: str) -> str:
+    """Кнопка под алертом: повтор нужного этапа (callback exretry:<код> разбирает cf-bot)."""
+    card_stage = (error or "").casefold().startswith("card")
+    label = "🎨 Собрать карточку заново" if card_stage else "🔎 Искать заново"
+    return json.dumps({"inline_keyboard": [[
+        {"text": label, "callback_data": f"exretry:{code}"}]]}, ensure_ascii=False)
+
+
 def notify_new_failures(state_db, events: list[tuple[str, str, str]],
-                        token: str, owner_chat: str, http=None) -> int:
-    """Send one alert per item and error type, including across retry cycles."""
+                        token: str, owner_chat: str, http=None, limit: int = 8) -> int:
+    """Одно сообщение на позицию: причина, совет и кнопка повтора. Тот же сбой одной
+    позиции не повторяем, пока владелец не нажал повтор (кнопка/«/excel retry» сбрасывает
+    память). За тик — не больше limit сообщений; неотправленные придут на следующем."""
     if not events or not token or not owner_chat:
         return 0
+    links = OrderLinks(state_db)
+    sent = 0
     with sqlite3.connect(state_db, timeout=30) as db:
         db.execute("CREATE TABLE IF NOT EXISTS excel_failure_notifications ("
                    "item_key TEXT NOT NULL, error_type TEXT NOT NULL, notified_at REAL NOT NULL, "
                    "PRIMARY KEY(item_key,error_type))")
-        fresh = []
         for key, name, error in events:
+            if sent >= limit:
+                break
             error_type = (error or "ошибка").splitlines()[0].strip()
             # Playwright's changing call log is diagnostic detail, not a new failure.
             error_type = re.sub(r"Timeout \d+ms exceeded", "Timeout exceeded", error_type)
             if db.execute("SELECT 1 FROM excel_failure_notifications "
                           "WHERE item_key=? AND error_type=?", (key, error_type)).fetchone():
                 continue
-            fresh.append((key, name, error_type))
-        if not fresh:
-            return 0
-        lines = [f"— {name[:80]}: {reason}" for _, name, reason in fresh]
-        message = f"❌ Новые ошибки конвейера прайса ({len(fresh)}):\n" + "\n".join(lines)
-        if not send_message(token, owner_chat, message, http=http):
-            return 0
-        db.executemany("INSERT OR IGNORE INTO excel_failure_notifications "
+            cause, advice, url = describe_failure(error_type)
+            lines = [f"❌ {_short_name(name)}", f"Причина: {cause}.", advice]
+            if url:
+                lines.append(f"Страница: {url}")
+            if not send_message(token, owner_chat, "\n".join(lines), http=http,
+                                reply_markup=failure_markup(links.code_for(key), error_type)):
+                break                       # Telegram недоступен — не долбим, повторим на тике
+            db.execute("INSERT OR IGNORE INTO excel_failure_notifications "
                        "(item_key,error_type,notified_at) VALUES(?,?,?)",
-                       ((key, reason, time.time()) for key, _, reason in fresh))
-        return len(fresh)
+                       (key, error_type, time.time()))
+            db.commit()
+            sent += 1
+    return sent
+
+
+def research_model_for_item(item, aru_models: dict) -> str | None:
+    """Модель для сверки research (агент требует её буквально на странице-источнике).
+    АРУ — артикул производителя из снимка; остальные — единственный код из названия
+    («Мотоблок бензиновый РЫСЬ МБР 7-10ПРО» → «МБР 7-10ПРО»). Резьба и размеры («G1/4»,
+    «M8») — не модель. Нет однозначного кода — None: research получит модель как раньше.
+    Поле model позиции (текст карточки) не меняется."""
+    article = aru_models.get(item.key)
+    if article:
+        return article
+    from content_factory.ingest.excel_price import research_model
+    code = research_model(item.model or "")
+    if code and code != item.model and not re.fullmatch(r"[GgMmRr]\d+(?:[/.,]\d+)?", code):
+        return code
+    return None
 
 
 def main():
@@ -344,6 +440,14 @@ def main():
     except (OSError, ValueError, KeyError):
         aru_details = {}             # битый снимок АРУ не должен останавливать остальных
     aru_prepare = make_aru_prepare(store, aru_details, prices_dir / "aru-photos", _fetch)
+    try:                             # research у АРУ сверяет артикул, а не хвост названия
+        aru_research_models = load_aru_research_models(prices_dir)
+    except (OSError, ValueError, KeyError):
+        aru_research_models = {}
+    # «не жечь токены повторно»: уже сгенерированное берём из архива (владелец 2026-10-13)
+    from content_factory.archive_reuse import ArchiveReuse
+    archive_reuse = ArchiveReuse(cfg.state.db, queue_db, output_dir,
+                                 Path(config("ARCHIVE_DIR", "archive")))
 
     def _alert(text):
         if token and owner_chat:
@@ -383,7 +487,11 @@ def main():
         manual_keys = {key for key in store.all_keys() if not key.startswith("ready-price|")}
         manual_stats = tick(store, submit_research, read_job, submit_card, preview,
                             allowed_keys=manual_keys, failed_events=failed_events,
-                            resolve_photo=resolve_photo, prepare=aru_prepare)
+                            resolve_photo=resolve_photo, prepare=aru_prepare,
+                            research_model_for=lambda item: research_model_for_item(
+                                item, aru_research_models),
+                            reuse_card=archive_reuse.card_for,
+                            find_cached=archive_reuse.cached_for)
         for key in stats:
             stats[key] += manual_stats[key]
     if source_enabled:
@@ -412,8 +520,11 @@ def main():
                + (f", не дошло {failed} (см. /excel)" if failed else "") + ".")
     sync_text = (f" | sync {sync_result} | archive {archive_result} | restore {restore_result}"
                  if sync_result is not None else "")
+    reuse_text = (f" | ♻️ из архива: карточек {manual_stats.get('reused_card', 0)}, "
+                  f"фото {manual_stats.get('reused_photo', 0)}"
+                  if manual_stats.get('reused_card') or manual_stats.get('reused_photo') else "")
     print(f"excel: research {stats['research']} | card {stats['card']} | "
-          f"preview {stats['preview']} | failed {stats['failed']}{sync_text}")
+          f"preview {stats['preview']} | failed {stats['failed']}{reuse_text}{sync_text}")
 
 
 if __name__ == "__main__":

@@ -158,3 +158,29 @@ def make_aru_prepare(store, details: dict, photos_dir, fetch: Callable[[str], by
             "supplier_updated_at": detail.supplier_updated_at})
 
     return prepare
+
+
+def research_article(article: str) -> str | None:
+    """Артикул производителя для сверки research: «KDQF32(TYPE BM)» → «KDQF32».
+    Без букв или цифр (внутренние коды, «71470») — не артикул: None."""
+    clean = re.sub(r"\([^)]*\)", "", article or "").strip()
+    if (re.search(r"[A-Za-zА-Яа-яЁё]", clean) and re.search(r"\d", clean)
+            and len(re.sub(r"\W", "", clean)) >= 3):
+        return clean
+    return None
+
+
+def load_aru_research_models(prices_dir) -> dict[str, str]:
+    """Ключ позиции excel|aru:<id> → артикул для research. Research требует, чтобы
+    страница-источник буквально содержала модель; хвост названия («Воздуходувка
+    аккумуляторная DCK KDQF32», «RED») на сайте производителя не встречается —
+    верные страницы отклонялись (2026-10-11). Текст карточки (model) не меняем."""
+    data = read_snapshot(Path(prices_dir))
+    if data is None:
+        return {}
+    out = {}
+    for r in data["items"]:
+        article = research_article(str(r.get("article") or ""))
+        if article:
+            out[f"excel|aru:{r['id']}"] = article
+    return out
