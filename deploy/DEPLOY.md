@@ -2,7 +2,9 @@
 
 Сервер: тот же VPS, что фотоагент (ritualb2b на `127.0.0.1:8765`); переезд 2026-07-19 —
 старый 213.109.202.45 выключен (сервисы там disabled, не чинить).
-Целевой каталог: `/opt/content-factory`. SSH: `ssh -i ~/.ssh/id_ritualb2b_claude root@212.116.115.150`.
+Целевой каталог: `/opt/content-factory`. SSH: `ssh sprintbox-itp` (алиас в ~/.ssh/config: порт 2222, ключ id_ritualb2b_admin).
+**Деплой — только из этого репозитория** (ветка consolidate/server-truth-2026-10 → master). Остальные копии
+(GitHub/Content_factory, Codex/content-factory, Codex/1st_content_TG_VK_YT_INSTA_autoload) — архив.
 Деструктив/внешнее (systemd, реальная отправка в канал) — с подтверждения владельца.
 
 ## 0. Предпосылки
