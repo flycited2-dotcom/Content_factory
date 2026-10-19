@@ -1,0 +1,39 @@
+# Выполняется ВНУТРИ контейнера сайта: docker exec -i oasis-web-1 python manage.py shell < этот_файл
+# Только чтение: ничего не пишет в базу. Результат — один JSON между маркерами в stdout.
+import json
+
+from apps.catalog.models import Product
+
+queryset = (
+    Product.objects.filter(is_active=True, stock__quantity__gt=0)
+    .select_related("category", "brand", "stock")
+    .prefetch_related("images", "tech_values__spec")
+)
+rows = []
+for product in queryset:
+    images = [image.url for image in sorted(product.images.all(), key=lambda image: image.order)]
+    price = product.ric or product.price_wholesale
+    if not images or not price:
+        continue
+    specs = {}
+    for value in product.tech_values.all():
+        # Единица измерения хранится отдельно у характеристики: без неё «1196» — не факт.
+        unit = (value.spec.unit or "").strip()
+        specs[value.spec.title] = f"{value.value} {unit}".strip()
+    rows.append({
+        "offer_id": f"{product.source}:{product.nc_code}",
+        "slug": product.slug,
+        "title": product.title,
+        "price": int(price),
+        "category": product.category.title if product.category else "",
+        "brand": product.brand.title if product.brand else "",
+        "description": product.description,
+        "picture": images[0],
+        "pictures": images[:4],
+        "specs": specs,
+        "is_heat_pump": bool(product.is_heat_pump),
+        "heating_min_temp": product.heating_min_temp,
+        "quantity": product.stock.quantity,
+        "warehouse": product.stock.warehouse,
+    })
+print("@@CATALOG_JSON@@" + json.dumps(rows, ensure_ascii=False) + "@@END@@")

@@ -1,0 +1,18 @@
+[Unit]
+Description=Content Factory: VK 14-day planner and review dispatcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/content-factory-vk
+EnvironmentFile=/opt/content-factory/.env
+EnvironmentFile=/opt/content-factory-vk/.env
+Environment=PYTHONPATH=src
+Environment=VK_PLAN_STATE_DB=/opt/content-factory-vk/state/vk-plan.db
+# Безопасное значение по умолчанию задаёт приложение. На сервере live-режим
+# включается через VK_PLAN_PUBLISH=1 в .env только после успешного dry-run.
+ExecStart=/opt/content-factory/.venv/bin/python -m content_factory.orchestrator.vk_content_plan
+
+[Install]
+WantedBy=multi-user.target

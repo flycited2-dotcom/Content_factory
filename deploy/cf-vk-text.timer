@@ -1,0 +1,11 @@
+[Unit]
+Description=Publish one reviewed climate text post to VK daily
+
+[Timer]
+OnCalendar=*-*-* 10:15:00
+RandomizedDelaySec=15m
+Persistent=true
+Unit=cf-vk-text.service
+
+[Install]
+WantedBy=timers.target
