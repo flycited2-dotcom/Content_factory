@@ -64,7 +64,7 @@ drop-in'ы cf-vk-plan.service.d/live.conf и cf-vk-plan.timer.d/interval.conf; c
 До: 857 passed. После: 848 passed, 9 failed.
 
 ### Тесты, расходящиеся с продом (код прода новее тестов, тесты не правились)
-- 7 тестов (`test_excel_cache_recovery.py`, `test_excel_cancel_reselect.py`, `test_bot_run.py::test_excel_fn_truncates_multiline_errors_and_separates_sections` — частично):
+- 7 тестов (3 в `test_excel_cache_recovery.py`, 4 в `test_excel_cancel_reselect.py`):
   конвейер прода возвращает новые счётчики `reused_card`, `reused_photo` (повторное использование карточек из архива, `archive_reuse.py`).
 - `test_excel_pipeline.py::test_failure_notification_deduplicates_retry_and_excludes_old_items`: прод передаёт `reply_markup` в уведомление об ошибке.
 - `test_bot_run.py::test_excel_fn_truncates_multiline_errors_and_separates_sections`: изменён формат обрезки текста ошибки.
