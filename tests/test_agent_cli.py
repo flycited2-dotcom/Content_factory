@@ -183,3 +183,15 @@ def test_cancel_reports_items_that_could_not_be_cancelled(env, capsys):
     _, out = _run(capsys, ["cancel", "--keys", ",".join(enq["accepted"]), *base])
     assert out["cancelled"] == 1
     assert out["not_cancelled"] == [{"key": enq["accepted"][0], "status": "preview"}]
+
+
+def test_cancel_reports_preview_already_rejected(env, capsys):
+    from content_factory.orchestrator.confirm_store import ConfirmStore
+    state, base = env
+    _, enq = _run(capsys, ["enqueue", "--category", "холодильники", *base])
+    key = enq["accepted"][0]
+    ExcelStore(state).update(key, status="preview")
+    ConfirmStore(state).add(key, "tg", "card.png", "caption")
+    ConfirmStore(state).mark(key, "rejected")                            # владелец уже нажал ❌
+    _, out = _run(capsys, ["cancel", "--keys", key, *base])
+    assert out["not_cancelled"] == [{"key": key, "status": "rejected"}]

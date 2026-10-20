@@ -154,6 +154,7 @@ def cmd_enqueue(args):
 
 def cmd_cancel(args):
     from content_factory.bot.run import make_cancel_excel_fn
+    from content_factory.orchestrator.confirm_store import ConfirmStore
     from content_factory.orchestrator.excel_pipeline import ExcelStore
     state_db, _, queue_db = _paths(args)
     keys = [k for k in (args.keys or "").split(",") if k]
@@ -165,8 +166,17 @@ def cmd_cancel(args):
     texts = [cancel_fn(k) for k in keys]
     after = {k for k in keys if (item := store.get(k)) is not None and item.status == "cancelled"}
     cancelled = before & after
-    not_cancelled = [{"key": k, "status": (store.get(k).status if store.get(k) else "missing")}
-                     for k in keys if k not in cancelled]
+    awaiting = ConfirmStore(state_db)
+
+    def _status(k):
+        item = store.get(k)
+        if item is None:
+            return "missing"
+        decided = awaiting.get(k) if item.status == "preview" else None
+        # превью, по которому владелец уже нажал ❌/✅, — не «ждёт решения»
+        return decided.status if decided and decided.status in ("rejected", "published") else item.status
+
+    not_cancelled = [{"key": k, "status": _status(k)} for k in keys if k not in cancelled]
     return {"cancelled": len(cancelled), "not_cancelled": not_cancelled, "text": "\n".join(t for t in texts if t)}
 
 
