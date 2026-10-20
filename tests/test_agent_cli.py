@@ -104,3 +104,10 @@ def test_brand_all_quota_limits_to_that_brand(env, capsys):
     _, out = _run(capsys, ["resolve", "--category", "холодильники", "--quotas", '{"beko": null}', *base])
     assert [i["key"] for i in out["items"]] == ["excel|beko|x100"]
     assert out["total_matches"] == 1
+
+
+def test_mixed_quotas_keep_numbered_brand_and_all_of_null_brand(env, capsys):
+    # «1 Candy и все Beko» → {"candy": 1, "beko": null}: обе марки, без добора чужих
+    _, base = env
+    _, out = _run(capsys, ["resolve", "--category", "холодильники", "--quotas", '{"candy": 1, "beko": null}', *base])
+    assert sorted(i["key"] for i in out["items"]) == ["excel|beko|x100", "excel|candy|y200"]

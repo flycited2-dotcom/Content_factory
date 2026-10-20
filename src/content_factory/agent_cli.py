@@ -82,9 +82,12 @@ def _select(args, state_db, prices_dir, queue_db):
     quotas = _quotas(args.quotas)
     brand_all = [b for b, n in quotas.items() if n is None and b != "*"]
     if brand_all and "*" not in quotas:
+        # «все позиции бренда»: бренды с null — явные квоты «без предела», числовые квоты
+        # сохраняются, добора чужими брендами нет
+        named = [b for b in quotas if b != "*"]
         labelled = [(label, i) for label, i in labelled
-                    if any(b in f"{i.brand} {i.name}".lower() for b in brand_all)]
-        quotas = {}
+                    if any(b in f"{i.brand} {i.name}".lower() for b in named)]
+        quotas = {b: (_ALL if n is None else n) for b, n in quotas.items()}
     items = [i for _, i in labelled]
     source_of = {id(i): label for label, i in labelled}
     taken = _taken(state_db, queue_db)
