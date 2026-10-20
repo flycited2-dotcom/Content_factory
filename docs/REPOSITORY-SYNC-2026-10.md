@@ -70,10 +70,17 @@ drop-in'ы cf-vk-plan.service.d/live.conf и cf-vk-plan.timer.d/interval.conf; c
 - `test_bot_run.py::test_excel_fn_truncates_multiline_errors_and_separates_sections`: изменён формат обрезки текста ошибки.
 Решение (обновить тесты под прод) — за владельцем.
 
-## Открытый вопрос: вторая копия кода в проде
-`/opt/content-factory-vk` — отдельное развёртывание (по составу совпадает с репозиторием Codex/1st_content_TG_VK_YT_INSTA_autoload,
-21 файл отличается от него; с /opt/content-factory различаются 20 общих файлов). Обслуживает ВК-планер. В этот репозиторий не сливалось —
-ждёт решения владельца, какая версия ВК-модулей правильная.
+## Вторая копия кода в проде — решено 2026-10-20 (владелец: «по последним наработкам»)
+`/opt/content-factory-vk` — старая копия (репозиторий Codex/1st_content_TG_VK_YT_INSTA_autoload). ВК-юниты (`cf-vk-*`) запускаются с
+`WorkingDirectory=/opt/content-factory-vk` и `PYTHONPATH=src`, то есть выполняют её код, на питоне из `/opt/content-factory/.venv`.
+- ВК-модули (vk_content_plan, agents/editorial, publish/vk*, analytics/vk, storefront) в ней совпадают с этим репозиторием.
+- Общие модули в ней старее (даты июль — 1 октября против коммитов до 19–20 октября): `publish/telegram.py`, `config.py`,
+  `publish/orders.py`, `orchestrator/confirm_store.py`, `cards_pipeline.py` и др. — ВК-планер работает со старым Telegram-клиентом.
+- Переносить из неё нечего: последние наработки — здесь.
+
+**Следующий шаг (на сервере, только с подтверждения владельца):** перевести `cf-vk-*` на `WorkingDirectory=/opt/content-factory`,
+оставив абсолютные пути состояния (`VK_PLAN_STATE_DB`, `VK_CAPABILITY_STATE`, …). Перед этим проверить относительные пути в
+`/opt/content-factory-vk/.env` (например, хранилище VK-токенов) — после смены рабочей папки они указывали бы в другое место.
 
 ## Исправление после ревью (2026-10-20)
 `cf-cards`, `cf-channel-sync`, `cf-scheduler.service` в репозитории запускали `update_db_host.sh` напрямую, а в git у скрипта не было
