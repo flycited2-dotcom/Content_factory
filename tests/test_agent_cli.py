@@ -174,3 +174,12 @@ def test_enqueue_wakes_agents_without_overriding_stop(env, capsys, tmp_path, mon
         flags = dict(db.execute("SELECT key, value FROM flags"))
     assert flags["agent_command_laptop"] == "stop"                           # ручной стоп не перебит
     assert flags["agent_command"] == "wake" and flags["agent_command_desktop"] == "wake"
+
+
+def test_cancel_reports_items_that_could_not_be_cancelled(env, capsys):
+    state, base = env
+    _, enq = _run(capsys, ["enqueue", "--category", "холодильники", *base])
+    ExcelStore(state).update(enq["accepted"][0], status="preview")       # уже на превью — отменять поздно
+    _, out = _run(capsys, ["cancel", "--keys", ",".join(enq["accepted"]), *base])
+    assert out["cancelled"] == 1
+    assert out["not_cancelled"] == [{"key": enq["accepted"][0], "status": "preview"}]

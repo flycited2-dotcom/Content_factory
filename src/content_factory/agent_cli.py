@@ -164,7 +164,10 @@ def cmd_cancel(args):
     cancel_fn = make_cancel_excel_fn(state_db, queue_db)
     texts = [cancel_fn(k) for k in keys]
     after = {k for k in keys if (item := store.get(k)) is not None and item.status == "cancelled"}
-    return {"cancelled": len(before & after), "text": "\n".join(t for t in texts if t)}
+    cancelled = before & after
+    not_cancelled = [{"key": k, "status": (store.get(k).status if store.get(k) else "missing")}
+                     for k in keys if k not in cancelled]
+    return {"cancelled": len(cancelled), "not_cancelled": not_cancelled, "text": "\n".join(t for t in texts if t)}
 
 
 def cmd_status(args):
