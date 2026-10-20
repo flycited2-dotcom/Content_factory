@@ -367,9 +367,35 @@ def item_key(item: PriceItem) -> str:
 
 
 def item_is_taken(item: PriceItem, taken: set) -> bool:
-    """Historical model-based tasks still block variants; new IDs block one SKU."""
-    return item_key(item) in taken or (bool(item.supplier_product_id)
-                                     and legacy_item_key(item) in taken)
+    """Historical model-based tasks still block variants; new IDs block one SKU.
+
+    Один товар в прайсе с колонкой бренда и без неё даёт разные ключи
+    (excel|indesit|ds 3180 g и excel|холодильник indesit ds 3180 g): сверяем и
+    «бренд модель» с хвостом наименования (грабля 2026-10-20: повторные превью
+    уже опубликованных Indesit)."""
+    if item_key(item) in taken or (bool(item.supplier_product_id)
+                                   and legacy_item_key(item) in taken):
+        return True
+    tokens = re.sub(r"\s+", " ", _PAREN_RE.sub("", item.name)).strip().lower().split(" ")
+    if f"excel|{' '.join(tokens)}" in taken:
+        return True
+    tails = _brand_model_tails(taken)
+    return any(" ".join(tokens[i:]) in tails for i in range(len(tokens)))
+
+
+_TAILS_CACHE: list = [None, -1, frozenset()]
+
+
+def _brand_model_tails(taken: set) -> frozenset:
+    """«бренд модель» из ключей excel|<бренд>|<модель>; кэш на один и тот же набор."""
+    if _TAILS_CACHE[0] is not taken or _TAILS_CACHE[1] != len(taken):
+        tails = set()
+        for key in taken:
+            parts = str(key).split("|")
+            if len(parts) == 3 and parts[0] == "excel" and parts[1] and parts[2]:
+                tails.add(re.sub(r"\s+", " ", f"{parts[1]} {parts[2]}").strip())
+        _TAILS_CACHE[:] = [taken, len(taken), frozenset(tails)]
+    return _TAILS_CACHE[2]
 
 
 def legacy_item_key(item: PriceItem) -> str:
@@ -490,7 +516,7 @@ def search_items(items: list[PriceItem], phrase: str, taken: set,
     # точное имя раздела (кнопка категории в /task) — берём раздел целиком: нечёткий
     # поиск по основам путал «инверторные» с «неинверторные» и терял «on/off»
     exact = [i for i in items if (i.section or "").strip().lower() == phrase.strip().lower()
-             and item_key(i) not in taken]
+             and not item_is_taken(i, taken)]
     if exact:
         return list({item_key(i): i for i in reversed(exact)}.values())[::-1][:limit]
     scored = [(match_phrase(i, phrase, aliases), i) for i in items]

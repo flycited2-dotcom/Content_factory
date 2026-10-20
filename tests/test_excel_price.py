@@ -497,3 +497,22 @@ def test_freezer_chest_alias_matches_kamera():
     aliases = {"камер": ["камера", "ларь"]}   # ключ — стем (как load_search_aliases)
     got = search_items(items, "морозильные камеры", set(), limit=10, aliases=aliases)
     assert [i.name for i in got] == ["Морозильный ларь Hyundai CH1002"]
+
+
+def test_brandless_price_item_is_taken_by_branded_key_and_back():
+    # грабля 2026-10-20: прайс без колонки бренда дал новый ключ уже опубликованным Indesit
+    from content_factory.ingest.excel_price import item_is_taken
+    brandless = PriceItem("Холодильники", "1", "", "Холодильник Indesit DS 3180 G (185*60*64 сереб)", 28600)
+    branded = PriceItem("Холодильники", "1", "Indesit", "Холодильник Indesit DS 3180 G (185*60*64 сереб)", 28600)
+    assert item_is_taken(brandless, {"excel|indesit|ds 3180 g"})
+    assert item_is_taken(branded, {"excel|холодильник indesit ds 3180 g"})
+    # другая модификация не блокируется: модель — хвост наименования целиком
+    assert not item_is_taken(brandless, {"excel|indesit|ds 3180"})
+    assert not item_is_taken(brandless, {"excel|indesit|ds 3180 w"})
+
+
+def test_section_search_skips_brandless_duplicates_of_published():
+    items = [PriceItem("Холодильники", "1", "", "Холодильник Indesit DS 3180 G (185*60*64)", 1),
+             PriceItem("Холодильники", "2", "", "Холодильник Beko X100", 2)]
+    found = search_items(items, "Холодильники", {"excel|indesit|ds 3180 g"})
+    assert [i.name for i in found] == ["Холодильник Beko X100"]
