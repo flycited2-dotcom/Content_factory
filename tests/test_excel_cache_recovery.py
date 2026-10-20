@@ -49,7 +49,7 @@ def test_missing_cached_photo_researches_only_that_item_and_processes_other_five
     stats = tick(store, research, _pending, card, _forbidden, resolve_photo=resolve)
     assert calls["research"] == [("WM1", old_research_key)]
     assert calls["card"] == [f"WM{i}" for i in range(2, 7)]
-    assert stats == {"research": 1, "card": 5, "preview": 0, "failed": 0}
+    assert stats == {"research": 1, "card": 5, "preview": 0, "failed": 0, "reused_card": 0, "reused_photo": 0}
     assert store.get(key).status == "research"
     with sqlite3.connect(store.path) as c:
         assert c.execute("SELECT research_request_key,card_request_key FROM excel_items WHERE key=?",
@@ -225,7 +225,7 @@ def test_owner_cancellation_wins_over_preview_success_or_audit_retry(tmp_path, a
 
     stats = tick(store, _forbidden, lambda job_id: ("done", "finished.png", None, None),
                  _forbidden, stop_during_preview)
-    assert stats == {"research": 0, "card": 0, "preview": 0, "failed": 0}
+    assert stats == {"research": 0, "card": 0, "preview": 0, "failed": 0, "reused_card": 0, "reused_photo": 0}
     assert store.get(key).status == "cancelled" and store.get(key).card_job == 200
     with sqlite3.connect(store.path) as c:
         assert c.execute("SELECT card_request_key FROM excel_items WHERE key=?",

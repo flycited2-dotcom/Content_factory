@@ -283,7 +283,7 @@ def test_excel_fn_truncates_multiline_errors_and_separates_sections(tmp_path):
     text = excel_fn()
 
     assert "Call log" not in text                  # простыня ошибки обрезана
-    assert "Timeout 20000ms" in text               # суть ошибки осталась
+    assert "истекло время ожидания" in text        # суть ошибки осталась (на сервере — человеческим текстом)
     assert "─" in text or "—" in text or "━" in text   # есть разделители секций
 
 

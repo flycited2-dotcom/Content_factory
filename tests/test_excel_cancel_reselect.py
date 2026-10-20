@@ -160,7 +160,7 @@ def test_photo_reservation_is_claimed_once_and_never_falls_through_to_research(t
         raise AssertionError("A reserved or uncertain submission must not generate anything.")
 
     assert tick(store, unexpected, unexpected, unexpected, unexpected) == {
-        "research": 0, "card": 0, "preview": 0, "failed": 0}
+        "research": 0, "card": 0, "preview": 0, "failed": 0, "reused_card": 0, "reused_photo": 0}
     store.update(row[0], status="submission_failed", error="network outcome unknown")
     assert row[0] in store.selection_blocked_keys()
     assert store.retry_failed() == 0
@@ -259,7 +259,7 @@ def test_cancellation_during_paid_submit_keeps_item_cancelled_and_retains_return
                  forbidden)
 
     assert len(calls) == 1
-    assert stats == {"research": 0, "card": 0, "preview": 0, "failed": 0}
+    assert stats == {"research": 0, "card": 0, "preview": 0, "failed": 0, "reused_card": 0, "reused_photo": 0}
     item = store.get(row[0])
     assert item.status == "cancelled"
     if submission == "research":
@@ -274,7 +274,7 @@ def test_cancellation_during_paid_submit_keeps_item_cancelled_and_retains_return
         assert store.cache_get("beko|wm1") == ("existing UTP", "reference.png")
     # Even the next timer pass must not turn the returned paid job into new work.
     assert tick(store, forbidden, forbidden, forbidden, forbidden) == {
-        "research": 0, "card": 0, "preview": 0, "failed": 0}
+        "research": 0, "card": 0, "preview": 0, "failed": 0, "reused_card": 0, "reused_photo": 0}
 
 
 def test_returned_job_cannot_replace_a_newer_request_identity(tmp_path):

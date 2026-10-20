@@ -68,7 +68,7 @@ drop-in'ы cf-vk-plan.service.d/live.conf и cf-vk-plan.timer.d/interval.conf; c
   конвейер прода возвращает новые счётчики `reused_card`, `reused_photo` (повторное использование карточек из архива, `archive_reuse.py`).
 - `test_excel_pipeline.py::test_failure_notification_deduplicates_retry_and_excludes_old_items`: прод передаёт `reply_markup` в уведомление об ошибке.
 - `test_bot_run.py::test_excel_fn_truncates_multiline_errors_and_separates_sections`: изменён формат обрезки текста ошибки.
-Решение (обновить тесты под прод) — за владельцем.
+Решено 2026-10-20 (владелец: «по последним наработкам»): тесты приведены к поведению прода, код не менялся. Итог: 858 passed.
 
 ## Вторая копия кода в проде — решено 2026-10-20 (владелец: «по последним наработкам»)
 `/opt/content-factory-vk` — старая копия (репозиторий Codex/1st_content_TG_VK_YT_INSTA_autoload). ВК-юниты (`cf-vk-*`) запускаются с
