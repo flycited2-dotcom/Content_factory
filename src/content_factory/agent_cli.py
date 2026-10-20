@@ -10,6 +10,8 @@
     python -m content_factory.agent_cli enqueue ...те же... [--due "сегодня 12:00"]
     python -m content_factory.agent_cli cancel --keys k1,k2
     python -m content_factory.agent_cli status [--since UNIX]
+    python -m content_factory.agent_cli workers        # генерация, дорожки фото-агента, команды сторожам
+    python -m content_factory.agent_cli start-workers  # включить генерацию, сторожам 'start', разбудить cf-excel
 
 Квота {"бренд": null} без "*" — «все позиции только этого бренда».
 """
@@ -26,6 +28,8 @@ from pathlib import Path
 from decouple import config
 
 _ALL = 10 ** 9
+LANE_FRESH = 120                     # как в vps_api фото-агента: дорожка жива, если отмечалась за 2 минуты
+AGENT_KEYS = ("agent_command", "agent_command_laptop", "agent_command_desktop")
 
 
 class _InputError(ValueError):
@@ -133,10 +137,16 @@ def cmd_enqueue(args):
     accepted_keys = [row[0] for row in accepted]
     if accepted_keys and not args.no_wake:
         from content_factory.bot import worker_control
+        from content_factory.cards_pipeline import wake_agent
         try:
             worker_control.request_run()
         except Exception:
             pass                                   # таймер конвейера подхватит сам
+        if queue_db:
+            try:
+                wake_agent(queue_db)               # 'wake' поднимает упавшие дорожки, ручной стоп не перебивает
+            except sqlite3.Error:
+                pass
     return {"requested": len(chosen), "accepted": accepted_keys,
             "items": [_item_json(s, i) for s, i in chosen if item_key(i) in set(accepted_keys)],
             "due_at": due_at}
@@ -176,6 +186,60 @@ def cmd_status(args):
     return out
 
 
+def cmd_workers(args):
+    from content_factory.orchestrator.generation import generation_enabled
+    state_db, _, queue_db = _paths(args)
+    now = datetime.now()
+    out = {"generation": generation_enabled(state_db), "lanes": [], "agent_online": False,
+           "last_seen": None, "commands": {}}
+    if queue_db and Path(queue_db).exists():
+        with sqlite3.connect(queue_db, timeout=10) as db:
+            try:
+                rows = db.execute("SELECT lane, seen_at FROM lane_heartbeat ORDER BY lane").fetchall()
+            except sqlite3.OperationalError:
+                rows = []
+            try:
+                out["commands"] = dict(db.execute(
+                    "SELECT key, value FROM flags WHERE key LIKE 'agent_command%'").fetchall())
+            except sqlite3.OperationalError:
+                pass
+        for lane, seen_at in rows:
+            try:
+                ago = (now - datetime.fromisoformat(seen_at)).total_seconds()
+            except (TypeError, ValueError):
+                continue
+            out["lanes"].append({"lane": lane, "seen_at": seen_at, "online": ago <= LANE_FRESH})
+        if out["lanes"]:
+            out["agent_online"] = any(l["online"] for l in out["lanes"])
+            out["last_seen"] = max(l["seen_at"] for l in out["lanes"])
+    try:
+        from content_factory.bot import worker_control
+        out["worker"] = worker_control.status_lines()
+    except Exception:
+        out["worker"] = []
+    return out
+
+
+def cmd_start_workers(args):
+    from content_factory.bot import worker_control
+    from content_factory.orchestrator.generation import set_generation_enabled
+    state_db, _, queue_db = _paths(args)
+    set_generation_enabled(state_db, True)
+    commanded = []
+    if queue_db:
+        with sqlite3.connect(queue_db, timeout=10) as db:
+            db.execute("CREATE TABLE IF NOT EXISTS flags (key TEXT PRIMARY KEY, value TEXT)")
+            for key in AGENT_KEYS:                  # явное решение владельца — 'start' перебивает ручной стоп
+                db.execute("INSERT INTO flags (key, value) VALUES (?, 'start') "
+                           "ON CONFLICT(key) DO UPDATE SET value='start'", (key,))
+                commanded.append(key)
+    try:
+        requested = bool(worker_control.request_run())
+    except Exception:
+        requested = False
+    return {"generation": True, "commanded": commanded, "requested_run": requested}
+
+
 def _parser():
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--state-db")
@@ -200,6 +264,8 @@ def _parser():
     status = sub.add_parser("status", parents=[common])
     status.add_argument("--since", type=float)
     status.set_defaults(fn=cmd_status)
+    sub.add_parser("workers", parents=[common]).set_defaults(fn=cmd_workers)
+    sub.add_parser("start-workers", parents=[common]).set_defaults(fn=cmd_start_workers)
     return parser
 
 

@@ -111,3 +111,66 @@ def test_mixed_quotas_keep_numbered_brand_and_all_of_null_brand(env, capsys):
     _, base = env
     _, out = _run(capsys, ["resolve", "--category", "холодильники", "--quotas", '{"candy": 1, "beko": null}', *base])
     assert sorted(i["key"] for i in out["items"]) == ["excel|beko|x100", "excel|candy|y200"]
+
+
+def _queue(tmp_path, lanes, commands=()):
+    import sqlite3
+    q = tmp_path / "queue.db"
+    with sqlite3.connect(q) as db:
+        db.execute("CREATE TABLE lane_heartbeat (lane TEXT PRIMARY KEY, seen_at TEXT)")
+        db.execute("CREATE TABLE flags (key TEXT PRIMARY KEY, value TEXT)")
+        db.executemany("INSERT INTO lane_heartbeat VALUES (?,?)", lanes)
+        db.executemany("INSERT INTO flags VALUES (?,?)", commands)
+    return q
+
+
+def test_workers_reports_generation_lanes_and_commands(env, capsys, tmp_path):
+    from datetime import timedelta
+    state, base = env
+    now = datetime.now()
+    q = _queue(tmp_path, [("desktop-a1", (now - timedelta(seconds=30)).isoformat()),
+                          ("laptop-a1", (now - timedelta(days=7)).isoformat())], [("agent_command_laptop", "stop")])
+    args = [a if a != "" else str(q) for a in base]                       # --queue-db <queue>
+    code, out = _run(capsys, ["workers", *args])
+    assert code == 0
+    assert out["generation"] is False                                        # без разрешения — выключена
+    assert out["agent_online"] is True
+    lanes = {l["lane"]: l for l in out["lanes"]}
+    assert lanes["desktop-a1"]["online"] is True and lanes["laptop-a1"]["online"] is False
+    assert out["commands"] == {"agent_command_laptop": "stop"}
+
+
+def test_workers_offline_when_no_fresh_heartbeat(env, capsys, tmp_path):
+    from datetime import timedelta
+    _, base = env
+    q = _queue(tmp_path, [("desktop-a1", (datetime.now() - timedelta(hours=14)).isoformat())])
+    _, out = _run(capsys, ["workers", *[a if a != "" else str(q) for a in base]])
+    assert out["agent_online"] is False
+    assert out["last_seen"].startswith((datetime.now() - timedelta(hours=14)).date().isoformat())
+
+
+def test_start_workers_enables_generation_and_commands_start(env, capsys, tmp_path):
+    import sqlite3
+    from content_factory.orchestrator.generation import generation_enabled
+    state, base = env
+    q = _queue(tmp_path, [], [("agent_command", "stop"), ("agent_command_laptop", "stop")])
+    code, out = _run(capsys, ["start-workers", *[a if a != "" else str(q) for a in base]])
+    assert code == 0 and out["generation"] is True
+    assert generation_enabled(state)
+    with sqlite3.connect(q) as db:
+        flags = dict(db.execute("SELECT key, value FROM flags"))
+    assert flags == {"agent_command": "start", "agent_command_laptop": "start", "agent_command_desktop": "start"}
+
+
+def test_enqueue_wakes_agents_without_overriding_stop(env, capsys, tmp_path, monkeypatch):
+    import sqlite3
+    state, base = env
+    q = _queue(tmp_path, [], [("agent_command_laptop", "stop")])
+    args = [a for a in base if a != "--no-wake"]
+    args = [a if a != "" else str(q) for a in args]
+    monkeypatch.setattr("content_factory.bot.worker_control.request_run", lambda: True)
+    _run(capsys, ["enqueue", "--category", "холодильники", *args])
+    with sqlite3.connect(q) as db:
+        flags = dict(db.execute("SELECT key, value FROM flags"))
+    assert flags["agent_command_laptop"] == "stop"                           # ручной стоп не перебит
+    assert flags["agent_command"] == "wake" and flags["agent_command_desktop"] == "wake"
