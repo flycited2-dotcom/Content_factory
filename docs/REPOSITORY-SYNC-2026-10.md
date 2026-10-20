@@ -74,3 +74,8 @@ drop-in'ы cf-vk-plan.service.d/live.conf и cf-vk-plan.timer.d/interval.conf; c
 `/opt/content-factory-vk` — отдельное развёртывание (по составу совпадает с репозиторием Codex/1st_content_TG_VK_YT_INSTA_autoload,
 21 файл отличается от него; с /opt/content-factory различаются 20 общих файлов). Обслуживает ВК-планер. В этот репозиторий не сливалось —
 ждёт решения владельца, какая версия ВК-модулей правильная.
+
+## Исправление после ревью (2026-10-20)
+`cf-cards`, `cf-channel-sync`, `cf-scheduler.service` в репозитории запускали `update_db_host.sh` напрямую, а в git у скрипта не было
+бита исполнения — после `cp deploy/cf-*.service` эти сервисы упали бы. Взяты серверные версии (`ExecStartPre=/bin/sh …`),
+скрипту выставлен +x в git, добавлен тест `tests/test_deploy_units.py`.
