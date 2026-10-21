@@ -375,3 +375,24 @@ def test_resolve_filters_splithub_by_btu_and_frost(env, capsys, tmp_path):
     assert names(out) == ["Кондиционер FUNAI X RAC-I-AK25HP.D01", "Кондиционер FUNAI Y RAC-I-AK35HP.D01"]
     _, out = _run(capsys, [*args, "--btu", "9-12", "--min-temp", "20"])
     assert names(out) == ["Кондиционер FUNAI X RAC-I-AK25HP.D01"]
+
+
+def test_resolve_frost_and_heat_pump_from_profiles(env, capsys):
+    from content_factory.ingest import splithub_catalog
+    from content_factory.ingest.ac_profiles import write_profiles
+    state, base = env
+    prices = Path(base[base.index("--prices-dir") + 1])
+
+    def entry(sku, name):
+        return {"sku": sku, "brand": "DAICHI", "name": name, "price": 40000, "group": "inv",
+                "section": "Кондиционеры инверторные", "sections": ["Кондиционеры инверторные"],
+                "stock": "in_stock", "photo": f"{sku}.webp", "utp": ""}
+
+    items = [entry("d-30", "Кондиционер DAICHI SIBERIA SIB25"), entry("d-15", "Кондиционер DAICHI ALPHA A25")]
+    (prices / splithub_catalog.SNAPSHOT_NAME).write_text(json.dumps({"items": items}, ensure_ascii=False), encoding="utf-8")
+    write_profiles(prices, {"d-30": {"min_temp": 30, "inverter": True, "heat_pump": True, "full_dc": False},
+                            "d-15": {"min_temp": 15, "inverter": True, "heat_pump": False, "full_dc": False}})
+    args = ["resolve", "--category", "кондиционеры", "--source", splithub_catalog.SLOT, *base]
+    assert [i["name"] for i in _run(capsys, [*args, "--min-temp", "25"])[1]["items"]] == ["Кондиционер DAICHI SIBERIA SIB25"]
+    assert len(_run(capsys, [*args, "--heat-pump"])[1]["items"]) == 1
+    assert len(_run(capsys, [*args, "--inverter"])[1]["items"]) == 2

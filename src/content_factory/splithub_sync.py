@@ -98,6 +98,8 @@ def sync_splithome(cfg, prices_dir) -> None:
     try:
         result = splithome_catalog.sync(prices_dir, dsn, cfg.source.warehouse, fetch_breez_base_by_nc())
         print(f"splithome: {result}")
+        from content_factory.ingest import ac_profiles      # мороз/инвертор/тепловой насос для отбора
+        print(f"ac_profiles: {ac_profiles.sync(prices_dir, dsn)}")
     except Exception as exc:                     # noqa: BLE001 — суточный таймер не должен падать
         print(f"splithome: не обновлён — {exc.__class__.__name__}: {exc}")
 

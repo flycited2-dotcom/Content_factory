@@ -116,23 +116,38 @@ def _btu_range(raw):
 
 
 def _spec_filter(labelled, args, prices_dir):
-    """Отбор по мощности и морозостойкости (ac_specs). Нераспознанное под фильтр не попадает."""
+    """Отбор кондиционеров: мощность (ac_specs), мороз на обогрев, инвертор, тепловой насос, Full DC
+    (профили из ТТХ поставщиков — ac_profiles; мороз без профиля — по УТП). Нераспознанное не попадает."""
     btu, frost = getattr(args, "btu", None), getattr(args, "min_temp", None)
-    if not btu and frost is None:
+    inverter, heat_pump, full_dc = (getattr(args, k, False) for k in ("inverter", "heat_pump", "full_dc"))
+    if not btu and frost is None and not (inverter or heat_pump or full_dc):
         return labelled
+    from content_factory.ingest.ac_profiles import read_profiles, text_flags
     from content_factory.ingest.ac_specs import min_outdoor_temp, size_kbtu
     from content_factory.ingest.splithub_catalog import read_snapshot
-    utp = {e["sku"]: e.get("utp") or "" for e in read_snapshot(prices_dir)} if frost is not None else {}
+    profiles = read_profiles(prices_dir)
+    utp = {e["sku"]: e.get("utp") or "" for e in read_snapshot(prices_dir)}
     lo, hi = _btu_range(btu) if btu else (0, 10 ** 6)
     out = []
     for label, item in labelled:
-        size = size_kbtu(item.name, item.article)
-        if btu and (size is None or not lo <= size <= hi):
-            continue
+        profile = profiles.get(item.article, {})
+        if btu:
+            size = size_kbtu(item.name, item.article)
+            if size is None or not lo <= size <= hi:
+                continue
         if frost is not None:
-            temp = min_outdoor_temp(utp.get(item.article, ""))
+            temp = profile.get("min_temp")
+            if temp is None:
+                temp = min_outdoor_temp(utp.get(item.article, ""))
             if temp is None or temp < frost:
                 continue
+        flags = text_flags(f"{item.name}\n{utp.get(item.article, '')}")
+        if inverter and not (profile.get("inverter") or flags["inverter_text"]):
+            continue
+        if heat_pump and not (profile.get("heat_pump") or flags["heat_pump_text"]):
+            continue
+        if full_dc and not (profile.get("full_dc") or flags["full_dc"]):
+            continue
         out.append((label, item))
     return out
 
@@ -590,6 +605,9 @@ def _parser():
     select.add_argument("--source")
     select.add_argument("--btu", help="типоразмер kBTU: 9-12, 9,12 или 12")
     select.add_argument("--min-temp", type=int, help="работает на обогрев при морозе не слабее: 20 = до −20 °С")
+    select.add_argument("--inverter", action="store_true", help="только инверторные")
+    select.add_argument("--heat-pump", action="store_true", help="только с признаком «тепловой насос»")
+    select.add_argument("--full-dc", action="store_true", help="только Full DC")
     parser = argparse.ArgumentParser(prog="agent_cli")
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("hint", parents=[common]).set_defaults(fn=cmd_hint)
