@@ -297,6 +297,10 @@ def load_price_slots(prices_dir, for_telegram: bool = False
     if sh_items:                                            # живой каталог SplitHub
         out.append((splithub_catalog.SLOT,
                     _apply_markup(sh_items, markups.get(splithub_catalog.SLOT, 0))))
+    from content_factory.ingest import splithome_catalog    # весь ассортимент splithome.ru, вход +10%
+    home_items = [] if splithome_catalog.SLOT in off else splithome_catalog.load_items(prices_dir)
+    if home_items:                                          # цена уже оптовая — наценку слота не добавляем
+        out.append((splithome_catalog.SLOT, home_items))
     if 'aru' not in off:
         from content_factory.ingest.aru_account import load_account_items
         aru_items = load_account_items(pdir, markups.get('aru', 10))

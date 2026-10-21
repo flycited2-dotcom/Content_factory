@@ -86,6 +86,20 @@ def main():
     owner = config("TELEGRAM_OWNER_CHAT_ID", config("FOTOGEN_CHAT_ID", ""))
     if token and owner and sc.get("notify", True):
         send_message(token, owner, format_summary(result), http=http)
+    sync_splithome(cfg, state_dir / "prices")
+
+
+def sync_splithome(cfg, prices_dir) -> None:
+    """Весь ассортимент splithome.ru (вход +10%) — тем же суточным таймером; сбой не трогает splithub."""
+    from content_factory.ingest import splithome_catalog
+    from content_factory.ingest.breez import fetch_breez_base_by_nc
+    dsn = {"host": config("DB_HOST", "localhost"), "port": config("DB_PORT", "5432"),
+           "dbname": config("DB_NAME"), "user": config("DB_USER"), "password": config("DB_PASSWORD")}
+    try:
+        result = splithome_catalog.sync(prices_dir, dsn, cfg.source.warehouse, fetch_breez_base_by_nc())
+        print(f"splithome: {result}")
+    except Exception as exc:                     # noqa: BLE001 — суточный таймер не должен падать
+        print(f"splithome: не обновлён — {exc.__class__.__name__}: {exc}")
 
 
 if __name__ == "__main__":
