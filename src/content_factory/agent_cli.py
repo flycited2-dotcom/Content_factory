@@ -462,9 +462,12 @@ def cmd_plan_vk(args):
     return {"ok": True, "plan_id": item_id, "due_at": slot}
 
 
-# ── Единая лента: что ждёт решения владельца, одобрение пачкой, публикация из очереди ──
+# ── Единая лента: что ждёт решения владельца, публикация партиями ──
+# Владелец, 2026-10-21: в Telegram товары уходят ПАРТИЕЙ (задача «холодильники к 12:00» — разом),
+# в ВК — по одному (ВК-план берёт опубликованное и выкладывает по слотам).
 FRESH_HOURS = 72                        # превью не старше 3 суток — цены актуальны, можно пачкой
 STALE_DAYS = 7                          # старше недели — цены устарели, только снять с ожидания
+BATCH_PAUSE = 1.5                       # секунд между постами партии: лимиты Telegram на канал
 
 
 def _review_url() -> str | None:
@@ -488,11 +491,77 @@ def cmd_feed(args):
             "fresh_hours": FRESH_HOURS, "stale_days": STALE_DAYS}
 
 
+def _keys(args) -> list[str]:
+    keys = [k for k in (args.keys or "").split(",") if k]
+    if not keys:
+        raise _InputError("не указаны ключи")
+    return keys
+
+
+def cmd_batch_status(args):
+    """Готова ли партия: сколько карточек ждут ✅ (превью), сколько ещё в работе, сколько вышло."""
+    from content_factory.orchestrator.confirm_store import ConfirmStore
+    from content_factory.orchestrator.excel_pipeline import ExcelStore
+    state_db, _, _ = _paths(args)
+    awaiting, excel = ConfirmStore(state_db), ExcelStore(state_db)
+    out = {"total": 0, "ready": 0, "in_work": 0, "published": 0, "dropped": 0}
+    for key in _keys(args):
+        out["total"] += 1
+        decision = awaiting.get(key)
+        item = excel.get(key)
+        if decision and decision.status == "pending":
+            out["ready"] += 1
+        elif decision and decision.status == "published":
+            out["published"] += 1
+        elif item is not None and item.status in ("new", "research", "card", "submission", "preview"):
+            out["in_work"] += 1                     # preview без записи ожидания — превью ещё отправляется
+        else:
+            out["dropped"] += 1                     # отменено, упало, отклонено, снято
+    return out
+
+
+def _publish_batch(state_db, items) -> dict:
+    """Пачкой — тем же кодом, что кнопка ✅ в группе проверки (подпись, «📩 Заказать»)."""
+    import time as _time
+    from content_factory.bot.run import make_publish_fn
+    from content_factory.config import load_config
+    from content_factory.orchestrator.confirm_store import ConfirmStore
+    from content_factory.publish.orders import OrderLinks
+    from content_factory.publish.telegram import PublishState
+    store, state = ConfirmStore(state_db), PublishState(state_db)
+    cfg = load_config(Path("config/config.yaml"))
+    publish_fn = make_publish_fn(config("TELEGRAM_BOT_TOKEN"), cfg.telegram.parse_mode, state,
+                                 order_bot=cfg.telegram.order_bot, links=OrderLinks(state_db))
+    published, failed = [], []
+    for n, item in enumerate(items):
+        if n:
+            _time.sleep(BATCH_PAUSE)
+        res = publish_fn(item)
+        if res and res.ok:
+            store.mark(item.key, "published")
+            state.mark(item.key, res.message_id, channel=item.channel, caption=item.caption)
+            published.append(item.key)
+        else:
+            failed.append({"key": item.key, "error": getattr(res, "error", "unknown")})
+    return {"published": published, "failed": failed}
+
+
+def cmd_publish_keys(args):
+    """Опубликовать партию: все её карточки, ждущие ✅; остальные ключи пропускаются."""
+    from content_factory.orchestrator.confirm_store import ConfirmStore
+    state_db, _, _ = _paths(args)
+    store = ConfirmStore(state_db)
+    items = [a for k in _keys(args) if (a := store.get(k)) is not None and a.status == "pending"]
+    return _publish_batch(state_db, items)
+
+
 def cmd_approve_fresh(args):
+    """Все свежие превью (не из партий оркестратора) — пачкой сейчас."""
     import time as _time
     from content_factory.orchestrator.confirm_store import ConfirmStore
     state_db, _, _ = _paths(args)
-    return {"queued": ConfirmStore(state_db).queue_fresh(_time.time(), FRESH_HOURS)}
+    since = _time.time() - FRESH_HOURS * 3600
+    return _publish_batch(state_db, [a for a in ConfirmStore(state_db).list_pending() if a.ts >= since])
 
 
 def cmd_expire_stale(args):
@@ -506,34 +575,6 @@ def cmd_vk_approve(args):
     store = _vk_store(args)
     approved = [i.id for i in store.list() if i.status == "review" and store.approve(i.id)]
     return {"approved": len(approved), "ids": approved}
-
-
-def cmd_publish_next(args):
-    """Один пост из очереди — тем же кодом, что кнопка ✅ в канале проверки (подпись, «📩 Заказать»)."""
-    from content_factory.bot.run import make_publish_fn
-    from content_factory.config import load_config
-    from content_factory.orchestrator.confirm_store import ConfirmStore
-    from content_factory.publish.orders import OrderLinks
-    from content_factory.publish.telegram import PublishState
-    state_db, _, _ = _paths(args)
-    store = ConfirmStore(state_db)
-    item = store.next_queued()
-    if item is None:
-        return {"published": None, "left": 0}
-    cfg = load_config(Path("config/config.yaml"))
-    state = PublishState(state_db)
-    publish_fn = make_publish_fn(config("TELEGRAM_BOT_TOKEN"), cfg.telegram.parse_mode, state,
-                                 order_bot=cfg.telegram.order_bot, links=OrderLinks(state_db))
-    res = publish_fn(item)
-    if res and res.ok:
-        store.mark(item.key, "published")
-        state.mark(item.key, res.message_id, channel=item.channel, caption=item.caption)
-    else:
-        store.mark(item.key, "pending")              # не вышло — обратно на ручное решение, очередь не стоит
-    left = store.counts(0, 0, 0)["queued"]
-    return {"published": item.key if res and res.ok else None, "error": None if res and res.ok
-            else getattr(res, "error", "unknown"), "url": _post_url(item.channel, getattr(res, "message_id", None)),
-            "left": left}
 
 
 def _parser():
@@ -573,9 +614,13 @@ def _parser():
     vstatus.add_argument("--job", type=int, required=True)
     vstatus.set_defaults(fn=cmd_visual_status)
     for name, fn in (("feed", cmd_feed), ("approve-fresh", cmd_approve_fresh), ("expire-stale", cmd_expire_stale),
-                     ("vk-approve", cmd_vk_approve), ("publish-next", cmd_publish_next)):
+                     ("vk-approve", cmd_vk_approve)):
         cmd = sub.add_parser(name, parents=[common])
         cmd.add_argument("--vk-root")
+        cmd.set_defaults(fn=fn)
+    for name, fn in (("batch-status", cmd_batch_status), ("publish-keys", cmd_publish_keys)):
+        cmd = sub.add_parser(name, parents=[common])
+        cmd.add_argument("--keys", required=True)
         cmd.set_defaults(fn=fn)
     compose = sub.add_parser("compose", parents=[common])
     compose.add_argument("--key", required=True)

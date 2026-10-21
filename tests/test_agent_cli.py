@@ -315,7 +315,7 @@ def _aw(state, key, age_hours, status="pending"):
         db.execute("UPDATE awaiting SET ts=?, status=? WHERE key=?", (_t.time() - age_hours * 3600, status, key))
 
 
-def test_feed_counts_fresh_and_stale_and_queue_flow(env, capsys, tmp_path, monkeypatch):
+def test_feed_counts_and_fresh_batch_publishes_at_once(env, capsys, tmp_path, monkeypatch):
     from content_factory.publish.telegram import PublishResult
     state, base = env
     _aw(state, "excel|a|1", 2)
@@ -323,31 +323,36 @@ def test_feed_counts_fresh_and_stale_and_queue_flow(env, capsys, tmp_path, monke
     _aw(state, "excel|c|3", 24 * 30)                     # месяц — цены устарели
     vk = ["--vk-root", str(tmp_path / "vk")]
     _, feed = _run(capsys, ["feed", *base, *vk])
-    assert feed["tg"] == {"fresh": 2, "stale": 1, "pending": 3, "queued": 0} and feed["vk_review"] == 0
-    assert _run(capsys, ["approve-fresh", *base])[1] == {"queued": 2}
-    assert _run(capsys, ["expire-stale", *base])[1] == {"expired": 1}
+    assert feed["tg"] == {"fresh": 2, "stale": 1, "pending": 3} and feed["vk_review"] == 0
     published = []
+    monkeypatch.setattr("content_factory.agent_cli.BATCH_PAUSE", 0)
     monkeypatch.setattr("content_factory.bot.run.make_publish_fn",
                         lambda *a, **k: (lambda item: published.append(item.key) or PublishResult(ok=True, message_id=5)))
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
-    _, out = _run(capsys, ["publish-next", *base])
-    assert out["published"] == "excel|b|2" and out["left"] == 1          # старший в очереди — первым
-    _run(capsys, ["publish-next", *base])
-    assert _run(capsys, ["publish-next", *base])[1] == {"published": None, "left": 0}
-    assert published == ["excel|b|2", "excel|a|1"]
+    _, out = _run(capsys, ["approve-fresh", *base])
+    assert sorted(out["published"]) == ["excel|a|1", "excel|b|2"] and out["failed"] == []   # пачкой, разом
+    assert _run(capsys, ["expire-stale", *base])[1] == {"expired": 1}
 
 
-def test_publish_next_failure_returns_item_to_manual_review(env, capsys, monkeypatch):
+def test_batch_status_and_publish_keys(env, capsys, monkeypatch):
     from content_factory.orchestrator.confirm_store import ConfirmStore
     from content_factory.publish.telegram import PublishResult
     state, base = env
-    _aw(state, "excel|a|1", 1, status="queued")
+    _, enq = _run(capsys, ["enqueue", "--category", "холодильники", *base])
+    first, second = enq["accepted"]
+    assert _run(capsys, ["batch-status", "--keys", f"{first},{second}", *base])[1] == \
+        {"total": 2, "ready": 0, "in_work": 2, "published": 0, "dropped": 0}
+    ExcelStore(state).update(first, status="preview")
+    ConfirmStore(state).add(first, "@chan", "c.png", "cap")
+    _, status = _run(capsys, ["batch-status", "--keys", f"{first},{second}", *base])
+    assert status["ready"] == 1 and status["in_work"] == 1
+    monkeypatch.setattr("content_factory.agent_cli.BATCH_PAUSE", 0)
     monkeypatch.setattr("content_factory.bot.run.make_publish_fn",
-                        lambda *a, **k: (lambda item: PublishResult(ok=False, error="Bad Request")))
+                        lambda *a, **k: (lambda item: PublishResult(ok=True, message_id=7)))
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
-    _, out = _run(capsys, ["publish-next", *base])
-    assert out["published"] is None and out["error"] == "Bad Request"
-    assert ConfirmStore(state).get("excel|a|1").status == "pending"
+    _, out = _run(capsys, ["publish-keys", "--keys", f"{first},{second}", *base])
+    assert out == {"published": [first], "failed": []}                  # ещё не готовая — пропущена
+    assert ConfirmStore(state).get(first).status == "published"
 
 
 def test_resolve_filters_splithub_by_btu_and_frost(env, capsys, tmp_path):
