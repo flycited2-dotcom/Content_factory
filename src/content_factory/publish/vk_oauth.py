@@ -58,19 +58,29 @@ class VkTokenStore:
         self.path = Path(path)
 
     def load(self) -> dict:
+        """Пустой или битый файл — как отсутствующий: планировщик ВК уходит на ключ
+        сообщества (текстовые записи), а не падает каждые 5 минут (грабля 2026-10-14:
+        диск заполнился, запись обнулила файл, план стоял неделю)."""
         if not self.path.exists():
             return {}
-        return json.loads(self.path.read_text(encoding="utf-8"))
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
 
     def save(self, data: dict) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = dict(data)
         payload["saved_at"] = int(time.time())
-        self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        # атомарно: при нехватке места старый токен остаётся целым, а не обнуляется
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         try:
-            self.path.chmod(0o600)
+            tmp.chmod(0o600)
         except OSError:
             pass
+        tmp.replace(self.path)
 
     def access_token(self, client: "VkOAuthClient", *, leeway_seconds: int = 120) -> str:
         """Вернуть действующий токен, обновив его заранее при необходимости."""
