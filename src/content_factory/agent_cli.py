@@ -340,6 +340,7 @@ SITE_SECTIONS = {                       # тема поста (classify_category
     "recuperators": ("/catalog/?category=40", "вентиляцию"),
 }
 CONTACT_PHONE = "+7 978 579-29-95"      # публичный номер с splithome.ru
+AGENT_VK_TIMES = ("15:00",)
 
 
 def site_link(caption: str, channel: str, key: str) -> tuple[str, str]:
@@ -413,9 +414,11 @@ def cmd_plan_vk(args):
     now = datetime.now()
     occupied = {i.due_at for i in store.list() if i.status in ACTIVE_STATUSES}
     soon = int(_time.time()) + 3600                  # не ближе часа: планировщику нужен тик
-    slot = next((s for s in plan_slots(now) if s not in occupied and s >= soon), None)
+    # Одобренный владельцем пост не ждёт очереди товаров: у постов оркестратора своё время
+    # (15:00, между слотами 11:30/18:30 планировщика). Одобренные пункты планировщик не двигает.
+    slot = next((s for s in plan_slots(now, times=AGENT_VK_TIMES) if s not in occupied and s >= soon), None)
     if slot is None:
-        return {"ok": False, "error": "в ВК-плане на 14 дней нет свободного слота"}
+        return {"ok": False, "error": "в ВК-плане на 14 дней нет свободного времени для постов оркестратора"}
     item_id = store.add(VkPlanCandidate(
         source_key=f"agent:{args.key}", source_ts=_time.time(), caption=caption,
         card_path=str(card.resolve()), category=classify_category(caption), brand="",

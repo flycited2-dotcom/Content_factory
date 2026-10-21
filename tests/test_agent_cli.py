@@ -283,6 +283,7 @@ def test_plan_vk_adds_approved_item_once(env, capsys, tmp_path):
     assert code == 0 and out["ok"]
     item = VkContentPlanStore(vk_root / "state" / "vk-plan.db").get(out["plan_id"])
     assert item.status == "approved" and item.source_key == "agent:heat-pumps"
+    assert datetime.fromtimestamp(item.due_at).strftime("%H:%M") == "15:00"      # своё время, не слоты товаров
     assert Path(item.card_path) == (vk_root / "assets/generated/editorial/heat-pumps.png").resolve()
     _, again = _run(capsys, args)
     assert again["ok"] is False and "дубль" in again["error"]
