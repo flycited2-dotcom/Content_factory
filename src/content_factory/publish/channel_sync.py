@@ -27,7 +27,8 @@ def plan_sync(records, groups, price_fn, caption_fn, default_channel: str,
     by_key = {g.key: g for g in groups}
     actions, baseline = [], []
     for r in records:
-        if r.key.startswith("excel|") or not r.message_id:
+        # excel| — прайс без остатков; editorial| — пост оркестратора, не товар (не «продан»)
+        if r.key.startswith(("excel|", "editorial|")) or not r.message_id:
             continue
         chan = r.channel or default_channel
         g = by_key.get(r.key)

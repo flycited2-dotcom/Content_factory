@@ -5,6 +5,7 @@
 """
 import json
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
@@ -195,3 +196,90 @@ def test_cancel_reports_preview_already_rejected(env, capsys):
     ConfirmStore(state).mark(key, "rejected")                            # владелец уже нажал ❌
     _, out = _run(capsys, ["cancel", "--keys", key, *base])
     assert out["not_cancelled"] == [{"key": key, "status": "rejected"}]
+
+
+# ── этап 3: картинка, публикация в TG, постановка в ВК-план ──
+
+def _jobs_db(tmp_path, rows):
+    import sqlite3
+    q = tmp_path / "queue.db"
+    with sqlite3.connect(q) as db:
+        db.execute("CREATE TABLE jobs (id INTEGER PRIMARY KEY, status TEXT, output_filename TEXT, "
+                   "error_text TEXT, request_key TEXT)")
+        db.executemany("INSERT INTO jobs VALUES (?,?,?,?,?)", rows)
+    return q
+
+
+def test_visual_submit_reuses_live_job_and_resubmits_failed(env, capsys, tmp_path, monkeypatch):
+    _, base = env
+    sent = []
+    monkeypatch.setattr(agent_cli, "_fotogen_submit", lambda api, token, data: sent.append(data) or 77)
+    monkeypatch.setenv("FOTOGEN_API_URL", "http://fotogen")
+    q = _jobs_db(tmp_path, [(5, "processing", None, None, "orch:a"), (6, "failed", None, "x", "orch:b")])
+    args = [a if a != "" else str(q) for a in base]
+    _, out = _run(capsys, ["visual-submit", "--scene", "кадр", "--request-key", "orch:a", *args])
+    assert out == {"job_id": 5, "reused": True} and sent == []
+    _, out = _run(capsys, ["visual-submit", "--scene", "кадр", "--request-key", "orch:b", *args])
+    assert out == {"job_id": 77, "reused": False}
+    assert sent[0]["category"] == "editorial" and sent[0]["request_key"] == "orch:b"
+
+
+def test_visual_status_reports_path_only_for_existing_file(env, capsys, tmp_path, monkeypatch):
+    _, base = env
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    (out_dir / "ok.png").write_bytes(b"png")
+    monkeypatch.setenv("FOTOGEN_OUTPUT_DIR", str(out_dir))
+    q = _jobs_db(tmp_path, [(1, "done", "ok.png", None, "k1"), (2, "done", "lost.png", None, "k2"),
+                            (3, "pending", None, None, "k3")])
+    args = [a if a != "" else str(q) for a in base]
+    assert _run(capsys, ["visual-status", "--job", "1", *args])[1]["path"] == str(out_dir / "ok.png")
+    assert _run(capsys, ["visual-status", "--job", "2", *args])[1]["status"] == "missing_file"
+    assert _run(capsys, ["visual-status", "--job", "3", *args])[1] == {"status": "pending", "path": None, "error": None}
+
+
+def test_publish_tg_uses_editorial_key_and_returns_link(env, capsys, tmp_path, monkeypatch):
+    from content_factory.publish.telegram import PublishResult
+    _, base = env
+    calls = {}
+
+    def fake_publish(token, channel, image, caption, **kw):
+        calls.update(channel=channel, caption=caption, key=kw["key"])
+        return PublishResult(ok=True, message_id=42)
+
+    monkeypatch.setattr("content_factory.publish.telegram.publish_post", fake_publish)
+    monkeypatch.setenv("TELEGRAM_CHANNEL_ID", "-1001234567")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
+    cap = tmp_path / "cap.txt"
+    cap.write_text("Текст поста", encoding="utf-8")
+    img = tmp_path / "i.png"
+    img.write_bytes(b"png")
+    code, out = _run(capsys, ["publish-tg", "--key", "heat-pumps-v2", "--caption-file", str(cap),
+                              "--image", str(img), *base])
+    assert code == 0 and out["ok"] and out["url"] == "https://t.me/c/1234567/42"
+    assert calls == {"channel": "-1001234567", "caption": "Текст поста", "key": "editorial|heat-pumps-v2"}
+
+
+def test_publish_rejects_unsafe_key(env, capsys, tmp_path):
+    _, base = env
+    code, out = _run(capsys, ["publish-tg", "--key", "../x", "--caption-file", "c", "--image", "i", *base])
+    assert code == 2 and "id" in out["error"]
+
+
+def test_plan_vk_adds_approved_item_once(env, capsys, tmp_path):
+    from content_factory.orchestrator.vk_content_plan import VkContentPlanStore
+    _, base = env
+    vk_root = tmp_path / "vk"
+    cap = tmp_path / "cap.txt"
+    cap.write_text("Тепловой насос: как он греет дом зимой", encoding="utf-8")
+    img = tmp_path / "i.png"
+    img.write_bytes(b"png")
+    args = ["plan-vk", "--key", "heat-pumps", "--caption-file", str(cap), "--image", str(img),
+            "--vk-root", str(vk_root), *base]
+    code, out = _run(capsys, args)
+    assert code == 0 and out["ok"]
+    item = VkContentPlanStore(vk_root / "state" / "vk-plan.db").get(out["plan_id"])
+    assert item.status == "approved" and item.source_key == "agent:heat-pumps"
+    assert Path(item.card_path) == (vk_root / "assets/generated/editorial/heat-pumps.png").resolve()
+    _, again = _run(capsys, args)
+    assert again["ok"] is False and "дубль" in again["error"]

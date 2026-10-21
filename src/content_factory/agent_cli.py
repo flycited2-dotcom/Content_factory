@@ -12,6 +12,10 @@
     python -m content_factory.agent_cli status [--since UNIX]
     python -m content_factory.agent_cli workers        # генерация, дорожки фото-агента, команды сторожам
     python -m content_factory.agent_cli start-workers  # включить генерацию, сторожам 'start', разбудить cf-excel
+    python -m content_factory.agent_cli visual-submit --scene "..." --request-key orch:<id>  # картинка фото-агентом
+    python -m content_factory.agent_cli visual-status --job N
+    python -m content_factory.agent_cli publish-tg --key <id> --caption-file F --image P  # пост оркестратора в канал
+    python -m content_factory.agent_cli plan-vk --key <id> --caption-file F --image P     # одобренным в ВК-план
 
 Квота {"бренд": null} без "*" — «все позиции только этого бренда».
 """
@@ -19,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sqlite3
 import sys
 from collections import Counter
@@ -252,6 +257,131 @@ def cmd_start_workers(args):
     return {"generation": True, "commanded": commanded, "requested_run": requested}
 
 
+# ── Этап 3: редакционные посты оркестратора (картинка, публикация по ✅ владельца) ──
+
+_VISUAL_DEAD = ("failed", "cancelled", "error")
+
+
+def _fotogen_submit(api: str, token: str, data: dict) -> int:
+    import httpx
+    r = httpx.post(f"{api.rstrip('/')}/api/submit-research", headers={"x-agent-token": token},
+                   data=data, timeout=60)
+    r.raise_for_status()
+    return int(r.json()["job_id"])
+
+
+def _queue_row(queue_db, sql, params):
+    if not queue_db or not Path(queue_db).is_file():
+        return None
+    with sqlite3.connect(Path(queue_db).resolve().as_uri() + "?mode=ro", uri=True, timeout=10) as db:
+        return db.execute(sql, params).fetchone()
+
+
+def cmd_visual_submit(args):
+    """Картинка к посту — фото-агентом, как редакционные визуалы ВК (scripts/submit_missing_visuals.py).
+    Повтор с тем же request_key возвращает живое задание, а не заказывает второе."""
+    _, _, queue_db = _paths(args)
+    if not args.new:
+        row = _queue_row(queue_db, "SELECT id, status FROM jobs WHERE request_key=? ORDER BY id DESC LIMIT 1",
+                         (args.request_key,))
+        if row and row[1] not in _VISUAL_DEAD:
+            return {"job_id": int(row[0]), "reused": True}
+    api = config("FOTOGEN_API_URL", default="")
+    if not api:
+        raise _InputError("не задан FOTOGEN_API_URL")
+    job_id = _fotogen_submit(api, config("FOTOGEN_API_TOKEN", default=""),
+                             {"brand": "", "model": args.scene, "category": "editorial",
+                              "chat_id": "0", "request_key": args.request_key})
+    return {"job_id": job_id, "reused": False}
+
+
+def cmd_visual_status(args):
+    _, _, queue_db = _paths(args)
+    row = _queue_row(queue_db, "SELECT status, output_filename, error_text FROM jobs WHERE id=?", (args.job,))
+    if row is None:
+        return {"status": "missing", "path": None, "error": None}
+    status, output, error = row
+    path = None
+    if status == "done" and output:
+        candidate = Path(config("FOTOGEN_OUTPUT_DIR", default="")) / output
+        path = str(candidate) if candidate.is_file() else None
+    if status == "done" and path is None:
+        status = "missing_file"                   # задание закрыто, а файла нет — заказывать заново
+    return {"status": status, "path": path, "error": error}
+
+
+def _post_url(channel: str, message_id) -> str | None:
+    if not message_id:
+        return None
+    channel = str(channel)
+    if channel.startswith("@"):
+        return f"https://t.me/{channel[1:]}/{message_id}"
+    if channel.startswith("-100"):
+        return f"https://t.me/c/{channel[4:]}/{message_id}"
+    return None
+
+
+_KEY = re.compile(r"^[a-z0-9][a-z0-9-]{0,80}$")
+
+
+def _draft_key(raw: str) -> str:
+    if not _KEY.match(raw or ""):
+        raise _InputError(f"недопустимый id черновика: {raw!r}")
+    return raw
+
+
+def cmd_publish_tg(args):
+    from content_factory.publish.telegram import PublishState, publish_post
+    state_db, _, _ = _paths(args)
+    _draft_key(args.key)
+    caption = Path(args.caption_file).read_text(encoding="utf-8")
+    if not Path(args.image).is_file():
+        raise _InputError(f"нет картинки: {args.image}")
+    channel = config("TELEGRAM_CHANNEL_ID", default="")
+    if not channel:
+        raise _InputError("не задан TELEGRAM_CHANNEL_ID")
+    res = publish_post(config("TELEGRAM_BOT_TOKEN"), channel, args.image, caption,
+                       key=f"editorial|{args.key}", state=PublishState(state_db), retries=2)
+    return {"ok": res.ok, "skipped": res.skipped, "message_id": res.message_id, "error": res.error,
+            "url": _post_url(channel, res.message_id)}
+
+
+def cmd_plan_vk(args):
+    """Одобренный владельцем ВК-пост — в штатный ВК-план сразу одобренным, на ближайший
+    свободный слот. Отложенную запись создаст cf-vk-plan (его дедупликация и аналитика)."""
+    import shutil
+    import time as _time
+    from content_factory.orchestrator.vk_content_plan import (
+        ACTIVE_STATUSES, VkContentPlanStore, VkPlanCandidate, classify_category, plan_slots)
+    _draft_key(args.key)
+    vk_root = Path(args.vk_root or config("VK_ROOT", default="/opt/content-factory-vk"))
+    caption = Path(args.caption_file).read_text(encoding="utf-8")
+    image = Path(args.image)
+    if not image.is_file():
+        raise _InputError(f"нет картинки: {image}")
+    assets = vk_root / "assets" / "generated" / "editorial"
+    assets.mkdir(parents=True, exist_ok=True)
+    card = assets / f"{args.key}{image.suffix or '.png'}"
+    shutil.copyfile(image, card)
+    store = VkContentPlanStore(Path(config("VK_PLAN_STATE_DB", default=str(vk_root / "state" / "vk-plan.db"))))
+    now = datetime.now()
+    occupied = {i.due_at for i in store.list() if i.status in ACTIVE_STATUSES}
+    soon = int(_time.time()) + 3600                  # не ближе часа: планировщику нужен тик
+    slot = next((s for s in plan_slots(now) if s not in occupied and s >= soon), None)
+    if slot is None:
+        return {"ok": False, "error": "в ВК-плане на 14 дней нет свободного слота"}
+    item_id = store.add(VkPlanCandidate(
+        source_key=f"agent:{args.key}", source_ts=_time.time(), caption=caption,
+        card_path=str(card.resolve()), category=classify_category(caption), brand="",
+        content_type="useful"), slot)
+    if item_id is None:
+        return {"ok": False, "error": "такой пост уже есть в ВК-плане (дубль)"}
+    store.mark_review(item_id, None)
+    if not store.approve(item_id):
+        return {"ok": False, "error": f"пункт ВК-плана {item_id} не удалось одобрить"}
+    return {"ok": True, "plan_id": item_id, "due_at": slot}
+
+
 def _parser():
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--state-db")
@@ -278,6 +408,22 @@ def _parser():
     status.set_defaults(fn=cmd_status)
     sub.add_parser("workers", parents=[common]).set_defaults(fn=cmd_workers)
     sub.add_parser("start-workers", parents=[common]).set_defaults(fn=cmd_start_workers)
+    visual = sub.add_parser("visual-submit", parents=[common])
+    visual.add_argument("--scene", required=True)
+    visual.add_argument("--request-key", required=True)
+    visual.add_argument("--new", action="store_true", help="заказать заново, даже если задание живо")
+    visual.set_defaults(fn=cmd_visual_submit)
+    vstatus = sub.add_parser("visual-status", parents=[common])
+    vstatus.add_argument("--job", type=int, required=True)
+    vstatus.set_defaults(fn=cmd_visual_status)
+    for name, fn in (("publish-tg", cmd_publish_tg), ("plan-vk", cmd_plan_vk)):
+        pub = sub.add_parser(name, parents=[common])
+        pub.add_argument("--key", required=True)
+        pub.add_argument("--caption-file", required=True)
+        pub.add_argument("--image", required=True)
+        if name == "plan-vk":
+            pub.add_argument("--vk-root")
+        pub.set_defaults(fn=fn)
     return parser
 
 

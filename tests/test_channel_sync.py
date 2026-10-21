@@ -83,3 +83,9 @@ def test_default_channel_used_when_empty():
     rec.channel = ""
     actions, _ = _plan([rec], _groups())
     assert actions[0].channel == "@def"
+
+
+def test_orchestrator_editorial_post_is_never_marked_sold():
+    # пост оркестратора (этап 3) в каталоге отсутствует — это не «продано»
+    actions, baseline = _plan([_rec("editorial|heat-pumps-basics")], _groups())
+    assert actions == [] and baseline == []
