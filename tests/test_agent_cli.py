@@ -245,6 +245,7 @@ def test_publish_tg_uses_editorial_key_and_returns_link(env, capsys, tmp_path, m
 
     def fake_publish(token, channel, image, caption, **kw):
         calls.update(channel=channel, caption=caption, key=kw["key"])
+        calls["button"] = json.loads(kw["reply_markup"])["inline_keyboard"][0][0]
         return PublishResult(ok=True, message_id=42)
 
     monkeypatch.setattr("content_factory.publish.telegram.publish_post", fake_publish)
@@ -257,7 +258,9 @@ def test_publish_tg_uses_editorial_key_and_returns_link(env, capsys, tmp_path, m
     code, out = _run(capsys, ["publish-tg", "--key", "heat-pumps-v2", "--caption-file", str(cap),
                               "--image", str(img), *base])
     assert code == 0 and out["ok"] and out["url"] == "https://t.me/c/1234567/42"
+    button = calls.pop("button")
     assert calls == {"channel": "-1001234567", "caption": "Текст поста", "key": "editorial|heat-pumps-v2"}
+    assert button["text"] == "🔎 Каталог на сайте" and button["url"].startswith("https://splithome.ru/catalog/?utm_source=telegram")
 
 
 def test_publish_rejects_unsafe_key(env, capsys, tmp_path):
@@ -283,3 +286,18 @@ def test_plan_vk_adds_approved_item_once(env, capsys, tmp_path):
     assert Path(item.card_path) == (vk_root / "assets/generated/editorial/heat-pumps.png").resolve()
     _, again = _run(capsys, args)
     assert again["ok"] is False and "дубль" in again["error"]
+
+
+def test_compose_adds_site_section_and_phone(env, capsys, tmp_path):
+    _, base = env
+    cap = tmp_path / "cap.txt"
+    cap.write_text("Тепловой насос зимой: как он греет дом", encoding="utf-8")
+    _, out = _run(capsys, ["compose", "--key", "hp-v4", "--channel", "vk_editorial", "--caption-file", str(cap), *base])
+    text = out["text"]
+    assert text.startswith("Тепловой насос зимой")
+    assert "https://splithome.ru/catalog/heat-pumps/?utm_source=vk" in text and "utm_content=hp-v4" in text
+    assert "📞 Консультация и подбор: +7 978 579-29-95" in text and "сообщения группы" in text
+    cap.write_text("Как выбрать сплит-систему в спальню: кондиционер на 9 BTU", encoding="utf-8")
+    _, out = _run(capsys, ["compose", "--key", "ac", "--channel", "tg_editorial", "--caption-file", str(cap), *base])
+    assert "splithome.ru" not in out["text"] and "+7 978 579-29-95" in out["text"]   # ссылка в TG — кнопкой
+    assert "сообщения группы" not in out["text"]

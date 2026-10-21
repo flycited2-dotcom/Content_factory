@@ -330,6 +330,48 @@ def _draft_key(raw: str) -> str:
     return raw
 
 
+# Подвал поста оркестратора: ссылка на раздел сайта и телефон ставит система, не нейросеть
+# (владелец, 2026-10-21: «у нас есть сайт, его нужно использовать», консультация, телефон).
+SITE_URL = "https://splithome.ru"
+SITE_SECTIONS = {                       # тема поста (classify_category) → раздел каталога splithome.ru
+    "heat_pumps": ("/catalog/heat-pumps/", "тепловые насосы"),
+    "air_conditioners": ("/catalog/?category=2", "кондиционеры"),
+    "ventilation": ("/catalog/?category=40", "вентиляцию"),
+    "recuperators": ("/catalog/?category=40", "вентиляцию"),
+}
+CONTACT_PHONE = "+7 978 579-29-95"      # публичный номер с splithome.ru
+
+
+def site_link(caption: str, channel: str, key: str) -> tuple[str, str]:
+    """(ссылка с UTM, что смотреть) — раздел сайта по теме поста."""
+    from urllib.parse import urlencode
+    from content_factory.orchestrator.vk_content_plan import classify_category
+    path, label = SITE_SECTIONS.get(classify_category(caption), ("/catalog/", "каталог"))
+    base = config("AGENT_SITE_URL", default=SITE_URL).rstrip("/")
+    utm = urlencode({"utm_source": "vk" if channel == "vk_editorial" else "telegram",
+                     "utm_medium": "organic_social", "utm_campaign": "orchestrator", "utm_content": key})
+    return f"{base}{path}{'&' if '?' in path else '?'}{utm}", label
+
+
+def compose_post(text: str, channel: str, key: str) -> str:
+    """Готовый текст поста: тело редактора + подвал (раздел сайта, консультация по телефону)."""
+    url, label = site_link(text, channel, key)
+    phone = config("AGENT_CONTACT_PHONE", default=CONTACT_PHONE)
+    lines = ["", "━━━━━━━━━━"]
+    if channel == "vk_editorial":                 # в Telegram ссылка — кнопкой под постом (publish-tg)
+        lines.append(f"🔎 Смотреть {label} на сайте: {url}")
+    lines.append(f"📞 Консультация и подбор: {phone}")
+    if channel == "vk_editorial":
+        lines.append("💬 Или напишите нам в сообщения группы")
+    return text.rstrip() + "\n" + "\n".join(lines)
+
+
+def cmd_compose(args):
+    _draft_key(args.key)
+    text = Path(args.caption_file).read_text(encoding="utf-8")
+    return {"text": compose_post(text, args.channel, args.key)}
+
+
 def cmd_publish_tg(args):
     from content_factory.publish.telegram import PublishState, publish_post
     state_db, _, _ = _paths(args)
@@ -340,8 +382,12 @@ def cmd_publish_tg(args):
     channel = config("TELEGRAM_CHANNEL_ID", default="")
     if not channel:
         raise _InputError("не задан TELEGRAM_CHANNEL_ID")
+    url, label = site_link(caption, "tg_editorial", args.key)
+    markup = json.dumps({"inline_keyboard": [[{"text": f"🔎 {label.capitalize()} на сайте", "url": url}]]},
+                        ensure_ascii=False)
     res = publish_post(config("TELEGRAM_BOT_TOKEN"), channel, args.image, caption,
-                       key=f"editorial|{args.key}", state=PublishState(state_db), retries=2)
+                       key=f"editorial|{args.key}", state=PublishState(state_db), retries=2,
+                       reply_markup=markup)
     return {"ok": res.ok, "skipped": res.skipped, "message_id": res.message_id, "error": res.error,
             "url": _post_url(channel, res.message_id)}
 
@@ -416,6 +462,11 @@ def _parser():
     vstatus = sub.add_parser("visual-status", parents=[common])
     vstatus.add_argument("--job", type=int, required=True)
     vstatus.set_defaults(fn=cmd_visual_status)
+    compose = sub.add_parser("compose", parents=[common])
+    compose.add_argument("--key", required=True)
+    compose.add_argument("--channel", required=True, choices=("tg_editorial", "vk_editorial"))
+    compose.add_argument("--caption-file", required=True)
+    compose.set_defaults(fn=cmd_compose)
     for name, fn in (("publish-tg", cmd_publish_tg), ("plan-vk", cmd_plan_vk)):
         pub = sub.add_parser(name, parents=[common])
         pub.add_argument("--key", required=True)
