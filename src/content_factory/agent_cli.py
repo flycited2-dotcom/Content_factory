@@ -61,9 +61,8 @@ def _taken(state_db, queue_db):
     from content_factory.orchestrator.confirm_store import ConfirmStore
     from content_factory.orchestrator.excel_pipeline import ExcelStore
     from content_factory.publish.telegram import PublishState
-    return (PublishState(state_db).published_keys()
-            | ConfirmStore(state_db).blocked_keys()
-            | ExcelStore(state_db).selection_blocked_keys(queue_db))
+    return ExcelStore(state_db).selection_taken(
+        PublishState(state_db).published_keys() | ConfirmStore(state_db).blocked_keys(), queue_db)
 
 
 def _quotas(raw):

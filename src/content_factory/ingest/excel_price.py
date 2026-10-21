@@ -373,28 +373,41 @@ def item_is_taken(item: PriceItem, taken: set) -> bool:
     (excel|indesit|ds 3180 g и excel|холодильник indesit ds 3180 g): сверяем и
     «бренд модель» с хвостом наименования (грабля 2026-10-20: повторные превью
     уже опубликованных Indesit)."""
-    if item_key(item) in taken or (bool(item.supplier_product_id)
-                                   and legacy_item_key(item) in taken):
-        return True
+    matched = [key for key in (item_key(item),
+                               legacy_item_key(item) if item.supplier_product_id else None)
+               if key and key in taken]
     tokens = re.sub(r"\s+", " ", _PAREN_RE.sub("", item.name)).strip().lower().split(" ")
     if f"excel|{' '.join(tokens)}" in taken:
-        return True
+        matched.append(f"excel|{' '.join(tokens)}")
     tails = _brand_model_tails(taken)
-    return any(" ".join(tokens[i:]) in tails for i in range(len(tokens)))
+    matched += [tails[t] for i in range(len(tokens)) if (t := " ".join(tokens[i:])) in tails]
+    # недавний повтор (TakenKeys.repeat_prices) свободен, если цена в прайсе изменилась
+    prices = getattr(taken, "repeat_prices", {})
+    return any(key not in prices or prices[key] == item.price for key in matched)
 
 
-_TAILS_CACHE: list = [None, -1, frozenset()]
+class TakenKeys(set):
+    """Занятые ключи. repeat_prices: недавно опубликованные/отклонённые позиции и их
+    прошлая цена — повтор разрешён сразу, если цена в прайсе другая (владелец, 2026-10-20:
+    «разные приходы, разная цена»)."""
+
+    def __init__(self, keys=(), repeat_prices=None):
+        super().__init__(keys)
+        self.repeat_prices = dict(repeat_prices or {})
 
 
-def _brand_model_tails(taken: set) -> frozenset:
-    """«бренд модель» из ключей excel|<бренд>|<модель>; кэш на один и тот же набор."""
+_TAILS_CACHE: list = [None, -1, {}]
+
+
+def _brand_model_tails(taken: set) -> dict:
+    """«бренд модель» → ключ excel|<бренд>|<модель>; кэш на один и тот же набор."""
     if _TAILS_CACHE[0] is not taken or _TAILS_CACHE[1] != len(taken):
-        tails = set()
+        tails = {}
         for key in taken:
             parts = str(key).split("|")
             if len(parts) == 3 and parts[0] == "excel" and parts[1] and parts[2]:
-                tails.add(re.sub(r"\s+", " ", f"{parts[1]} {parts[2]}").strip())
-        _TAILS_CACHE[:] = [taken, len(taken), frozenset(tails)]
+                tails[re.sub(r"\s+", " ", f"{parts[1]} {parts[2]}").strip()] = key
+        _TAILS_CACHE[:] = [taken, len(taken), tails]
     return _TAILS_CACHE[2]
 
 

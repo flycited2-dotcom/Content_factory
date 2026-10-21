@@ -80,9 +80,13 @@ class PublishState:
     def _c(self):
         return state_connection(self.path)
 
-    def is_published(self, key: str) -> bool:
+    def is_published(self, key: str, within: float | None = None) -> bool:
+        """within — учитывать только публикацию за последние N секунд (повтор позже — не дубль)."""
         with self._c() as c:
-            return c.execute("SELECT 1 FROM published WHERE key=?", (key,)).fetchone() is not None
+            if within is None:
+                return c.execute("SELECT 1 FROM published WHERE key=?", (key,)).fetchone() is not None
+            return c.execute("SELECT 1 FROM published WHERE key=? AND ts>=?",
+                             (key, time.time() - within)).fetchone() is not None
 
     def published_keys(self) -> set:
         """Все опубликованные ключи (для анти-дубля в планировщике)."""
@@ -234,11 +238,13 @@ def publish_post(bot_token: str, channel_id: str, image: str, caption: str,
                  http: httpx.Client | None = None, *, parse_mode: str | None = None,
                  key: str | None = None, state: PublishState | None = None,
                  caption_max: int = CAPTION_MAX, retries: int = 1,
-                 backoff: float = 1.0, reply_markup: str | None = None) -> PublishResult:
+                 backoff: float = 1.0, reply_markup: str | None = None,
+                 repeat_after: float | None = None) -> PublishResult:
     """Опубликовать пост (sendPhoto). `image` — путь к файлу карточки или URL.
     `key`+`state` включают идемпотентность (повтор не публикуется).
-    `reply_markup` — JSON inline-клавиатуры (кнопки ✅/❌ под превью на подтверждение)."""
-    if state is not None and key and state.is_published(key):
+    `reply_markup` — JSON inline-клавиатуры (кнопки ✅/❌ под превью на подтверждение).
+    `repeat_after` — идемпотентность только в этом окне (сек): позже тот же ключ — законный повтор."""
+    if state is not None and key and state.is_published(key, within=repeat_after):
         return PublishResult(ok=True, skipped=True)
 
     caption = (caption or "")[:caption_max]

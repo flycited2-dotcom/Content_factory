@@ -6,6 +6,7 @@ new → research (УТП+фото по наименованию; кэш — Chat
 from __future__ import annotations
 import json
 import logging
+import os
 import sqlite3
 import time
 import uuid
@@ -14,6 +15,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 MAX_TRIES = 2                       # попыток на этап (сабмит + 1 ретрай)
+# Повтор товара из прайса — не дубль: через REPEAT_AFTER после публикации/отклонения
+# или сразу при другой цене (владелец, 2026-10-20: «повторение — мать учения»)
+REPEAT_AFTER = float(os.environ.get("CF_REPEAT_AFTER_DAYS", "3")) * 86400
+_DECIDED_ITEM_STATUSES = {"preview", "cancelled", "failed"}
 _LOG = logging.getLogger(__name__)
 
 
@@ -180,6 +185,46 @@ class ExcelStore:
                 "SELECT key FROM awaiting WHERE status IN ('pending','rejected','published')"))
         return blocked
 
+    @staticmethod
+    def _decided_repeats(connection) -> dict:
+        """{key: (ts решения, прошлая цена)} для excel-позиций, по которым всё решено:
+        опубликованы или отклонены, не ждут кнопки и не идут по конвейеру."""
+        tables = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        decided: dict = {}
+        pending = set()
+        if "published" in tables:
+            for key, ts in connection.execute(
+                    "SELECT key, ts FROM published WHERE key LIKE 'excel|%'"):
+                decided[key] = max(decided.get(key, 0), ts or 0)
+        if "awaiting" in tables:
+            for key, status, ts in connection.execute(
+                    "SELECT key, status, ts FROM awaiting WHERE key LIKE 'excel|%'"):
+                if status in ("published", "rejected"):
+                    decided[key] = max(decided.get(key, 0), ts or 0)
+                elif status == "pending":
+                    pending.add(key)                       # ждёт кнопки — не повторяем
+        items = {row[0]: row[1:] for row in connection.execute(
+            "SELECT key, status, price FROM excel_items WHERE key LIKE 'excel|%'")}
+        out = {}
+        for key, ts in decided.items():
+            status, price = items.get(key, (None, None))
+            if key not in pending and (status is None or status in _DECIDED_ITEM_STATUSES):
+                out[key] = (ts, price)
+        return out
+
+    def selection_taken(self, extra=(), queue_db=None, now: float | None = None):
+        """Занятые для нового выбора владельца ключи с правилом повтора: давно
+        решённые позиции свободны, недавние — только при другой цене (TakenKeys)."""
+        from content_factory.ingest.excel_price import TakenKeys
+        now = time.time() if now is None else now
+        with self._c() as c:
+            decided = self._decided_repeats(c)
+        recent = {k: price for k, (ts, price) in decided.items() if now - ts < REPEAT_AFTER}
+        keys = (set(extra) | self.selection_blocked_keys(queue_db)) - set(decided)
+        return TakenKeys(keys | set(recent),
+                         {k: p for k, p in recent.items() if p is not None})
+
     def selection_blocked_keys(self, queue_db=None) -> set:
         """Keys unavailable to a new owner selection, preserving the full history.
 
@@ -223,10 +268,15 @@ class ExcelStore:
         with self._c() as c:
             c.execute("BEGIN IMMEDIATE")
             blocked = self._published_selection_keys(c)
+            decided = self._decided_repeats(c)
+            now = time.time()
+            repeat = {row[0] for row in unique if row[0] in decided
+                      and (now - decided[row[0]][0] >= REPEAT_AFTER
+                           or decided[row[0]][1] not in (None, row[4]))}
             existing = {}
             for row in unique:
                 key = row[0]
-                if key.startswith("ready-price|") or key in blocked:
+                if key.startswith("ready-price|") or (key in blocked and key not in repeat):
                     continue
                 existing[key] = c.execute(
                     "SELECT key,status,research_job,card_job,research_request_key,"
@@ -241,7 +291,7 @@ class ExcelStore:
                 if key not in existing:
                     continue
                 old = existing[key]
-                stage = (("new", None, None) if old is None
+                stage = (("new", None, None) if old is None or key in repeat
                          else self._cancelled_selection_stage(old, jobs))
                 if stage is None:
                     continue

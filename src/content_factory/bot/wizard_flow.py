@@ -197,9 +197,9 @@ def make_wizard_flow(state_db, prices_dir, store, submit_card, save_photo, excel
     now_fn — инъекция часов для тестов расписания."""
 
     def _taken(excel_store: ExcelStore) -> set:
-        return (PublishState(state_db).published_keys()
-                | ConfirmStore(state_db).blocked_keys()
-                | excel_store.selection_blocked_keys(queue_db))
+        return excel_store.selection_taken(
+            PublishState(state_db).published_keys() | ConfirmStore(state_db).blocked_keys(),
+            queue_db)
 
     def _apply_splithub_mode(excel_store: ExcelStore, rows) -> None:
         # позиции живого каталога SplitHub — свой (премиум) стиль карточки

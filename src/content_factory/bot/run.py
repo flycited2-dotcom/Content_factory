@@ -61,9 +61,12 @@ def make_publish_fn(token: str, parse_mode: str, pub_state: PublishState, http=N
             _, channel, message_id = str(a.channel).split("|", 2)
             return edit_post_media(token, channel, int(message_id), a.card_path, a.caption,
                                    http=http, parse_mode=parse_mode, reply_markup=markup)
+        # товар из прайса может законно повториться (новая цена, прошло 3 дня) —
+        # от двойного ✅ хватает окна в 10 минут
         return publish_post(token, a.channel, a.card_path, a.caption, http=http,
                             parse_mode=parse_mode, key=a.key, state=pub_state, retries=2,
-                            reply_markup=markup)
+                            reply_markup=markup,
+                            repeat_after=600 if str(a.key).startswith("excel|") else None)
     return publish_fn
 
 
@@ -128,9 +131,9 @@ def make_make_fn(state_db, prices_dir, queue_db=None, wake_fn=None):
             return "❌ прайс не загружен — пришлите .xlsx файлом в этот чат"
         items = [i for _, its in slots for i in its]      # свой прайс приоритетнее почтового
         store = ExcelStore(state_db)
-        taken = (PublishState(state_db).published_keys()
-                 | ConfirmStore(state_db).blocked_keys()
-                 | store.selection_blocked_keys(queue_db or config("FOTOGEN_QUEUE_DB", default="")))
+        taken = store.selection_taken(
+            PublishState(state_db).published_keys() | ConfirmStore(state_db).blocked_keys(),
+            queue_db or config("FOTOGEN_QUEUE_DB", default=""))
         got = select_from_price(items, category, quotas, count, taken,
                                 aliases=load_search_aliases(Path("config/search_aliases.yaml")))
         if not got:
@@ -261,9 +264,9 @@ def make_find_pick_fns(state_db, prices_dir, publication_status_path=None, queue
     aliases_path = Path("config/search_aliases.yaml")
 
     def _taken(store):
-        return (PublishState(state_db).published_keys()
-                | ConfirmStore(state_db).blocked_keys()
-                | store.selection_blocked_keys(queue_db or config("FOTOGEN_QUEUE_DB", default="")))
+        return store.selection_taken(
+            PublishState(state_db).published_keys() | ConfirmStore(state_db).blocked_keys(),
+            queue_db or config("FOTOGEN_QUEUE_DB", default=""))
 
     def _pick_table(c):
         c.execute("CREATE TABLE IF NOT EXISTS pick_list (idx INTEGER PRIMARY KEY, "
