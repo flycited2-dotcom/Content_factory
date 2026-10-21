@@ -6,7 +6,7 @@
 
     python -m content_factory.agent_cli hint
     python -m content_factory.agent_cli resolve --category стабилизаторы [--count N]
-        [--quotas '{"ресанта": null}'] [--source manual__resanta]
+        [--quotas '{"ресанта": null}'] [--source manual__resanta] [--btu 9-12] [--min-temp 20]
     python -m content_factory.agent_cli enqueue ...те же... [--due "сегодня 12:00"]
     python -m content_factory.agent_cli cancel --keys k1,k2
     python -m content_factory.agent_cli status [--since UNIX]
@@ -87,6 +87,7 @@ def _select(args, state_db, prices_dir, queue_db):
     from content_factory.ingest.excel_price import (
         load_search_aliases, search_items, select_from_price)
     _, labelled = _items(prices_dir, args.source)
+    labelled = _spec_filter(labelled, args, prices_dir)
     quotas = _quotas(args.quotas)
     brand_all = [b for b, n in quotas.items() if n is None and b != "*"]
     if brand_all and "*" not in quotas:
@@ -104,6 +105,36 @@ def _select(args, state_db, prices_dir, queue_db):
     count = args.count if args.count is not None else _ALL
     chosen = select_from_price(items, args.category, quotas, count, taken, aliases=aliases)
     return total, [(source_of.get(id(i), ""), i) for i in chosen]
+
+
+def _btu_range(raw):
+    """«9-12» / «9,12» / «12» → (мин, макс) типоразмера kBTU."""
+    nums = [int(n) for n in re.findall(r"\d+", raw or "")]
+    if not nums:
+        raise _InputError(f"не понял мощность: {raw}")
+    return min(nums), max(nums)
+
+
+def _spec_filter(labelled, args, prices_dir):
+    """Отбор по мощности и морозостойкости (ac_specs). Нераспознанное под фильтр не попадает."""
+    btu, frost = getattr(args, "btu", None), getattr(args, "min_temp", None)
+    if not btu and frost is None:
+        return labelled
+    from content_factory.ingest.ac_specs import min_outdoor_temp, size_kbtu
+    from content_factory.ingest.splithub_catalog import read_snapshot
+    utp = {e["sku"]: e.get("utp") or "" for e in read_snapshot(prices_dir)} if frost is not None else {}
+    lo, hi = _btu_range(btu) if btu else (0, 10 ** 6)
+    out = []
+    for label, item in labelled:
+        size = size_kbtu(item.name, item.article)
+        if btu and (size is None or not lo <= size <= hi):
+            continue
+        if frost is not None:
+            temp = min_outdoor_temp(utp.get(item.article, ""))
+            if temp is None or temp < frost:
+                continue
+        out.append((label, item))
+    return out
 
 
 def _item_json(source, item):
@@ -516,6 +547,8 @@ def _parser():
     select.add_argument("--count", type=int)
     select.add_argument("--quotas")
     select.add_argument("--source")
+    select.add_argument("--btu", help="типоразмер kBTU: 9-12, 9,12 или 12")
+    select.add_argument("--min-temp", type=int, help="работает на обогрев при морозе не слабее: 20 = до −20 °С")
     parser = argparse.ArgumentParser(prog="agent_cli")
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("hint", parents=[common]).set_defaults(fn=cmd_hint)

@@ -348,3 +348,25 @@ def test_publish_next_failure_returns_item_to_manual_review(env, capsys, monkeyp
     _, out = _run(capsys, ["publish-next", *base])
     assert out["published"] is None and out["error"] == "Bad Request"
     assert ConfirmStore(state).get("excel|a|1").status == "pending"
+
+
+def test_resolve_filters_splithub_by_btu_and_frost(env, capsys, tmp_path):
+    from content_factory.ingest import splithub_catalog
+    state, base = env
+    prices = Path(base[base.index("--prices-dir") + 1])
+
+    def entry(sku, name, utp):
+        return {"sku": sku, "brand": "FUNAI", "name": name, "price": 30000, "group": "inv",
+                "section": "Кондиционеры инверторные", "sections": ["Кондиционеры инверторные", "Инвертор · FUNAI"],
+                "stock": "in_stock", "photo": f"{sku}.webp", "utp": utp}
+
+    items = [entry("f-09", "Кондиционер FUNAI X RAC-I-AK25HP.D01", "✓ Работа до -25 °С"),
+             entry("f-12", "Кондиционер FUNAI Y RAC-I-AK35HP.D01", "✓ Работа до -15 °С"),
+             entry("f-24", "Кондиционер FUNAI Z RAC-I-AK75HP.D02", "✓ Работа до -25 °С")]
+    (prices / splithub_catalog.SNAPSHOT_NAME).write_text(json.dumps({"items": items}, ensure_ascii=False), encoding="utf-8")
+    args = ["resolve", "--category", "кондиционеры", "--source", splithub_catalog.SLOT, *base]
+    names = lambda out: sorted(i["name"] for i in out["items"])                          # noqa: E731
+    _, out = _run(capsys, [*args, "--btu", "9-12"])
+    assert names(out) == ["Кондиционер FUNAI X RAC-I-AK25HP.D01", "Кондиционер FUNAI Y RAC-I-AK35HP.D01"]
+    _, out = _run(capsys, [*args, "--btu", "9-12", "--min-temp", "20"])
+    assert names(out) == ["Кондиционер FUNAI X RAC-I-AK25HP.D01"]
