@@ -29,6 +29,7 @@ from content_factory.orchestrator.card_submit import (
 from content_factory.publish.orders import OrderLinks
 from content_factory.publish.telegram import publish_post, send_message
 from content_factory.orchestrator.generation import generation_enabled
+from content_factory.ingest.site_specs import from_env as site_specs_from_env
 from content_factory.ready_price import batch_keys, enabled as ready_price_enabled, sync_catalog
 from content_factory.ready_price_audit import audit_card_text
 from content_factory.drive_archive import ARTICLE, restore_missing, valid_png
@@ -67,13 +68,15 @@ def _money(p) -> str:
     return f"{int(p):,}".replace(",", " ") + " ₽"
 
 
-def build_preview_caption(name: str, price: int, utp: str) -> str:
+def build_preview_caption(name: str, price: int, utp: str, capacity: str = "") -> str:
     """Подпись превью. Названия из прайсов содержат <артикулы в скобках> —
     при parse_mode=HTML Telegram считает их битым тегом и отклоняет пост,
     поэтому экранируем (грабля чайников Vitek 2026-07-03). Цена — отдельной
-    плашкой-цитатой (blockquote) с 💎 и жирным номиналом (2026-07-05)."""
+    плашкой-цитатой (blockquote) с 💎 и жирным номиналом (2026-07-05).
+    capacity — строки «❄️ Холод / 🔥 Тепло, кВт» сразу после цены (кондиционеры, 2026-10-21)."""
+    power = f"{html.escape(capacity)}\n" if capacity else ""
     return (f"{html.escape(name)}\n<blockquote>💎 <b>{_money(price)}</b></blockquote>\n"
-            f"{DIVIDER}\nКлючевые особенности:\n{html.escape(utp or '')}")
+            f"{power}{DIVIDER}\nКлючевые особенности:\n{html.escape(utp or '')}")
 
 
 _PRICE_BLOCK_RE = re.compile(r"<blockquote>💎 <b>[^<]*</b></blockquote>")
@@ -424,8 +427,14 @@ def main():
         con.close()
         return row if row else ("pending", None, None, None)
 
-    submit_card = make_card_submitter(api, headers, output_dir, owner_chat,
-                                      queue_db, http=http)
+    plain_submit_card = make_card_submitter(api, headers, output_dir, owner_chat,
+                                            queue_db, http=http)
+    site_specs = site_specs_from_env()
+
+    def submit_card(brand, model, utp, photo_path, *args, **kwargs):
+        # мощность кондиционера — первыми строками УТП: генератор кладёт их на карточку
+        power = site_specs.lines(f"{brand} {model}")
+        return plain_submit_card(brand, model, f"{power}\n{utp}" if power else utp, photo_path, *args, **kwargs)
     resolve_photo = make_photo_resolver(store, output_dir, content_dir)
     # АРУ: фото и характеристики берём из своего снимка, а не ищем через research
     prices_dir = Path(cfg.state.db).parent / "prices"
@@ -463,7 +472,7 @@ def main():
         utp = (store.cache_get(f"{item.brand.strip().lower()}|{item.model.strip().lower()}")
                or ("", None))[0]
         price = int(round(item.price * (1 + markup_pct / 100)))
-        caption = build_preview_caption(item.name, price, utp or "")
+        caption = build_preview_caption(item.name, price, utp or "", capacity=site_specs.lines(item.name))
         cs.add(item.key, channel, card, caption)
         # excel-ключи длинные → в callback_data короткий код (бот развернёт обратно)
         code = links.code_for(item.key)
