@@ -215,13 +215,13 @@ def test_visual_submit_reuses_live_job_and_resubmits_failed(env, capsys, tmp_pat
     sent = []
     monkeypatch.setattr(agent_cli, "_fotogen_submit", lambda api, token, data: sent.append(data) or 77)
     monkeypatch.setenv("FOTOGEN_API_URL", "http://fotogen")
-    q = _jobs_db(tmp_path, [(5, "processing", None, None, "orch:a"), (6, "failed", None, "x", "orch:b")])
+    q = _jobs_db(tmp_path, [(5, "processing", None, None, "orch-a"), (6, "failed", None, "x", "orch-b")])
     args = [a if a != "" else str(q) for a in base]
-    _, out = _run(capsys, ["visual-submit", "--scene", "кадр", "--request-key", "orch:a", *args])
+    _, out = _run(capsys, ["visual-submit", "--scene", "кадр", "--request-key", "orch-a", *args])
     assert out == {"job_id": 5, "reused": True} and sent == []
-    _, out = _run(capsys, ["visual-submit", "--scene", "кадр", "--request-key", "orch:b", *args])
+    _, out = _run(capsys, ["visual-submit", "--scene", "кадр", "--request-key", "orch-b", *args])
     assert out == {"job_id": 77, "reused": False}
-    assert sent[0]["category"] == "editorial" and sent[0]["request_key"] == "orch:b"
+    assert sent[0]["category"] == "editorial" and sent[0]["request_key"] == "orch-b"
 
 
 def test_visual_status_reports_path_only_for_existing_file(env, capsys, tmp_path, monkeypatch):

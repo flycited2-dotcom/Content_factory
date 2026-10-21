@@ -12,7 +12,7 @@
     python -m content_factory.agent_cli status [--since UNIX]
     python -m content_factory.agent_cli workers        # генерация, дорожки фото-агента, команды сторожам
     python -m content_factory.agent_cli start-workers  # включить генерацию, сторожам 'start', разбудить cf-excel
-    python -m content_factory.agent_cli visual-submit --scene "..." --request-key orch:<id>  # картинка фото-агентом
+    python -m content_factory.agent_cli visual-submit --scene "..." --request-key orch-<id>  # картинка фото-агентом
     python -m content_factory.agent_cli visual-status --job N
     python -m content_factory.agent_cli publish-tg --key <id> --caption-file F --image P  # пост оркестратора в канал
     python -m content_factory.agent_cli plan-vk --key <id> --caption-file F --image P     # одобренным в ВК-план
