@@ -16,7 +16,7 @@ class Awaiting:
     channel: str
     card_path: str
     caption: str
-    status: str          # pending | published | rejected
+    status: str          # pending | queued (одобрен пачкой, ждёт очереди) | published | rejected | expired
     ts: float = 0.0
 
 
@@ -64,5 +64,33 @@ class ConfirmStore:
         такая серия должна заново пройти конвейер с новой карточкой."""
         with self._c() as c:
             rows = c.execute("SELECT key FROM awaiting "
-                             "WHERE status IN ('pending','rejected','published')").fetchall()
+                             "WHERE status IN ('pending','queued','rejected','published')").fetchall()
         return {r[0] for r in rows}
+
+    # ── единая лента (оркестратор, 2026-10-21): одобрение пачкой → очередь публикации ──
+    def counts(self, now: float, fresh_hours: float, stale_days: float) -> dict:
+        with self._c() as c:
+            row = c.execute(
+                "SELECT SUM(status='pending' AND ts>=?), SUM(status='pending' AND ts<?), "
+                "SUM(status='pending'), SUM(status='queued') FROM awaiting",
+                (now - fresh_hours * 3600, now - stale_days * 86400)).fetchone()
+        fresh, stale, pending, queued = (int(v or 0) for v in row)
+        return {"fresh": fresh, "stale": stale, "pending": pending, "queued": queued}
+
+    def queue_fresh(self, now: float, fresh_hours: float) -> int:
+        """Свежие превью (цены актуальны) — в очередь публикации; публикует publish-next по одному."""
+        with self._c() as c:
+            return c.execute("UPDATE awaiting SET status='queued' WHERE status='pending' AND ts>=?",
+                             (now - fresh_hours * 3600,)).rowcount
+
+    def expire_stale(self, now: float, stale_days: float) -> int:
+        """Превью со старыми ценами снимаются с ожидания (статус expired, не удаляются)."""
+        with self._c() as c:
+            return c.execute("UPDATE awaiting SET status='expired' WHERE status='pending' AND ts<?",
+                             (now - stale_days * 86400,)).rowcount
+
+    def next_queued(self) -> Awaiting | None:
+        with self._c() as c:
+            r = c.execute("SELECT key, channel, card_path, caption, status, ts FROM awaiting "
+                          "WHERE status='queued' ORDER BY ts LIMIT 1").fetchone()
+        return Awaiting(*r) if r else None

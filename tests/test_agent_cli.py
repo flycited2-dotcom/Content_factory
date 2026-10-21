@@ -302,3 +302,49 @@ def test_compose_adds_site_section_and_phone(env, capsys, tmp_path):
     _, out = _run(capsys, ["compose", "--key", "ac", "--channel", "tg_editorial", "--caption-file", str(cap), *base])
     assert "splithome.ru" not in out["text"] and "+7 978 579-29-95" in out["text"]   # ссылка в TG — кнопкой
     assert "сообщения группы" not in out["text"]
+
+
+# ── единая лента ──
+
+def _aw(state, key, age_hours, status="pending"):
+    import sqlite3
+    import time as _t
+    from content_factory.orchestrator.confirm_store import ConfirmStore
+    ConfirmStore(state).add(key, "@chan", "card.png", f"cap {key}")
+    with sqlite3.connect(state) as db:
+        db.execute("UPDATE awaiting SET ts=?, status=? WHERE key=?", (_t.time() - age_hours * 3600, status, key))
+
+
+def test_feed_counts_fresh_and_stale_and_queue_flow(env, capsys, tmp_path, monkeypatch):
+    from content_factory.publish.telegram import PublishResult
+    state, base = env
+    _aw(state, "excel|a|1", 2)
+    _aw(state, "excel|b|2", 50)
+    _aw(state, "excel|c|3", 24 * 30)                     # месяц — цены устарели
+    vk = ["--vk-root", str(tmp_path / "vk")]
+    _, feed = _run(capsys, ["feed", *base, *vk])
+    assert feed["tg"] == {"fresh": 2, "stale": 1, "pending": 3, "queued": 0} and feed["vk_review"] == 0
+    assert _run(capsys, ["approve-fresh", *base])[1] == {"queued": 2}
+    assert _run(capsys, ["expire-stale", *base])[1] == {"expired": 1}
+    published = []
+    monkeypatch.setattr("content_factory.bot.run.make_publish_fn",
+                        lambda *a, **k: (lambda item: published.append(item.key) or PublishResult(ok=True, message_id=5)))
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
+    _, out = _run(capsys, ["publish-next", *base])
+    assert out["published"] == "excel|b|2" and out["left"] == 1          # старший в очереди — первым
+    _run(capsys, ["publish-next", *base])
+    assert _run(capsys, ["publish-next", *base])[1] == {"published": None, "left": 0}
+    assert published == ["excel|b|2", "excel|a|1"]
+
+
+def test_publish_next_failure_returns_item_to_manual_review(env, capsys, monkeypatch):
+    from content_factory.orchestrator.confirm_store import ConfirmStore
+    from content_factory.publish.telegram import PublishResult
+    state, base = env
+    _aw(state, "excel|a|1", 1, status="queued")
+    monkeypatch.setattr("content_factory.bot.run.make_publish_fn",
+                        lambda *a, **k: (lambda item: PublishResult(ok=False, error="Bad Request")))
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
+    _, out = _run(capsys, ["publish-next", *base])
+    assert out["published"] is None and out["error"] == "Bad Request"
+    assert ConfirmStore(state).get("excel|a|1").status == "pending"

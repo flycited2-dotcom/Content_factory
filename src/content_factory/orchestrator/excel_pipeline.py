@@ -182,7 +182,7 @@ class ExcelStore:
             blocked.update(row[0] for row in connection.execute("SELECT key FROM published"))
         if "awaiting" in tables:
             blocked.update(row[0] for row in connection.execute(
-                "SELECT key FROM awaiting WHERE status IN ('pending','rejected','published')"))
+                "SELECT key FROM awaiting WHERE status IN ('pending','queued','rejected','published')"))
         return blocked
 
     @staticmethod
@@ -202,8 +202,8 @@ class ExcelStore:
                     "SELECT key, status, ts FROM awaiting WHERE key LIKE 'excel|%'"):
                 if status in ("published", "rejected"):
                     decided[key] = max(decided.get(key, 0), ts or 0)
-                elif status == "pending":
-                    pending.add(key)                       # ждёт кнопки — не повторяем
+                elif status in ("pending", "queued"):
+                    pending.add(key)                       # ждёт кнопки или очереди — не повторяем
         items = {row[0]: row[1:] for row in connection.execute(
             "SELECT key, status, price FROM excel_items WHERE key LIKE 'excel|%'")}
         out = {}

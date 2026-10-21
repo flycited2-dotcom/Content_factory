@@ -431,6 +431,80 @@ def cmd_plan_vk(args):
     return {"ok": True, "plan_id": item_id, "due_at": slot}
 
 
+# ── Единая лента: что ждёт решения владельца, одобрение пачкой, публикация из очереди ──
+FRESH_HOURS = 72                        # превью не старше 3 суток — цены актуальны, можно пачкой
+STALE_DAYS = 7                          # старше недели — цены устарели, только снять с ожидания
+
+
+def _review_url() -> str | None:
+    chat = str(config("TELEGRAM_REVIEW_CHANNEL_ID", default=""))
+    return f"https://t.me/c/{chat[4:]}/999999999" if chat.startswith("-100") else None
+
+
+def _vk_store(args):
+    from content_factory.orchestrator.vk_content_plan import VkContentPlanStore
+    vk_root = Path(getattr(args, "vk_root", None) or config("VK_ROOT", default="/opt/content-factory-vk"))
+    return VkContentPlanStore(Path(config("VK_PLAN_STATE_DB", default=str(vk_root / "state" / "vk-plan.db"))))
+
+
+def cmd_feed(args):
+    import time as _time
+    from content_factory.orchestrator.confirm_store import ConfirmStore
+    state_db, _, _ = _paths(args)
+    tg = ConfirmStore(state_db).counts(_time.time(), FRESH_HOURS, STALE_DAYS)
+    vk = sum(1 for i in _vk_store(args).list() if i.status == "review" and i.card_path)
+    return {"tg": tg, "vk_review": vk, "review_url": _review_url(),
+            "fresh_hours": FRESH_HOURS, "stale_days": STALE_DAYS}
+
+
+def cmd_approve_fresh(args):
+    import time as _time
+    from content_factory.orchestrator.confirm_store import ConfirmStore
+    state_db, _, _ = _paths(args)
+    return {"queued": ConfirmStore(state_db).queue_fresh(_time.time(), FRESH_HOURS)}
+
+
+def cmd_expire_stale(args):
+    import time as _time
+    from content_factory.orchestrator.confirm_store import ConfirmStore
+    state_db, _, _ = _paths(args)
+    return {"expired": ConfirmStore(state_db).expire_stale(_time.time(), STALE_DAYS)}
+
+
+def cmd_vk_approve(args):
+    store = _vk_store(args)
+    approved = [i.id for i in store.list() if i.status == "review" and store.approve(i.id)]
+    return {"approved": len(approved), "ids": approved}
+
+
+def cmd_publish_next(args):
+    """Один пост из очереди — тем же кодом, что кнопка ✅ в канале проверки (подпись, «📩 Заказать»)."""
+    from content_factory.bot.run import make_publish_fn
+    from content_factory.config import load_config
+    from content_factory.orchestrator.confirm_store import ConfirmStore
+    from content_factory.publish.orders import OrderLinks
+    from content_factory.publish.telegram import PublishState
+    state_db, _, _ = _paths(args)
+    store = ConfirmStore(state_db)
+    item = store.next_queued()
+    if item is None:
+        return {"published": None, "left": 0}
+    cfg = load_config(Path("config/config.yaml"))
+    state = PublishState(state_db)
+    publish_fn = make_publish_fn(config("TELEGRAM_BOT_TOKEN"), cfg.telegram.parse_mode, state,
+                                 order_bot=cfg.telegram.order_bot, links=OrderLinks(state_db))
+    res = publish_fn(item)
+    if res and res.ok:
+        store.mark(item.key, "published")
+        state.mark(item.key, res.message_id, channel=item.channel, caption=item.caption)
+    else:
+        store.mark(item.key, "pending")              # не вышло — обратно на ручное решение, очередь не стоит
+    left = store.counts(0, 0, 0)["queued"]
+    return {"published": item.key if res and res.ok else None, "error": None if res and res.ok
+            else getattr(res, "error", "unknown"), "url": _post_url(item.channel, getattr(res, "message_id", None)),
+            "left": left}
+
+
 def _parser():
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--state-db")
@@ -465,6 +539,11 @@ def _parser():
     vstatus = sub.add_parser("visual-status", parents=[common])
     vstatus.add_argument("--job", type=int, required=True)
     vstatus.set_defaults(fn=cmd_visual_status)
+    for name, fn in (("feed", cmd_feed), ("approve-fresh", cmd_approve_fresh), ("expire-stale", cmd_expire_stale),
+                     ("vk-approve", cmd_vk_approve), ("publish-next", cmd_publish_next)):
+        cmd = sub.add_parser(name, parents=[common])
+        cmd.add_argument("--vk-root")
+        cmd.set_defaults(fn=fn)
     compose = sub.add_parser("compose", parents=[common])
     compose.add_argument("--key", required=True)
     compose.add_argument("--channel", required=True, choices=("tg_editorial", "vk_editorial"))
