@@ -100,15 +100,30 @@ def extract_brand(caption: str) -> str:
     return words[0].upper() if words else "UNKNOWN"
 
 
+DEFAULT_PLAN_TIMES = ("11:30", "18:30")
+
+
+def _env_times(name: str) -> tuple[str, ...]:
+    raw = os.getenv(name, "")
+    return tuple(value.strip() for value in raw.split(",") if value.strip())
+
+
+def plan_times() -> tuple[str, ...]:
+    """Время выходов за день. Задаётся VK_PLAN_TIMES («10:00,11:30,15:30,18:30»)."""
+    return tuple(sorted(_env_times("VK_PLAN_TIMES"))) or DEFAULT_PLAN_TIMES
+
+
 def plan_slots(start: datetime, *, horizon_days: int = 14,
-               times: tuple[str, ...] = ("11:30", "18:30"),
+               times: tuple[str, ...] | None = None,
                weekdays: tuple[int, ...] = (0, 1, 2, 3, 4, 5, 6)) -> list[int]:
-    """Два слота в день, все семь дней недели.
+    """По умолчанию два слота в день, все семь дней недели.
 
     До 31.08.2026 был один выход в день пн–сб: лента выглядела пустой, а
     половину слотов занимали товары, поэтому полезные и сервисные материалы
-    почти не доходили до читателя.
+    почти не доходили до читателя. С 11.2026 стену наполняют товарами:
+    слоты и их вид настраиваются через VK_PLAN_TIMES и VK_EDITORIAL_TIMES.
     """
+    times = plan_times() if times is None else times
     slots: list[int] = []
     day = start.date()
     end = day + timedelta(days=horizon_days)
@@ -1156,12 +1171,22 @@ def editorial_asset_path(asset_root: str | Path, idea_id: str) -> str:
 
 def slot_ordinal(due_at: int) -> int:
     moment = datetime.fromtimestamp(due_at)
+    times = plan_times()
+    hhmm = moment.strftime("%H:%M")
+    if hhmm in times:
+        # Свой номер у каждого слота дня: от него зависит группа товара, и два
+        # товара за день не должны попадать в одну группу.
+        return moment.date().toordinal() * len(times) + times.index(hhmm)
     return moment.date().toordinal() * 2 + (1 if moment.hour >= 15 else 0)
 
 
 def slot_kind(due_at: int) -> str:
-    """Товарные и экспертные посты идут строго по очереди: ровно половина ленты на каждый
-    вид, и два однотипных поста подряд не встают. Товары всегда в дневном слоте."""
+    """По умолчанию товар и экспертный пост идут строго по очереди, товар — в дневном
+    слоте. Если задан VK_EDITORIAL_TIMES, экспертные только в этих слотах, остальные — товар."""
+    editorial = _env_times("VK_EDITORIAL_TIMES")
+    if editorial:
+        return ("editorial" if datetime.fromtimestamp(due_at).strftime("%H:%M") in editorial
+                else "product")
     return "product" if slot_ordinal(due_at) % 2 == 0 else "editorial"
 
 
