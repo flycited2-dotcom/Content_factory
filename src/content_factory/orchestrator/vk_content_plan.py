@@ -1349,6 +1349,13 @@ def run_cycle(*, store: VkContentPlanStore, source_db: str, telegram_token: str,
             result["planned"].extend(materialize_catalog_plan(
                 store, catalog_items, now, client, catalog_photo_dir,
             ))
+            # Сбой фотоагента не должен засчитываться в автоостановку завода:
+            # без графитовой карточки пост выйдет со светлой плашкой.
+            try:
+                from content_factory.orchestrator.vk_graphite import run_graphite
+                result["graphite"] = run_graphite(store, int(now.timestamp()))
+            except Exception as exc:  # noqa: BLE001
+                result["graphite"] = {"error": f"{type(exc).__name__}: {exc}"[:300]}
         else:
             live_captions = build_live_caption_map()
             candidates = load_candidates(source_db, live_captions)

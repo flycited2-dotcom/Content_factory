@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -33,6 +34,7 @@ from content_factory.storefront.product_posts import (
     prepare_photo,
     write_post,
 )
+from content_factory.storefront.tile_card import render_tile_card, repaint_price
 
 CATALOG_PREFIX = "catalog:"
 GROUP_CATEGORY = {
@@ -45,6 +47,21 @@ REPEAT_DAYS = 120
 ATTEMPTS_PER_SLOT = 12
 _LINK = re.compile(r"https://splithome\.ru/product/[^\s]+")
 _PRICE_LINE = re.compile(r"(💎 )([0-9][0-9 ]*)( ₽)")
+TILE_SUFFIX = "_tile.jpg"
+
+
+def card_for(item: CatalogItem, price: int, image: Path) -> Path:
+    """Картинка поста: светлая карточка-плашка, а если характеристик мало — фото на белом.
+
+    VK_CATALOG_CARD_STYLE=plain возвращает прежнее голое фото производителя.
+    """
+    if os.getenv("VK_CATALOG_CARD_STYLE", "tiles") == "plain":
+        return image
+    out = image.with_name(image.stem + TILE_SUFFIX)
+    try:
+        return render_tile_card(item, price, image, out) or image
+    except (OSError, ValueError):
+        return image
 
 
 def link_line(item: CatalogItem) -> str:
@@ -129,9 +146,10 @@ def materialize_catalog_plan(store: VkContentPlanStore, items: list[CatalogItem]
             if not image.is_file() and photo(client, [item.picture, *item.pictures], image) is None:
                 skipped.add(item.id)
                 continue
+            card = card_for(item, live.price, image)
             candidate = VkPlanCandidate(
                 source_key=f"{CATALOG_PREFIX}{item.id}", source_ts=float(due_at),
-                caption=build_caption(item, live.price), card_path=str(image.resolve()),
+                caption=build_caption(item, live.price), card_path=str(card.resolve()),
                 category=GROUP_CATEGORY[item.group], brand=item.brand.upper(),
                 content_type="product",
             )
@@ -184,6 +202,9 @@ def refresh_catalog_items(store: VkContentPlanStore, client: httpx.Client, now: 
                                     item.caption, count=1)
             if store.update_caption(item.id, fresh):
                 result["repriced"].append(item.id)
+                # Цена нарисована и на карточке-плашке: иначе текст и картинка разойдутся.
+                if str(item.card_path).endswith(TILE_SUFFIX):
+                    repaint_price(item.card_path, live.price)
     return result
 
 
