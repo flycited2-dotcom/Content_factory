@@ -423,7 +423,16 @@ def main(argv: list[str] | None = None) -> int:
                          ensure_ascii=False))
         return 0
 
-    client = VkMetricsClient(config("VK_ACCESS_TOKEN", default=""), args.owner_id)
+    # wall.getById и stats ключом сообщества недоступны (VK 27): нужен пользовательский
+    # токен, тот же, что у планировщика. Ключ сообщества — резерв.
+    from content_factory.publish.vk_oauth import resolve_publisher_token
+    token = resolve_publisher_token(
+        store_path=os.getenv("VK_TOKEN_STORE", "state/vk-tokens.json"),
+        env_token=config("VK_ACCESS_TOKEN", default=""),
+        app_id=int(os.getenv("VK_APP_ID", "54732587")),
+        redirect_uri=os.getenv("VK_REDIRECT_URI", "https://climat-simf.ru/"),
+    )
+    client = VkMetricsClient(token, args.owner_id)
     collected = collect(store, client)
     if args.action == "report":
         report = weekly_report(store, args.source_db, client)

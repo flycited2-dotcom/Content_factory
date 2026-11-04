@@ -10,6 +10,7 @@ import hashlib
 import json
 import secrets
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -88,11 +89,33 @@ class VkTokenStore:
         expires_at = int(current.get("saved_at", 0)) + int(current.get("expires_in", 0))
         if current.get("access_token") and expires_at > int(time.time()) + leeway_seconds:
             return str(current["access_token"])
-        if not current.get("refresh_token") or not current.get("device_id"):
-            raise RuntimeError("VK OAuth ещё не завершён: refresh_token/device_id отсутствуют")
-        refreshed = client.refresh(str(current["refresh_token"]), str(current["device_id"]))
-        self.save(refreshed)
-        return str(refreshed["access_token"])
+        # Токен берут и планировщик, и аналитика. Обновление ротирует пару: без
+        # блокировки второй процесс обновил бы уже недействительным refresh_token.
+        with self._refresh_lock():
+            current = self.load()
+            expires_at = int(current.get("saved_at", 0)) + int(current.get("expires_in", 0))
+            if current.get("access_token") and expires_at > int(time.time()) + leeway_seconds:
+                return str(current["access_token"])
+            if not current.get("refresh_token") or not current.get("device_id"):
+                raise RuntimeError("VK OAuth ещё не завершён: refresh_token/device_id отсутствуют")
+            refreshed = client.refresh(str(current["refresh_token"]), str(current["device_id"]))
+            self.save(refreshed)
+            return str(refreshed["access_token"])
+
+    @contextmanager
+    def _refresh_lock(self):
+        try:
+            import fcntl
+        except ImportError:  # Windows: локальные прогоны, параллельных процессов нет
+            yield
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.path.with_name(self.path.name + ".lock"), "a") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 class VkOAuthClient:
