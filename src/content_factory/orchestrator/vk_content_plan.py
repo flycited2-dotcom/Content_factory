@@ -42,6 +42,10 @@ from content_factory.dedupe import post_fingerprint, text_similarity
 
 DEFAULT_PLAN_DB = "/opt/content-factory-vk/state/vk-plan.db"
 DEFAULT_SOURCE_DB = "/opt/content-factory/state/content_factory.db"
+# Telegram мог принять превью, но не успеть ответить (сбой 03.11.2026): повторная
+# отправка каждые 5 минут дала владельцу 11 копий одной карточки. После неудачи
+# пост ждёт час, а автоповтора внутри отправки нет.
+REVIEW_RETRY_COOLDOWN = 3600
 ACTIVE_STATUSES = {
     "visual_pending", "planned", "review", "revision_requested", "approved",
     "photo_pending", "photo_confirmed",
@@ -609,6 +613,20 @@ class VkContentPlanStore:
     def mark_review(self, item_id: int, message_id: int | None) -> bool:
         return self._transition(item_id, ("planned",), "review",
                                 telegram_message_id=message_id)
+
+    def note_review_failure(self, item_id: int, error: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO vk_plan_events(ts,plan_id,event,details) VALUES(?,?,?,?)",
+                (int(time.time()), int(item_id), "review_send_failed", str(error)[:300]))
+
+    def review_failed_recently(self, item_id: int, now: int,
+                               cooldown: int = REVIEW_RETRY_COOLDOWN) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM vk_plan_events WHERE plan_id=? AND event='review_send_failed' "
+                "AND ts>? LIMIT 1", (int(item_id), int(now) - int(cooldown))).fetchone()
+        return row is not None
 
     def approve(self, item_id: int) -> bool:
         item = self.get(item_id)
@@ -1390,7 +1408,10 @@ def run_cycle(*, store: VkContentPlanStore, source_db: str, telegram_token: str,
             ),
         )
 
-    for item in store.for_review(int(now.timestamp())):
+    review_now = int(now.timestamp())
+    candidates = [item for item in store.for_review(review_now, limit=5)
+                  if not store.review_failed_recently(item.id, review_now)][:1]
+    for item in candidates:
         body, _tracked_url = publication_caption(item)
         if dry_run:
             result["reviewed"].append(item.id)
@@ -1398,7 +1419,7 @@ def run_cycle(*, store: VkContentPlanStore, source_db: str, telegram_token: str,
         if item.card_path:
             preview = publish_post(
                 telegram_token, review_chat, item.card_path, review_caption(item, body=body),
-                http=client, reply_markup=callback_markup(item), retries=1,
+                http=client, reply_markup=callback_markup(item), retries=0,
             )
             message_id = preview.message_id if preview.ok else None
             error = preview.error
@@ -1411,6 +1432,7 @@ def run_cycle(*, store: VkContentPlanStore, source_db: str, telegram_token: str,
         if message_id and store.mark_review(item.id, message_id):
             result["reviewed"].append(item.id)
         else:
+            store.note_review_failure(item.id, error or "state conflict")
             result["errors"].append(f"review {item.id}: {error or 'state conflict'}")
 
     publisher = VkPublisher(vk_token, owner_id, dry_run=dry_run, http=client)
