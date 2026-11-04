@@ -284,13 +284,20 @@ class VkAnalyticsStore:
 
 class VkMetricsClient:
     def __init__(self, token: str, owner_id: int, *, api_version: str = "5.199",
-                 http: httpx.Client | None = None):
+                 http: httpx.Client | None = None, min_interval: float = 0.4):
         self.token = token
         self.owner_id = int(owner_id)
         self.api_version = api_version
         self.http = http or httpx.Client(timeout=30, follow_redirects=True)
+        self.min_interval = min_interval
+        self._last_call = 0.0
 
     def _api(self, method: str, data: dict) -> object:
+        # Пользовательский токен VK пускает не больше 3 запросов в секунду (VK 6).
+        wait = self._last_call + self.min_interval - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        self._last_call = time.monotonic()
         response = self.http.post(
             f"{VK_API}/{method}",
             data={**data, "access_token": self.token, "v": self.api_version},
