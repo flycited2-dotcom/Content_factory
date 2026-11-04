@@ -1348,7 +1348,9 @@ def run_cycle(*, store: VkContentPlanStore, source_db: str, telegram_token: str,
             # источник (готовые карточки) отключён: его списочные подписи не продавали.
             from content_factory.orchestrator.vk_catalog_plan import (
                 load_catalog_items, materialize_catalog_plan, refresh_catalog_items,
+                retire_excluded,
             )
+            result["retired_suppliers"] = retire_excluded(store)
             result["catalog_refresh"] = refresh_catalog_items(store, client, now)
             catalog_items, result["catalog_source"] = load_catalog_items(
                 catalog_dir, catalog_snapshot)

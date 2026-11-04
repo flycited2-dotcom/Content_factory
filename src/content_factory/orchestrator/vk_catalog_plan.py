@@ -96,7 +96,37 @@ def load_catalog_items(catalog_dir, snapshot_path, refresh=None) -> tuple[list[C
     if not items:
         items = load_catalog(catalog_dir)
         report["source"] = "yml"
+    excluded = excluded_suppliers()
+    if excluded:
+        items = [item for item in items if item.id.split(":", 1)[0] not in excluded]
+        report["excluded_suppliers"] = sorted(excluded)
     return items, report
+
+
+def excluded_suppliers() -> set[str]:
+    """Поставщики, с которыми владелец не работает (VK_CATALOG_EXCLUDE_SUPPLIERS=rusklimat).
+
+    Выгрузка сайта на 61 % состоит из Русклимата (11.2026), и без фильтра лента
+    заполнялась его товарами, хотя владелец с ним уже не работает.
+    """
+    raw = os.getenv("VK_CATALOG_EXCLUDE_SUPPLIERS", "")
+    return {value.strip().casefold() for value in raw.split(",") if value.strip()}
+
+
+def retire_excluded(store: VkContentPlanStore) -> list[int]:
+    """Снять с плана ещё не вышедшие посты исключённых поставщиков (идемпотентно)."""
+    excluded = excluded_suppliers()
+    retired: list[int] = []
+    if not excluded:
+        return retired
+    for item in store.list():
+        parts = item.source_key.split(":")
+        if (item.source_key.startswith(CATALOG_PREFIX) and len(parts) > 2
+                and parts[1].casefold() in excluded
+                and store._transition(item.id, ("planned", "review", "approved"),
+                                      "superseded")):
+            retired.append(item.id)
+    return retired
 
 
 def _safe(name: str) -> str:
