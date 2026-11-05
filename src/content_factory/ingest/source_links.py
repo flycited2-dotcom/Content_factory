@@ -94,7 +94,7 @@ def _file_digest(path: Path, fingerprint: tuple[int, ...]) -> str | None:
 @lru_cache(maxsize=128)
 def _usable_price(path: Path, fingerprint: tuple[int, ...]) -> bool:
     # Import lazily: excel_price may call active_source_paths from its loader.
-    from content_factory.ingest.excel_price import PriceItem, parse_price_xlsx
+    from content_factory.ingest.excel_price import PriceItem, parse_price_xlsx_cached as parse_price_xlsx
 
     try:
         if _fingerprint(path) != fingerprint:
