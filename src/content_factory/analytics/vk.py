@@ -258,6 +258,39 @@ class VkAnalyticsStore:
             return 0
         return created
 
+    def known_post_ids(self) -> set[int]:
+        with self._connect() as connection:
+            return {int(row[0]) for row in connection.execute("SELECT post_id FROM vk_publications")}
+
+    def caption_heads(self, plan_ids: list[int]) -> dict[int, str]:
+        """Первые строки текстов плана; нет таблицы плана — пустой словарь."""
+        if not plan_ids:
+            return {}
+        marks = ",".join("?" * len(plan_ids))
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    f"SELECT id,caption FROM vk_content_plan WHERE id IN ({marks})", plan_ids,
+                ).fetchall()
+        except sqlite3.OperationalError:
+            return {}
+        return {int(plan_id): _head(adapt_vk_text(caption or "")) for plan_id, caption in rows}
+
+    def repoint(self, plan_id: int, old_post_id: int, new_post_id: int) -> None:
+        """Перевести запись плана и аналитики на номер, который VK дал при выходе."""
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE vk_publications SET post_id=? WHERE plan_id=? AND post_id=?",
+                (int(new_post_id), int(plan_id), int(old_post_id)),
+            )
+            try:
+                connection.execute(
+                    "UPDATE vk_content_plan SET vk_post_id=? WHERE id=? AND vk_post_id=?",
+                    (int(new_post_id), int(plan_id), int(old_post_id)),
+                )
+            except sqlite3.OperationalError:
+                pass
+
     def add_metric(self, metric: Metric, *, now: int | None = None) -> None:
         with self._connect() as connection:
             connection.execute(
@@ -337,6 +370,19 @@ class VkMetricsClient:
             reposts=int((post.get("reposts") or {}).get("count", 0) or 0),
         )
 
+    def wall_posts(self, since: int, *, page: int = 100, limit: int = 2000) -> list[dict]:
+        """Записи стены (новые сверху) до момента ``since``; закреп не обрывает обход."""
+        posts: list[dict] = []
+        for offset in range(0, limit, page):
+            response = self._api("wall.get", {"owner_id": self.owner_id,
+                                              "count": page, "offset": offset})
+            items = response.get("items", []) if isinstance(response, dict) else []
+            posts += items
+            unpinned = [item for item in items if not item.get("is_pinned")]
+            if len(items) < page or (unpinned and int(unpinned[-1]["date"]) < since):
+                break
+        return posts
+
     def recent_incoming_conversations(self, start: int) -> int | None:
         try:
             response = self._api(
@@ -352,19 +398,76 @@ class VkMetricsClient:
             return None
 
 
+REPOINT_WINDOW = 900   # отложенная запись выходит в течение секунд после publish_date
+
+
+def _head(text: str) -> str:
+    """Первая строка без пробелов — для сверки записи плана с записью на стене."""
+    first = next((line for line in (text or "").splitlines() if line.strip()), "")
+    return "".join(first.split())[:40]
+
+
+def reconcile_post_ids(store: VkAnalyticsStore, client: VkMetricsClient,
+                       missing: list[Publication]) -> dict[int, int]:
+    """Найти новые номера вышедших отложенных записей.
+
+    VK при выходе отложенной записи присваивает ей новый post_id, а старый перестаёт
+    отдаваться wall.getById (в бою 119 из 126 записей плана указывали в пустоту).
+    Запись на стене ищется по времени выхода (не раньше due_at, не позже окна) и первой
+    строке текста; принимается только однозначное совпадение, не занятое другой записью.
+    """
+    if not missing:
+        return {}
+    since = min(p.due_at for p in missing) - 60
+    wall = client.wall_posts(since)
+    taken = store.known_post_ids()
+    heads = store.caption_heads([p.plan_id for p in missing])
+    repointed: dict[int, int] = {}
+    for publication in missing:
+        head = heads.get(publication.plan_id, "")
+        hits = [post for post in wall
+                if 0 <= int(post["date"]) - publication.due_at <= REPOINT_WINDOW
+                and int(post["id"]) not in taken
+                and (not head or _head(post.get("text", "")) == head)]
+        if len(hits) != 1:
+            continue
+        new_id = int(hits[0]["id"])
+        store.repoint(publication.plan_id, publication.post_id, new_id)
+        taken.add(new_id)
+        repointed[publication.plan_id] = new_id
+    return repointed
+
+
 def collect(store: VkAnalyticsStore, client: VkMetricsClient,
             *, now: int | None = None) -> dict:
-    result = {"collected": 0, "missing": 0, "errors": []}
-    for publication in store.due_publications(now):
+    result = {"collected": 0, "missing": 0, "repointed": 0, "errors": []}
+    missing: list[Publication] = []
+
+    def measure(publication: Publication) -> bool:
         try:
             metric = client.post_metric(publication)
             if metric is None:
-                result["missing"] += 1
-                continue
+                return False
             store.add_metric(metric, now=now)
             result["collected"] += 1
         except (RuntimeError, httpx.HTTPError, ValueError, TypeError) as exc:
             result["errors"].append(f"post {publication.post_id}: {exc}")
+        return True
+
+    for publication in store.due_publications(now):
+        if not measure(publication):
+            missing.append(publication)
+    try:
+        repointed = reconcile_post_ids(store, client, missing)
+    except (RuntimeError, httpx.HTTPError, ValueError, TypeError, KeyError) as exc:
+        result["errors"].append(f"сверка номеров: {exc}")
+        repointed = {}
+    result["repointed"] = len(repointed)
+    for publication in missing:
+        new_id = repointed.get(publication.plan_id)
+        if new_id is None or not measure(
+                Publication(**{**publication.__dict__, "post_id": new_id})):
+            result["missing"] += 1
     return result
 
 
