@@ -396,3 +396,15 @@ def test_resolve_frost_and_heat_pump_from_profiles(env, capsys):
     assert [i["name"] for i in _run(capsys, [*args, "--min-temp", "25"])[1]["items"]] == ["Кондиционер DAICHI SIBERIA SIB25"]
     assert len(_run(capsys, [*args, "--heat-pump"])[1]["items"]) == 1
     assert len(_run(capsys, [*args, "--inverter"])[1]["items"]) == 2
+
+
+def test_compose_strips_external_links_and_sources_block(env, capsys, tmp_path):
+    _, base = env
+    cap = tmp_path / "cap.txt"
+    cap.write_text("Тепловой насос греет зимой.\n\n💡 Вывод простой.\n\n📚 Источники:\nhttps://mir-klimata.info/x\n"
+                   "https://tica.ru/y\n\nСм. также (https://abok.ru/z) выше.", encoding="utf-8")
+    _, out = _run(capsys, ["compose", "--key", "hp", "--channel", "vk_editorial", "--caption-file", str(cap), *base])
+    text = out["text"]
+    assert "mir-klimata" not in text and "tica.ru" not in text and "abok.ru" not in text and "Источники" not in text
+    assert "💡 Вывод простой." in text and "См. также выше." in text
+    assert text.count("https://") == 1 and "splithome.ru" in text            # осталась только своя ссылка подвала

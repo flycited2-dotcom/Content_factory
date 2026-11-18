@@ -400,8 +400,29 @@ def site_link(caption: str, channel: str, key: str) -> tuple[str, str]:
     return f"{base}{path}{'&' if '?' in path else '?'}{utm}", label
 
 
+_URL_LINE = re.compile(r"^\s*(?:[-•▫️🔗]\s*)?https?://\S+\s*$")
+_SOURCES_HEAD = re.compile(r"^\s*(?:📚\s*)?источники?\s*:?\s*$", re.IGNORECASE)
+_URL_ANY = re.compile(r"\s*\(?https?://\S+\)?")
+
+
+def strip_links(text: str) -> str:
+    """Ссылок на чужие сайты в посте быть не должно (владелец, 2026-11-05: «зачем отправлять людей на другой
+    сайт»): блок «Источники» с адресами и любые http-адреса вырезаются — свой сайт добавляет подвал."""
+    out, in_sources = [], False
+    for line in text.splitlines():
+        if _SOURCES_HEAD.match(line):
+            in_sources = True
+            continue
+        if in_sources and (_URL_LINE.match(line) or not line.strip()):
+            continue
+        in_sources = False
+        out.append(_URL_ANY.sub("", line).rstrip() if "http" in line else line)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
+
+
 def compose_post(text: str, channel: str, key: str) -> str:
-    """Готовый текст поста: тело редактора + подвал (раздел сайта, консультация по телефону)."""
+    """Готовый текст поста: тело редактора без чужих ссылок + подвал (раздел сайта, консультация по телефону)."""
+    text = strip_links(text)
     url, label = site_link(text, channel, key)
     phone = config("AGENT_CONTACT_PHONE", default=CONTACT_PHONE)
     lines = ["", "━━━━━━━━━━"]

@@ -516,3 +516,17 @@ def test_section_search_skips_brandless_duplicates_of_published():
              PriceItem("Холодильники", "2", "", "Холодильник Beko X100", 2)]
     found = search_items(items, "Холодильники", {"excel|indesit|ds 3180 g"})
     assert [i.name for i in found] == ["Холодильник Beko X100"]
+
+
+def test_disk_parse_cache_reused_until_file_changes(tmp_path, monkeypatch):
+    # владелец, 2026-11-05: каждый вызов agent_cli — новый процесс; разбор xlsx не должен повторяться
+    from content_factory.ingest import excel_price
+    path = _xlsx(tmp_path, [["1", "A1", "LG", "Стиральная машина LG F2", "30000", ""]])
+    first = excel_price.parse_price_xlsx_cached(path)
+    assert (tmp_path / ".parse_cache" / f"{path.name}.json").exists()
+    monkeypatch.setattr(excel_price, "parse_price_xlsx", lambda p: (_ for _ in ()).throw(AssertionError("повторный разбор")))
+    again = excel_price.parse_price_xlsx_cached(path)
+    assert [(i.name, i.price, i.category_path) for i in again] == [(i.name, i.price, i.category_path) for i in first]
+    monkeypatch.undo()
+    path2 = _xlsx(tmp_path, [["1", "A1", "LG", "Стиральная машина LG F2", "31000", ""]])   # файл изменился
+    assert [i.price for i in excel_price.parse_price_xlsx_cached(path2)] == [31000]

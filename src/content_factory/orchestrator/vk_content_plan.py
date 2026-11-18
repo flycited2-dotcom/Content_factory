@@ -42,6 +42,10 @@ from content_factory.dedupe import post_fingerprint, text_similarity
 
 DEFAULT_PLAN_DB = "/opt/content-factory-vk/state/vk-plan.db"
 DEFAULT_SOURCE_DB = "/opt/content-factory/state/content_factory.db"
+# Telegram мог принять превью, но не успеть ответить (сбой 03.11.2026): повторная
+# отправка каждые 5 минут дала владельцу 11 копий одной карточки. После неудачи
+# пост ждёт час, а автоповтора внутри отправки нет.
+REVIEW_RETRY_COOLDOWN = 3600
 ACTIVE_STATUSES = {
     "visual_pending", "planned", "review", "revision_requested", "approved",
     "photo_pending", "photo_confirmed",
@@ -100,15 +104,30 @@ def extract_brand(caption: str) -> str:
     return words[0].upper() if words else "UNKNOWN"
 
 
+DEFAULT_PLAN_TIMES = ("11:30", "18:30")
+
+
+def _env_times(name: str) -> tuple[str, ...]:
+    raw = os.getenv(name, "")
+    return tuple(value.strip() for value in raw.split(",") if value.strip())
+
+
+def plan_times() -> tuple[str, ...]:
+    """Время выходов за день. Задаётся VK_PLAN_TIMES («10:00,11:30,15:30,18:30»)."""
+    return tuple(sorted(_env_times("VK_PLAN_TIMES"))) or DEFAULT_PLAN_TIMES
+
+
 def plan_slots(start: datetime, *, horizon_days: int = 14,
-               times: tuple[str, ...] = ("11:30", "18:30"),
+               times: tuple[str, ...] | None = None,
                weekdays: tuple[int, ...] = (0, 1, 2, 3, 4, 5, 6)) -> list[int]:
-    """Два слота в день, все семь дней недели.
+    """По умолчанию два слота в день, все семь дней недели.
 
     До 31.08.2026 был один выход в день пн–сб: лента выглядела пустой, а
     половину слотов занимали товары, поэтому полезные и сервисные материалы
-    почти не доходили до читателя.
+    почти не доходили до читателя. С 11.2026 стену наполняют товарами:
+    слоты и их вид настраиваются через VK_PLAN_TIMES и VK_EDITORIAL_TIMES.
     """
+    times = plan_times() if times is None else times
     slots: list[int] = []
     day = start.date()
     end = day + timedelta(days=horizon_days)
@@ -594,6 +613,20 @@ class VkContentPlanStore:
     def mark_review(self, item_id: int, message_id: int | None) -> bool:
         return self._transition(item_id, ("planned",), "review",
                                 telegram_message_id=message_id)
+
+    def note_review_failure(self, item_id: int, error: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO vk_plan_events(ts,plan_id,event,details) VALUES(?,?,?,?)",
+                (int(time.time()), int(item_id), "review_send_failed", str(error)[:300]))
+
+    def review_failed_recently(self, item_id: int, now: int,
+                               cooldown: int = REVIEW_RETRY_COOLDOWN) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM vk_plan_events WHERE plan_id=? AND event='review_send_failed' "
+                "AND ts>? LIMIT 1", (int(item_id), int(now) - int(cooldown))).fetchone()
+        return row is not None
 
     def approve(self, item_id: int) -> bool:
         item = self.get(item_id)
@@ -1156,12 +1189,22 @@ def editorial_asset_path(asset_root: str | Path, idea_id: str) -> str:
 
 def slot_ordinal(due_at: int) -> int:
     moment = datetime.fromtimestamp(due_at)
+    times = plan_times()
+    hhmm = moment.strftime("%H:%M")
+    if hhmm in times:
+        # Свой номер у каждого слота дня: от него зависит группа товара, и два
+        # товара за день не должны попадать в одну группу.
+        return moment.date().toordinal() * len(times) + times.index(hhmm)
     return moment.date().toordinal() * 2 + (1 if moment.hour >= 15 else 0)
 
 
 def slot_kind(due_at: int) -> str:
-    """Товарные и экспертные посты идут строго по очереди: ровно половина ленты на каждый
-    вид, и два однотипных поста подряд не встают. Товары всегда в дневном слоте."""
+    """По умолчанию товар и экспертный пост идут строго по очереди, товар — в дневном
+    слоте. Если задан VK_EDITORIAL_TIMES, экспертные только в этих слотах, остальные — товар."""
+    editorial = _env_times("VK_EDITORIAL_TIMES")
+    if editorial:
+        return ("editorial" if datetime.fromtimestamp(due_at).strftime("%H:%M") in editorial
+                else "product")
     return "product" if slot_ordinal(due_at) % 2 == 0 else "editorial"
 
 
@@ -1305,7 +1348,9 @@ def run_cycle(*, store: VkContentPlanStore, source_db: str, telegram_token: str,
             # источник (готовые карточки) отключён: его списочные подписи не продавали.
             from content_factory.orchestrator.vk_catalog_plan import (
                 load_catalog_items, materialize_catalog_plan, refresh_catalog_items,
+                retire_excluded,
             )
+            result["retired_suppliers"] = retire_excluded(store)
             result["catalog_refresh"] = refresh_catalog_items(store, client, now)
             catalog_items, result["catalog_source"] = load_catalog_items(
                 catalog_dir, catalog_snapshot)
@@ -1324,6 +1369,13 @@ def run_cycle(*, store: VkContentPlanStore, source_db: str, telegram_token: str,
             result["planned"].extend(materialize_catalog_plan(
                 store, catalog_items, now, client, catalog_photo_dir,
             ))
+            # Сбой фотоагента не должен засчитываться в автоостановку завода:
+            # без графитовой карточки пост выйдет со светлой плашкой.
+            try:
+                from content_factory.orchestrator.vk_graphite import run_graphite
+                result["graphite"] = run_graphite(store, int(now.timestamp()))
+            except Exception as exc:  # noqa: BLE001
+                result["graphite"] = {"error": f"{type(exc).__name__}: {exc}"[:300]}
         else:
             live_captions = build_live_caption_map()
             candidates = load_candidates(source_db, live_captions)
@@ -1358,7 +1410,10 @@ def run_cycle(*, store: VkContentPlanStore, source_db: str, telegram_token: str,
             ),
         )
 
-    for item in store.for_review(int(now.timestamp())):
+    review_now = int(now.timestamp())
+    candidates = [item for item in store.for_review(review_now, limit=5)
+                  if not store.review_failed_recently(item.id, review_now)][:1]
+    for item in candidates:
         body, _tracked_url = publication_caption(item)
         if dry_run:
             result["reviewed"].append(item.id)
@@ -1366,7 +1421,7 @@ def run_cycle(*, store: VkContentPlanStore, source_db: str, telegram_token: str,
         if item.card_path:
             preview = publish_post(
                 telegram_token, review_chat, item.card_path, review_caption(item, body=body),
-                http=client, reply_markup=callback_markup(item), retries=1,
+                http=client, reply_markup=callback_markup(item), retries=0,
             )
             message_id = preview.message_id if preview.ok else None
             error = preview.error
@@ -1379,6 +1434,7 @@ def run_cycle(*, store: VkContentPlanStore, source_db: str, telegram_token: str,
         if message_id and store.mark_review(item.id, message_id):
             result["reviewed"].append(item.id)
         else:
+            store.note_review_failure(item.id, error or "state conflict")
             result["errors"].append(f"review {item.id}: {error or 'state conflict'}")
 
     publisher = VkPublisher(vk_token, owner_id, dry_run=dry_run, http=client)

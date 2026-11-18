@@ -260,6 +260,37 @@ def set_tg_enabled(prices_dir, slot: str, on: bool) -> None:
 _PARSE_CACHE: dict = {}   # path -> (mtime, size, items) — прайс не меняется между кликами
 
 
+def parse_price_xlsx_cached(path) -> list[PriceItem]:
+    """parse_price_xlsx с кэшем разбора НА ДИСКЕ (prices_dir/.parse_cache/<файл>.json) по (mtime, size).
+
+    Разбор xlsx через openpyxl — 15–30 с на комплект прайсов, а каждый вызов agent_cli — новый процесс:
+    без дискового кэша оркестратор тратил на одно сообщение 3–4 таких разбора (владелец, 2026-11-05:
+    «он долго реагирует»). Кэш не читается/не пишется — молча разбираем заново."""
+    import dataclasses
+    import json
+    p = Path(path)
+    st = p.stat()
+    cache = p.parent / ".parse_cache" / f"{p.name}.json"
+    try:
+        data = json.loads(cache.read_text(encoding="utf-8"))
+        if data["mtime"] == st.st_mtime and data["size"] == st.st_size:
+            return [PriceItem(**{**d, "category_path": tuple(d.get("category_path") or ()),
+                                 "category_ids": tuple(d.get("category_ids") or ())}) for d in data["items"]]
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    items = parse_price_xlsx(p)
+    try:
+        cache.parent.mkdir(exist_ok=True)
+        tmp = cache.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"mtime": st.st_mtime, "size": st.st_size,
+                                   "items": [dataclasses.asdict(i) for i in items]}, ensure_ascii=False),
+                       encoding="utf-8")
+        tmp.replace(cache)
+    except OSError:
+        pass
+    return items
+
+
 def _parse_cached(p: Path) -> list[PriceItem]:
     """parse_price_xlsx с кэшем по (mtime, size). Возвращает КОПИИ позиций:
     _apply_markup меняет цену на месте, кэш должен оставаться чистым."""
@@ -267,7 +298,7 @@ def _parse_cached(p: Path) -> list[PriceItem]:
     st = p.stat()
     hit = _PARSE_CACHE.get(str(p))
     if not hit or hit[0] != st.st_mtime or hit[1] != st.st_size:
-        hit = (st.st_mtime, st.st_size, parse_price_xlsx(p))
+        hit = (st.st_mtime, st.st_size, parse_price_xlsx_cached(p))
         _PARSE_CACHE[str(p)] = hit
     return [copy.copy(i) for i in hit[2]]
 
