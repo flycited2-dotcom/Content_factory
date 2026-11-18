@@ -166,7 +166,9 @@ class VkAnalyticsStore:
             )
 
     def _connect(self):
-        return sqlite3.connect(self.path)
+        # Планировщик пишет в ту же базу каждые 5 минут: без ожидания недельный
+        # отчёт падал с «database is locked».
+        return sqlite3.connect(self.path, timeout=60)
 
     def level(self) -> str:
         with self._connect() as connection:
@@ -258,6 +260,39 @@ class VkAnalyticsStore:
             return 0
         return created
 
+    def known_post_ids(self) -> set[int]:
+        with self._connect() as connection:
+            return {int(row[0]) for row in connection.execute("SELECT post_id FROM vk_publications")}
+
+    def caption_heads(self, plan_ids: list[int]) -> dict[int, str]:
+        """Первые строки текстов плана; нет таблицы плана — пустой словарь."""
+        if not plan_ids:
+            return {}
+        marks = ",".join("?" * len(plan_ids))
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    f"SELECT id,caption FROM vk_content_plan WHERE id IN ({marks})", plan_ids,
+                ).fetchall()
+        except sqlite3.OperationalError:
+            return {}
+        return {int(plan_id): _head(adapt_vk_text(caption or "")) for plan_id, caption in rows}
+
+    def repoint(self, plan_id: int, old_post_id: int, new_post_id: int) -> None:
+        """Перевести запись плана и аналитики на номер, который VK дал при выходе."""
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE vk_publications SET post_id=? WHERE plan_id=? AND post_id=?",
+                (int(new_post_id), int(plan_id), int(old_post_id)),
+            )
+            try:
+                connection.execute(
+                    "UPDATE vk_content_plan SET vk_post_id=? WHERE id=? AND vk_post_id=?",
+                    (int(new_post_id), int(plan_id), int(old_post_id)),
+                )
+            except sqlite3.OperationalError:
+                pass
+
     def add_metric(self, metric: Metric, *, now: int | None = None) -> None:
         with self._connect() as connection:
             connection.execute(
@@ -284,13 +319,20 @@ class VkAnalyticsStore:
 
 class VkMetricsClient:
     def __init__(self, token: str, owner_id: int, *, api_version: str = "5.199",
-                 http: httpx.Client | None = None):
+                 http: httpx.Client | None = None, min_interval: float = 0.4):
         self.token = token
         self.owner_id = int(owner_id)
         self.api_version = api_version
         self.http = http or httpx.Client(timeout=30, follow_redirects=True)
+        self.min_interval = min_interval
+        self._last_call = 0.0
 
     def _api(self, method: str, data: dict) -> object:
+        # Пользовательский токен VK пускает не больше 3 запросов в секунду (VK 6).
+        wait = self._last_call + self.min_interval - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        self._last_call = time.monotonic()
         response = self.http.post(
             f"{VK_API}/{method}",
             data={**data, "access_token": self.token, "v": self.api_version},
@@ -330,6 +372,19 @@ class VkMetricsClient:
             reposts=int((post.get("reposts") or {}).get("count", 0) or 0),
         )
 
+    def wall_posts(self, since: int, *, page: int = 100, limit: int = 2000) -> list[dict]:
+        """Записи стены (новые сверху) до момента ``since``; закреп не обрывает обход."""
+        posts: list[dict] = []
+        for offset in range(0, limit, page):
+            response = self._api("wall.get", {"owner_id": self.owner_id,
+                                              "count": page, "offset": offset})
+            items = response.get("items", []) if isinstance(response, dict) else []
+            posts += items
+            unpinned = [item for item in items if not item.get("is_pinned")]
+            if len(items) < page or (unpinned and int(unpinned[-1]["date"]) < since):
+                break
+        return posts
+
     def recent_incoming_conversations(self, start: int) -> int | None:
         try:
             response = self._api(
@@ -345,19 +400,76 @@ class VkMetricsClient:
             return None
 
 
+REPOINT_WINDOW = 900   # отложенная запись выходит в течение секунд после publish_date
+
+
+def _head(text: str) -> str:
+    """Первая строка без пробелов — для сверки записи плана с записью на стене."""
+    first = next((line for line in (text or "").splitlines() if line.strip()), "")
+    return "".join(first.split())[:40]
+
+
+def reconcile_post_ids(store: VkAnalyticsStore, client: VkMetricsClient,
+                       missing: list[Publication]) -> dict[int, int]:
+    """Найти новые номера вышедших отложенных записей.
+
+    VK при выходе отложенной записи присваивает ей новый post_id, а старый перестаёт
+    отдаваться wall.getById (в бою 119 из 126 записей плана указывали в пустоту).
+    Запись на стене ищется по времени выхода (не раньше due_at, не позже окна) и первой
+    строке текста; принимается только однозначное совпадение, не занятое другой записью.
+    """
+    if not missing:
+        return {}
+    since = min(p.due_at for p in missing) - 60
+    wall = client.wall_posts(since)
+    taken = store.known_post_ids()
+    heads = store.caption_heads([p.plan_id for p in missing])
+    repointed: dict[int, int] = {}
+    for publication in missing:
+        head = heads.get(publication.plan_id, "")
+        hits = [post for post in wall
+                if 0 <= int(post["date"]) - publication.due_at <= REPOINT_WINDOW
+                and int(post["id"]) not in taken
+                and (not head or _head(post.get("text", "")) == head)]
+        if len(hits) != 1:
+            continue
+        new_id = int(hits[0]["id"])
+        store.repoint(publication.plan_id, publication.post_id, new_id)
+        taken.add(new_id)
+        repointed[publication.plan_id] = new_id
+    return repointed
+
+
 def collect(store: VkAnalyticsStore, client: VkMetricsClient,
             *, now: int | None = None) -> dict:
-    result = {"collected": 0, "missing": 0, "errors": []}
-    for publication in store.due_publications(now):
+    result = {"collected": 0, "missing": 0, "repointed": 0, "errors": []}
+    missing: list[Publication] = []
+
+    def measure(publication: Publication) -> bool:
         try:
             metric = client.post_metric(publication)
             if metric is None:
-                result["missing"] += 1
-                continue
+                return False
             store.add_metric(metric, now=now)
             result["collected"] += 1
         except (RuntimeError, httpx.HTTPError, ValueError, TypeError) as exc:
             result["errors"].append(f"post {publication.post_id}: {exc}")
+        return True
+
+    for publication in store.due_publications(now):
+        if not measure(publication):
+            missing.append(publication)
+    try:
+        repointed = reconcile_post_ids(store, client, missing)
+    except (RuntimeError, httpx.HTTPError, ValueError, TypeError, KeyError) as exc:
+        result["errors"].append(f"сверка номеров: {exc}")
+        repointed = {}
+    result["repointed"] = len(repointed)
+    for publication in missing:
+        new_id = repointed.get(publication.plan_id)
+        if new_id is None or not measure(
+                Publication(**{**publication.__dict__, "post_id": new_id})):
+            result["missing"] += 1
     return result
 
 
@@ -423,7 +535,16 @@ def main(argv: list[str] | None = None) -> int:
                          ensure_ascii=False))
         return 0
 
-    client = VkMetricsClient(config("VK_ACCESS_TOKEN", default=""), args.owner_id)
+    # wall.getById и stats ключом сообщества недоступны (VK 27): нужен пользовательский
+    # токен, тот же, что у планировщика. Ключ сообщества — резерв.
+    from content_factory.publish.vk_oauth import resolve_publisher_token
+    token = resolve_publisher_token(
+        store_path=os.getenv("VK_TOKEN_STORE", "state/vk-tokens.json"),
+        env_token=config("VK_ACCESS_TOKEN", default=""),
+        app_id=int(os.getenv("VK_APP_ID", "54732587")),
+        redirect_uri=os.getenv("VK_REDIRECT_URI", "https://climat-simf.ru/"),
+    )
+    client = VkMetricsClient(token, args.owner_id)
     collected = collect(store, client)
     if args.action == "report":
         report = weekly_report(store, args.source_db, client)

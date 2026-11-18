@@ -44,7 +44,12 @@ GOLDEN = 0.6180339887498949
 
 _NUM_UNIT = re.compile(
     r"[0-9]+(?:[.,][0-9]+)?\s*(?:дБ|кВт|Вт|л\b|мл|м2|м²|м³|часов|час|°|%|секци|кг|лет|год|BTU)", re.I)
-_BAD_SENTENCE = re.compile(r"https?://|www\.|®|™|патент|©|\.ru\b|youtube|гарантийн[а-я]* срок", re.I)
+_BAD_SENTENCE = re.compile(
+    r"https?://|www\.|®|™|патент|©|\.ru\b|youtube|гарантийн[а-я]* срок|"
+    # Обрывки без подлежащего и общие слова о бренде: «Срок службы каждого…»,
+    # «Все приборы FUNAI имеют реальные отличия…» (вышли на стену в ноябре 2026).
+    r"каждого|каждой из|все приборы|реальные отличия|под заказ|уточняйте|split home|"
+    r"дату выгрузки|подбер[её]м технику", re.I)
 # Предложения про линейку, кабель и настройки — про серию или комплектацию, а не про выгоду.
 # Предложение, которое опирается на предыдущую фразу, вырванное из описания читается обрывком.
 _DEPENDENT_START = ("он ", "она ", "оно ", "они ", "его ", "её ", "их ", "такой ", "такая ",
@@ -259,7 +264,7 @@ def benefit_sentences(item: CatalogItem, limit: int = 2) -> list[str]:
     return [row[2] for row in sorted(chosen, key=lambda row: row[1])]
 
 
-def feature_bullets(item: CatalogItem, limit: int = 4) -> list[str]:
+def _attr_bullets(item: CatalogItem, limit: int = 4) -> list[str]:
     ranked: list[tuple[int, str]] = []
     patterns = [p for p, _ in BOOL_FEATURES] + [p for p, _ in VALUE_FEATURES]
     for key, value in item.attrs.items():
@@ -278,6 +283,138 @@ def feature_bullets(item: CatalogItem, limit: int = 4) -> list[str]:
     for rank, text in sorted(ranked):
         seen.setdefault(text, rank)
     return list(seen)[:limit]
+
+
+# ── характеристики поставщиков Бриз, Daichi, JAC ────────────────────────────
+# Шаблоны выше писались под поля Русклимата. Когда владелец перестал с ним работать
+# (11.2026), ни один товар остальных поставщиков не проходил порог, и лента опустела.
+
+def _spec(item: CatalogItem, pattern: str) -> str:
+    for key, value in item.attrs.items():
+        if re.search(pattern, key, re.I):
+            return str(value).strip()
+    return ""
+
+
+def _number(value: str) -> str:
+    match = re.search(r"[0-9]+(?:[.,][0-9]+)?", value)
+    return f"{float(match.group(0).replace(',', '.')):g}" if match else ""
+
+
+def _heat_min(item: CatalogItem) -> str:
+    """Нижняя граница работы на обогрев, если она ниже нуля: «−15»."""
+    raw = (_spec(item, r"температурные границы наружного воздуха \(нагрев\)")
+           or _spec(item, r"диапазон рабочих температур, нагрев")
+           or _spec(item, r"нижний диапазон.*нагрев")
+           or _spec(item, r"минимальная температура обогрева"))
+    match = re.match(r"\s*[-−–—]\s*([0-9]{1,2})\b", raw)
+    return f"−{match.group(1)}" if match else ""
+
+
+def spec_facts(item: CatalogItem) -> dict:
+    """Числа из таблицы характеристик кондиционера. Пустая строка — данных нет."""
+    if item.group != "ac":
+        return {}
+    noise = _spec(item, r"минимальный уровень шума внутреннего блока")
+    if not noise:
+        levels = [float(v.replace(",", ".")) for v in re.findall(
+            r"[0-9]+(?:[.,][0-9]+)?", _spec(item, r"уровень звукового давления, вб"))]
+        noise = f"{min(levels):g}" if levels else ""
+    technology = " ".join((_spec(item, r"^инверторная технология$"),
+                           _spec(item, r"^технология работы$"),
+                           _spec(item, r"тип управления компрессором"))).casefold().strip()
+    wifi = _spec(item, r"wi-?fi").casefold()
+    months = re.fullmatch(r"([0-9]+)\s*мес\.?", _spec(item, r"^срок гарантии$"))
+    years = int(months.group(1)) // 12 if months and int(months.group(1)) % 12 == 0 else 0
+    return {
+        "area": _number(_spec(item, r"помещени[йя] площадью")),
+        "cool_kw": _number(_spec(
+            item, r"^холодопроизводительность(?: \(квт\)|, квт(?:, ном\.)?)?$")),
+        "heat_min": _heat_min(item),
+        "heat_kw": _number(_spec(
+            item, r"^теплопроизводительность(?: \(квт\)|, квт(?:, ном\.)?)?$")),
+        "pipe": _number(_spec(item, r"^максимальная длина (?:трассы|труб)")),
+        "noise": _number(noise),
+        "inverter": "да" if ("inverter" in technology or technology.startswith("да")) else "",
+        "wifi": "да" if wifi == "да" or wifi.startswith("да, встроен") else "",
+        "warranty": f"{years} {'года' if years in (2, 3, 4) else 'лет'}" if years > 1 else "",
+    }
+
+
+def spec_bullets(item: CatalogItem) -> list[str]:
+    facts = spec_facts(item)
+    if not facts:
+        return []
+    comma = {key: value.replace(".", ",") for key, value in facts.items()}
+    lines = [
+        facts["area"] and f"Для помещения до {comma['area']} м²",
+        facts["cool_kw"] and f"Мощность охлаждения {comma['cool_kw']} кВт",
+        facts["heat_min"] and f"Работает на обогрев до {facts['heat_min']} °C на улице",
+        facts["noise"] and f"Шум от {comma['noise']} дБ",
+        facts["inverter"] and "Инверторный компрессор",
+        facts["wifi"] and "Управление со смартфона по Wi-Fi",
+        facts["heat_kw"] and f"Мощность обогрева {comma['heat_kw']} кВт",
+        facts["pipe"] and f"Трасса до {comma['pipe']} м",
+        facts["warranty"] and f"Гарантия {facts['warranty']}",
+    ]
+    return [line for line in lines if line]
+
+
+# У увлажнителей, обогревателей и водонагревателей Бриза таблицы характеристик нет,
+# цифры есть только в описании. Берём их из предложений про саму модель (не про серию)
+# и только рядом со словом, которое называет величину.
+_PROSE_FACTS = (
+    (r"(?:производительност\w*|интенсивност\w* увлажнения)[^.!?]{0,60}?([0-9]{2,4})\s*мл\s*/?\s*ч",
+     "Увлажнение до {v} мл/ч", "{v} мл/ч", "увлажнение"),
+    (r"осушени\w*[^.!?]{0,60}?([0-9]{1,3})\s*(?:л|литр\w*)\s*(?:/|в)\s*сутки",
+     "Осушение {v} л в сутки", "{v} л/сутки", "осушение"),
+    (r"площад\w*[^.!?]{0,30}?до\s+([0-9]{1,3})\s*(?:м2|м²|м\?|кв\.?\s?м|метров)",
+     "Для помещения до {v} м²", "до {v} м²", "площадь помещения"),
+    (r"мощност\w*[^.!?]{0,40}?([0-9]{3,4})\s*Вт", "Мощность {v} Вт", "{v} Вт", "мощность"),
+    (r"(?:резервуар\w*|бак\w*)[^.!?]{0,50}?([0-9]{1,3}(?:[.,][0-9])?)\s*(?:л\b|литр)",
+     "Бак {v} л", "{v} л", "объём бака"),
+    (r"([0-9]{1,2})\s*час\w*[^.!?]{0,40}без долива|без долива[^.!?]{0,50}?([0-9]{1,2})\s*час",
+     "До {v} часов без долива воды", "до {v} ч", "без долива воды"),
+)
+
+
+# Предложение про всю линейку: его цифры не относятся к конкретной модели.
+_RANGE_SENTENCE = re.compile(
+    r"линейк|модельн|моделей|моделями|моделях|представлен[аы]?\b|типоразмер|"
+    r"[0-9]\s*(?:и|или|-|–|—)\s*[0-9][0-9 ]*\s*(?:кВт|Вт|м2|м²|л\b|литр|мл)|"
+    r"от [0-9][0-9 ]* до [0-9]", re.I)
+
+
+def prose_facts(item: CatalogItem) -> list[tuple[str, str, str]]:
+    """Цифры из описания: (пункт поста, значение для плитки, подпись плитки)."""
+    found: list[tuple[str, str, str]] = []
+    # «25 м?.» — битый знак квадрата в базе сайта; точка после него не конец предложения.
+    prose = re.sub(r"\s+", " ", item.prose).replace("м?.", "м².").replace("м?", "м²")
+    sentences = [s for s in re.split(r"(?<=[.!?])\s+", prose) if not _RANGE_SENTENCE.search(s)]
+    for pattern, template, tile_value, tile_label in _PROSE_FACTS:
+        for sentence in sentences:
+            match = re.search(pattern, sentence, re.I)
+            if match:
+                value = next(g for g in match.groups() if g).replace(".", ",")
+                found.append((template.format(v=value), tile_value.format(v=value), tile_label))
+                break
+    return found
+
+
+def prose_bullets(item: CatalogItem) -> list[str]:
+    return [bullet for bullet, _, _ in prose_facts(item)]
+
+
+def feature_bullets(item: CatalogItem, limit: int = 5) -> list[str]:
+    """Пункты поста: таблица характеристик кондиционера, иначе признаки и цифры описания."""
+    specific = spec_bullets(item)
+    if len(specific) >= 3:
+        return specific[:limit]
+    merged = list(dict.fromkeys(_attr_bullets(item) + specific + prose_bullets(item)))
+    # «Работает на обогрев» рядом с «Работает на обогрев до −25 °C» — повтор.
+    merged = [line for line in merged
+              if not any(other != line and other.startswith(line) for other in merged)]
+    return merged[:limit]
 
 
 # ── числа для крючков ───────────────────────────────────────────────────────
@@ -312,8 +449,14 @@ def _single_model_area(item: CatalogItem) -> str:
 
 def facts_for_hook(item: CatalogItem) -> dict:
     blob = f"{item.name}\n{item.prose}"
+    spec = spec_facts(item)
+    cold = spec.get("heat_min", "")
+    quiet = spec.get("noise", "")
     return {
-        "area": _single_model_area(item),
+        "area": spec.get("area", "").replace(".", ",") or _single_model_area(item),
+        # Крючок про мороз — только для моделей, которые греют ниже −10 °C.
+        "heat_min": cold if cold and int(cold[1:]) >= 10 else "",
+        "quiet": quiet.replace(".", ",") if quiet and float(quiet) <= 24 else "",
         "heatpump": _yes(item, "тепловой насос"),
         "inverter": _yes(item, "инверторн"),
         "liters": _first(r"([0-9]{2,3})\s*л\b", item.name),
@@ -326,6 +469,11 @@ def facts_for_hook(item: CatalogItem) -> dict:
 
 HOOKS = {
     "ac": (
+        ("heat_min", "За окном холодает, а этот кондиционер греет при морозе до {heat_min} °C. Есть в наличии."),
+        ("heat_min", "Кондиционер не только на лето: эта модель работает на обогрев до {heat_min} °C на улице."),
+        ("area", "Кондиционер для комнаты до {area} м². Есть в наличии, привезём и установим."),
+        ("area", "Ищете кондиционер на {area} квадратов? Вот модель, которая есть в наличии."),
+        ("quiet", "Тихий кондиционер для спальни: от {quiet} дБ на минимальной скорости. Есть в наличии."),
         ("heatpump", "Кондиционер, который не уходит в отпуск на зиму: у этой модели есть режим обогрева. Вот она в наличии."),
         ("heatpump", "Один прибор и на жару, и на осенние вечера: у этого кондиционера есть режим обогрева."),
         ("inverter", "Инверторный кондиционер плавно меняет обороты и держит температуру без рывков. Вот модель, которая есть в наличии."),
@@ -421,15 +569,28 @@ def _variant(item: CatalogItem, size: int, salt: str = "") -> int:
     return int(hashlib.sha1((item.id + salt).encode()).hexdigest(), 16) % size
 
 
-def write_post(item: CatalogItem, price: int | None = None) -> str:
-    """Собрать текст товарного поста; ссылка на карточку добавляется отдельно."""
+def humanize(text: str) -> str:
+    """Владелец просил тексты без длинных тире: они выдают машинный текст (15.11.2026)."""
+    return text.replace("—", "-").replace("–", "-")
+
+
+def write_post(item: CatalogItem, price: int | None = None, avoid: tuple[str, ...] = ()) -> str:
+    """Собрать текст товарного поста; ссылка на карточку добавляется отдельно.
+
+    avoid — первые строки недавних постов: один и тот же крючок пять раз подряд на
+    стене выглядит как рассылка.
+    """
     price = price or item.price
     facts = facts_for_hook(item)
     if facts["sections"]:
         facts["sections_text"] = f"{facts['sections']} {_sections_word(facts['sections'])}"
     hooks = HOOKS.get(_hook_key(item), HOOKS.get(item.group, ()))
     options = [text for need, text in hooks if not need or facts.get(need)]
-    hook = options[_variant(item, len(options), "hook")].format(**facts) if options else ""
+    start = _variant(item, len(options), "hook") if options else 0
+    rotated = [text.format(**facts) for text in options[start:] + options[:start]]
+    seen = {humanize(line) for line in avoid}
+    hook = next((text for text in rotated if humanize(text) not in seen),
+                rotated[0] if rotated else "")
     parts = [hook, "", item.name, f"💎 {money(price)} · {CITY}"]
     sentences = benefit_sentences(item)
     if sentences:
@@ -437,10 +598,10 @@ def write_post(item: CatalogItem, price: int | None = None) -> str:
     bullets = feature_bullets(item)
     # Один пункт выглядит как случайный огрызок: показываем список от двух.
     if len(bullets) >= 2:
-        parts += [""] + [f"✓ {line}" for line in bullets]
+        parts += [""] + [f"- {line}" for line in bullets]
     ctas = CTAS.get(item.group, _ASK)
     parts += ["", ctas[_variant(item, len(ctas), "cta")], f"📞 {PHONE}"]
-    return "\n".join(parts).strip()
+    return humanize("\n".join(parts).strip())
 
 
 def richness(item: CatalogItem) -> int:

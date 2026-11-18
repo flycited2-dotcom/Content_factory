@@ -36,10 +36,8 @@ LAYOUTS = {
     "system": [["🩺 Состояние сервисов", "🗓 Расписание сервисов"], ["🗓 Расписание контента"]],
     "sources": [[label] for label in SOURCES],
 }
-COMMANDS = {"✍️ Создать задачу": "/task", "📋 Очередь": "/excel",
-            "⏸ Стоп Avito": "/avito pause", "🛑 Отменить партию Avito": "/avito cancel",
-            "🔄 Перезапуск Avito": "/avito restart", "📍 Где карточки Avito": "/avito report",
-            "📦 Наличие Avito": "/avito stock",
+COMMANDS = {"📦 Наличие Avito": "/avito stock","⏸ Стоп Avito": "/avito pause", "🛑 Отменить партию Avito": "/avito cancel",
+            "🔄 Перезапуск Avito": "/avito restart", "📍 Где карточки Avito": "/avito report","✍️ Создать задачу": "/task", "📋 Очередь": "/excel",
             "📊 Статус Avito": "/avito", "📋 Очередь Avito": "/avito queue",
             "📦 Категории Avito": "/avito categories",
             "✅ На согласовании": "/pending", "🎛 Генерация": "/generation",

@@ -45,7 +45,11 @@ def _digest(value: str) -> str:
 def canonical_product_identity(*, source_key: str, caption: str,
                                category: str, brand: str) -> str:
     """Стабильная модель товара, не зависящая от поставщика и цены."""
-    title = next((line.strip() for line in (caption or "").splitlines() if line.strip()), "")
+    lines = [line.strip() for line in (caption or "").splitlines() if line.strip()]
+    # Каталожный пост открывается крючком, общим для многих товаров группы; название
+    # модели стоит в строке перед ценой «💎». По крючку разные товары слипались в один.
+    price_at = next((i for i, line in enumerate(lines) if line.startswith("💎")), 0)
+    title = lines[price_at - 1] if price_at > 0 else (lines[0] if lines else "")
     brand_tokens = set(_TOKEN_RE.findall((brand or "").casefold().replace("ё", "е")))
     tokens = [token for token in _TOKEN_RE.findall(title.casefold().replace("ё", "е"))
               if token not in _GENERIC_PRODUCT_WORDS and token not in brand_tokens]

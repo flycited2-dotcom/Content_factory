@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -33,6 +34,7 @@ from content_factory.storefront.product_posts import (
     prepare_photo,
     write_post,
 )
+from content_factory.storefront.tile_card import render_tile_card, repaint_price
 
 CATALOG_PREFIX = "catalog:"
 GROUP_CATEGORY = {
@@ -43,8 +45,24 @@ GROUP_CATEGORY = {
 UTM = "utm_source=vk&utm_medium=organic_social&utm_campaign=catalog_post&utm_content={cid}"
 REPEAT_DAYS = 120
 ATTEMPTS_PER_SLOT = 12
+HOOK_MEMORY = 10
 _LINK = re.compile(r"https://splithome\.ru/product/[^\s]+")
 _PRICE_LINE = re.compile(r"(💎 )([0-9][0-9 ]*)( ₽)")
+TILE_SUFFIX = "_tile.jpg"
+
+
+def card_for(item: CatalogItem, price: int, image: Path) -> Path:
+    """Картинка поста: светлая карточка-плашка, а если характеристик мало — фото на белом.
+
+    VK_CATALOG_CARD_STYLE=plain возвращает прежнее голое фото производителя.
+    """
+    if os.getenv("VK_CATALOG_CARD_STYLE", "tiles") == "plain":
+        return image
+    out = image.with_name(image.stem + TILE_SUFFIX)
+    try:
+        return render_tile_card(item, price, image, out) or image
+    except (OSError, ValueError):
+        return image
 
 
 def link_line(item: CatalogItem) -> str:
@@ -53,8 +71,8 @@ def link_line(item: CatalogItem) -> str:
     return f"🛒 Смотреть и заказать: {item.url}{separator}{UTM.format(cid=cid)}"
 
 
-def build_caption(item: CatalogItem, price: int) -> str:
-    return f"{write_post(item, price)}\n\n{link_line(item)}"
+def build_caption(item: CatalogItem, price: int, avoid: tuple[str, ...] = ()) -> str:
+    return f"{write_post(item, price, avoid)}\n\n{link_line(item)}"
 
 
 def load_catalog_items(catalog_dir, snapshot_path, refresh=None) -> tuple[list[CatalogItem], dict]:
@@ -79,7 +97,37 @@ def load_catalog_items(catalog_dir, snapshot_path, refresh=None) -> tuple[list[C
     if not items:
         items = load_catalog(catalog_dir)
         report["source"] = "yml"
+    excluded = excluded_suppliers()
+    if excluded:
+        items = [item for item in items if item.id.split(":", 1)[0] not in excluded]
+        report["excluded_suppliers"] = sorted(excluded)
     return items, report
+
+
+def excluded_suppliers() -> set[str]:
+    """Поставщики, с которыми владелец не работает (VK_CATALOG_EXCLUDE_SUPPLIERS=rusklimat).
+
+    Выгрузка сайта на 61 % состоит из Русклимата (11.2026), и без фильтра лента
+    заполнялась его товарами, хотя владелец с ним уже не работает.
+    """
+    raw = os.getenv("VK_CATALOG_EXCLUDE_SUPPLIERS", "")
+    return {value.strip().casefold() for value in raw.split(",") if value.strip()}
+
+
+def retire_excluded(store: VkContentPlanStore) -> list[int]:
+    """Снять с плана ещё не вышедшие посты исключённых поставщиков (идемпотентно)."""
+    excluded = excluded_suppliers()
+    retired: list[int] = []
+    if not excluded:
+        return retired
+    for item in store.list():
+        parts = item.source_key.split(":")
+        if (item.source_key.startswith(CATALOG_PREFIX) and len(parts) > 2
+                and parts[1].casefold() in excluded
+                and store._transition(item.id, ("planned", "review", "approved"),
+                                      "superseded")):
+            retired.append(item.id)
+    return retired
 
 
 def _safe(name: str) -> str:
@@ -101,6 +149,9 @@ def materialize_catalog_plan(store: VkContentPlanStore, items: list[CatalogItem]
     skipped: set[str] = set()
     added: list[int] = []
     photo_dir = Path(photo_dir)
+    # Крючки последних товарных постов: новый пост не открывается той же фразой.
+    hooks = [item.caption.split("\n", 1)[0] for item in sorted(plan, key=lambda x: x.due_at)
+             if item.content_type == "product"][-HOOK_MEMORY:]
 
     for due_at in plan_slots(now, horizon_days=horizon_days):
         if due_at in occupied:
@@ -129,9 +180,11 @@ def materialize_catalog_plan(store: VkContentPlanStore, items: list[CatalogItem]
             if not image.is_file() and photo(client, [item.picture, *item.pictures], image) is None:
                 skipped.add(item.id)
                 continue
+            card = card_for(item, live.price, image)
             candidate = VkPlanCandidate(
                 source_key=f"{CATALOG_PREFIX}{item.id}", source_ts=float(due_at),
-                caption=build_caption(item, live.price), card_path=str(image.resolve()),
+                caption=build_caption(item, live.price, tuple(hooks)),
+                card_path=str(card.resolve()),
                 category=GROUP_CATEGORY[item.group], brand=item.brand.upper(),
                 content_type="product",
             )
@@ -140,6 +193,7 @@ def materialize_catalog_plan(store: VkContentPlanStore, items: list[CatalogItem]
             if item_id is None:  # дубль по отпечатку текста — берём следующую позицию
                 continue
             added.append(item_id)
+            hooks = (hooks + [candidate.caption.split("\n", 1)[0]])[-HOOK_MEMORY:]
             recent = (recent + [item.brand.casefold()])[-2:]
             occupied.add(due_at)
             break
@@ -184,6 +238,9 @@ def refresh_catalog_items(store: VkContentPlanStore, client: httpx.Client, now: 
                                     item.caption, count=1)
             if store.update_caption(item.id, fresh):
                 result["repriced"].append(item.id)
+                # Цена нарисована и на карточке-плашке: иначе текст и картинка разойдутся.
+                if str(item.card_path).endswith(TILE_SUFFIX):
+                    repaint_price(item.card_path, live.price)
     return result
 
 

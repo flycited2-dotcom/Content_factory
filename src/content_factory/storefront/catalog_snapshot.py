@@ -99,6 +99,36 @@ def clean_html(raw: str) -> str:
     return newline.join(line.strip() for line in text.splitlines() if line.strip())
 
 
+_SUPERSCRIPT = {"2": "²", "3": "³"}
+
+
+def clean_spec(raw) -> str:
+    """Поля характеристик приходят с экранированной разметкой: «м&lt;sup&gt;2&lt;/sup&gt;»."""
+    text = html.unescape(html.unescape(str(raw)))
+    text = re.sub(r"<sup>\s*([23])\s*</sup>", lambda m: _SUPERSCRIPT[m.group(1)], text)
+    return re.sub(r"\s+", " ", _TAGS.sub("", text)).strip()
+
+
+def typed_name(title: str, category: str) -> str:
+    """У части поставщиков название — только марка и артикул: «Midea MSAG2-18HRN8…».
+    Читателю нужно слово, что это за товар."""
+    if "сплит" in category.casefold() and not re.search(r"сплит|кондиционер", title, re.I):
+        return f"Сплит-система {title}"
+    return title
+
+
+def display_name(title: str, brand: str) -> str:
+    """Название для поста: с брендом. В базе сайта бренд лежит отдельно от названия,
+    и на стену выходило «Бытовой увлажнитель серии TUBE…» без марки."""
+    title = re.sub(r"^Бытов(?:ой|ая|ые)\s+", "", title).strip()
+    title = title[:1].upper() + title[1:]
+    if not brand or brand.casefold() in title.casefold():
+        return title
+    # «Увлажнитель серии TUBE …» → «Увлажнитель ROYAL CLIMA серии TUBE …».
+    head, mark, tail = title.partition(" серии ")
+    return f"{head} {brand}{mark}{tail}" if mark else f"{brand} {title}"
+
+
 def load_snapshot(path: str | Path) -> list[CatalogItem]:
     """Строки снимка → позиции каталога, годные для розничной ленты."""
     rows = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -110,7 +140,8 @@ def load_snapshot(path: str | Path) -> list[CatalogItem]:
         if not (row.get("slug") and row.get("picture") and retail_ok(category, name, price)):
             continue
         prose, attrs = parse_description(clean_html(row.get("description", "")))
-        attrs.update({str(k): str(v) for k, v in (row.get("specs") or {}).items()})
+        attrs.update({clean_spec(k): clean_spec(v) for k, v in (row.get("specs") or {}).items()})
+        brand = str(row.get("brand") or attrs.get("Бренд") or "").strip()
         if row.get("is_heat_pump"):
             attrs["Тепловой насос"] = "Да"
             if row.get("heating_min_temp") is not None:
@@ -119,7 +150,9 @@ def load_snapshot(path: str | Path) -> list[CatalogItem]:
         items.append(CatalogItem(
             id=ascii_offer_id(row["offer_id"]), url=f"{SITE}/product/{quote(row['slug'])}/",
             price=price, group=refine_group(group_of_item(category, name), attrs), category=category, picture=row["picture"],
-            name=name, brand=_brand(name), prose=prose, attrs=attrs,
+            name=display_name(typed_name(name, category), brand),
+            brand=(brand or _brand(name)).casefold(),
+            prose=prose, attrs=attrs,
             pictures=tuple(row.get("pictures") or ()),
         ))
     return items

@@ -597,7 +597,12 @@ def tick(store: ExcelStore, submit_research, read_job, submit_card, preview,
     def _fail_or_retry(item, stage_reset: dict, err: str):
         key_reset = {key: value for key, value in stage_reset.items()
                      if key.endswith("_request_key")}
-        if item.tries + 1 >= MAX_TRIES:
+        # A photo-auditor hold is terminal until the owner resolves it.
+        # Keep legacy messages for agents already running during rollout.
+        audit_hold = any(marker in (err or "") for marker in (
+            "PHOTO_AUDIT_HOLD:", "Фото остановлено для ручной проверки:",
+            "Контроль ещё не завершён;", "Служба контроля недоступна; фото не выгружено"))
+        if audit_hold or item.tries + 1 >= MAX_TRIES:
             if store.update_if_status(item.key, item.status, status="failed", error=err,
                                       **key_reset):
                 stats["failed"] += 1

@@ -38,12 +38,38 @@ def archive_dir(src_dir, archive_root) -> tuple[int, int]:
     """Заархивировать все карточки из src_dir по датам. Возвращает (скопировано, пропущено)."""
     src_dir = Path(src_dir)
     archived = skipped = 0
+    from content_factory.archive_s3 import ArchiveError, archive_for
+    remote = archive_for(archive_root)
+    sources = []
     for f in sorted(src_dir.iterdir()):
         if not (f.is_file() and f.suffix.lower() in _EXTS):
             continue
-        _, copied = archive_card(f, archive_root)
+        sources.append(f)
+        if remote is None:
+            _, copied = archive_card(f, archive_root)
+        else:
+            day = card_date(f.name) or datetime.fromtimestamp(f.stat().st_mtime).date().isoformat()
+            try:
+                copied = remote.put_file(f, day + '/' + f.name)
+            except (ArchiveError, OSError):
+                # Preserve originals and the previous local archive during an outage.
+                # Do not log command stderr or credentials. The copy/verify CLI can
+                # drain these retained files before any later explicit prune.
+                with remote.local_write():
+                    _, copied = archive_card(f, archive_root)
+                print('archive: S3 unavailable; retained local fallback')
         if copied:
             archived += 1
         else:
             skipped += 1
+    if remote is not None:
+        try:
+            remote.backup_manifest()
+        except (ArchiveError, OSError):
+            # Without a fresh remote index, keep a local archive copy of the
+            # batch as well. Never delete originals on an upload/backup failure.
+            with remote.local_write():
+                for source in sources:
+                    archive_card(source, archive_root)
+            print('archive: manifest backup unavailable; retained local fallback')
     return archived, skipped

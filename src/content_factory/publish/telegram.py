@@ -234,6 +234,20 @@ def _send_once(bot_token, channel_id, image, caption, parse_mode, http, reply_ma
     return http.post(url, data=data, files=files)
 
 
+def _migration_target(response):
+    """400 + Telegram parameters is a definite non-delivery, safe to redirect once."""
+    if response.status_code != 400:
+        return None
+    try:
+        body = response.json()
+        target = (body.get("parameters") or {}).get("migrate_to_chat_id")
+        if body.get("ok") is False and type(target) is int and -(2**52) < target < 0:
+            return target
+    except (ValueError, AttributeError, TypeError):
+        pass
+    return None
+
+
 def publish_post(bot_token: str, channel_id: str, image: str, caption: str,
                  http: httpx.Client | None = None, *, parse_mode: str | None = None,
                  key: str | None = None, state: PublishState | None = None,
@@ -251,10 +265,17 @@ def publish_post(bot_token: str, channel_id: str, image: str, caption: str,
     client = http or telegram_client(60)
 
     last_err = None
+    migration_followed = False
     for attempt in range(max(1, retries) + 1):
         try:
             r = _send_once(bot_token, channel_id, image, caption, parse_mode, client,
                            reply_markup=reply_markup)
+            migrated = _migration_target(r)
+            if not migration_followed and migrated is not None and str(migrated) != str(channel_id):
+                migration_followed = True
+                channel_id = migrated
+                r = _send_once(bot_token, channel_id, image, caption, parse_mode, client,
+                               reply_markup=reply_markup)
         except httpx.HTTPError as e:                       # сетевой сбой → ретрай
             last_err = f"network: {e}"
             if attempt < retries:

@@ -37,6 +37,26 @@ from content_factory.drive_archive import ARTICLE, restore_missing, valid_png
 DIVIDER = "═" * 26
 
 
+def preview_delivery_alert(db_path, target, error, send, now=None):
+    """Один общий алерт о сбое доставки вместо сообщения на каждый товар."""
+    from contextlib import closing
+    now = time.time() if now is None else now
+    error = re.sub(r"bot\d+:[A-Za-z0-9_-]+", "bot<redacted>", str(error or "unknown"))[:200]
+    with closing(sqlite3.connect(db_path, timeout=30)) as db, db:
+        db.execute("CREATE TABLE IF NOT EXISTS preview_delivery_alerts "
+                   "(target TEXT PRIMARY KEY, error TEXT, notified REAL, suppressed INTEGER DEFAULT 0)")
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute("SELECT notified FROM preview_delivery_alerts WHERE target=?", (str(target),)).fetchone()
+        if row and now - row[0] < 900:
+            db.execute("UPDATE preview_delivery_alerts SET suppressed=suppressed+1 WHERE target=?", (str(target),))
+            return False
+        db.execute("INSERT OR REPLACE INTO preview_delivery_alerts VALUES(?,?,?,0)", (str(target), error, now))
+    send("⚠️ Не удалось доставить превью в группу проверки. "
+         "Готовые карточки сохранены, публикация не выполнена. "
+         "Повторные одинаковые ошибки объединены на 15 минут. Причина: " + error)
+    return True
+
+
 def make_photo_resolver(store: ExcelStore, output_dir: Path, content_dir: Path):
     """Resolve cached originals and recover exact models from the durable bank."""
     from content_factory.archive_recovery import find_archive_recovery
@@ -480,7 +500,7 @@ def main():
         res = publish_post(token, review, card, f"{caption}\n\n— на подтверждение —",
                            http=http, parse_mode=cfg.telegram.parse_mode, reply_markup=kb)
         if not res.ok:                    # не молчим: владелец должен видеть сбой
-            _alert(f"⚠️ Превью «{item.name[:60]}» не отправилось: {res.error}")
+            preview_delivery_alert(store.path, review, res.error, _alert)
         return bool(res.ok)
 
     # Дозревшие отложенные позиции снимаем ДО тика (после — уже research);

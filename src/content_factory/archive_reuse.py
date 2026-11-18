@@ -48,6 +48,8 @@ class ArchiveReuse:
     def __init__(self, state_db, queue_db, output_dir, archive_dir):
         self.state_db, self.queue_db = Path(state_db), Path(queue_db)
         self.output_dir, self.archive_dir = Path(output_dir), Path(archive_dir)
+        from content_factory.archive_s3 import archive_for
+        self._remote = archive_for(self.archive_dir)
         self._cards = None
         self._photos = None
 
@@ -94,13 +96,26 @@ class ArchiveReuse:
         _, brand, model, output = found
         utp = self._utp(brand, model)
         path = self._locate(output)
-        if not utp or path is None:
+        if not utp:
+            return None
+        if path is None and self._remote is not None:
+            target = self.output_dir / f"reuse_{output}"
+            if self._remote.restore_to(output, target):
+                return target.name, utp
+        if path is None:
             return None
         if path.parent != self.output_dir:             # из архива по датам — в выход фотоагента
             target = self.output_dir / f"reuse_{output}"
             if not target.is_file():
                 tmp = target.with_suffix(target.suffix + ".tmp")
-                shutil.copyfile(path, tmp)
+                try:
+                    shutil.copyfile(path, tmp)
+                except FileNotFoundError:
+                    # Explicit prune can remove the local archive between lookup
+                    # and open. The verified remote reader preserves the contract.
+                    if self._remote is not None and self._remote.restore_to(output, target):
+                        return target.name, utp
+                    raise
                 os.replace(tmp, target)
             output = target.name
         return output, utp
@@ -122,7 +137,12 @@ class ArchiveReuse:
         for model_key, utp, photo in rows:
             brand, _, model = model_key.partition("|")
             identity = model_identity(brand, model)
-            if identity and utp and photo and Path(photo).is_file():
+            path = Path(photo) if photo else None
+            remote_photo = (path is not None and self._remote is not None
+                            and (path.parent.resolve() == self.output_dir.resolve()
+                                 or path.resolve().is_relative_to(self.archive_dir.resolve()))
+                            and self._remote.knows(path.name))
+            if identity and utp and path is not None and (path.is_file() or remote_photo):
                 self._photos[identity] = (utp, photo)    # самое свежее — последним
         return self._photos
 
@@ -131,4 +151,11 @@ class ArchiveReuse:
         if item.key.startswith("ready-price|"):
             return None
         identity = model_identity(item.brand, item.model)
-        return self._photo_index().get(identity) if identity else None
+        found = self._photo_index().get(identity) if identity else None
+        if found is None or Path(found[1]).is_file():
+            return found
+        if self._remote is not None:
+            target = self.output_dir / ('reuse_source_' + Path(found[1]).name)
+            if self._remote.restore_to(Path(found[1]).name, target):
+                return found[0], str(target)
+        return None

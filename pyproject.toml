@@ -9,13 +9,10 @@ dependencies = [
   "python-decouple>=3.8",
   "PyYAML>=6.0",
   "Pillow>=10.4",
-  "openpyxl>=3.1",
-  "lxml>=5.0",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
-tender = ["mcp==2.0.0"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
