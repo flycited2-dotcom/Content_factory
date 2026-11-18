@@ -688,6 +688,8 @@ def _upd_label(u: dict) -> tuple[str, str]:
     for kind in ("document", "photo", "voice"):
         if m.get(kind):
             return kind, "-"
+    if t and m.get("reply_to_message"):       # ответ на приглашение (/find, /make… через ForceReply)
+        return "text", "reply"
     return ("text" if t else "other"), "-"
 
 
@@ -1012,7 +1014,7 @@ def main():
                 # мгновенно подтверждаем нажатие (кнопка перестаёт «крутиться»), тяжёлая работа — ниже;
                 # повторный answerCallbackQuery в ветках Telegram игнорирует (текст приходит сообщением)
                 _t_ack = time.monotonic()
-                if not data_cq.startswith("exretry:"):   # у «🔁 повторить» свой ответ-подсказка
+                if not data_cq.startswith(("exretry:", "exphoto:")):   # у них свой ответ-подсказка
                     try:
                         http.post(f"{TG_API}/bot{token}/answerCallbackQuery",
                                   data={"callback_query_id": cq.get("id")})
@@ -1104,6 +1106,15 @@ def main():
                     except httpx.HTTPError:
                         pass
                     finalize_preview(http, token, cq, reply)
+                    continue
+                if data_cq.startswith("exphoto:"):     # PHOTO_AUDIT_HOLD: повтор бесполезен
+                    try:
+                        http.post(f"{TG_API}/bot{token}/answerCallbackQuery", data={
+                            "callback_query_id": cq.get("id"), "show_alert": "true",
+                            "text": "Ответьте на это сообщение фото товара (свайп влево → фото). "
+                                    "В подписи можно перечислить характеристики."})
+                    except httpx.HTTPError:
+                        pass
                     continue
                 if data_cq.startswith("exretry:"):     # «🔁 повторить» под алертом об ошибке
                     key_r = links.key_for(data_cq.split(":", 1)[1])

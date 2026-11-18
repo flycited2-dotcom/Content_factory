@@ -10,6 +10,13 @@ def test_update_label_has_no_message_text():
     assert bot._upd_label({}) == ("other", "-")
 
 
+def test_reply_text_is_labelled_without_text():
+    # 2026-11-18: «text -» шёл 50–381 с и держал очередь — отличаем ответ на приглашение
+    # (/find через ForceReply и т.п.) от свободного текста, по-прежнему без самого текста
+    u = {"message": {"text": "Haier 12", "reply_to_message": {"text": "Что найти?"}}}
+    assert bot._upd_label(u) == ("text", "reply")
+
+
 def test_update_timing_logs_previous_update_duration(capsys):
     prev = bot._upd_timing_start(None, {"message": {"text": "/status", "date": 0}})
     assert prev[:2] == ("cmd", "/status")

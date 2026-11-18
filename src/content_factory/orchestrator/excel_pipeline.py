@@ -456,6 +456,21 @@ class ExcelStore:
                 "AND research_job IS NULL AND card_job IS NULL", (model, key, old))
             return changed.rowcount == 1
 
+    def known_brands(self) -> set:
+        """Словарь брендов: всё, что уже встречалось в колонке бренда."""
+        with self._c() as c:
+            return {r[0].strip() for r in c.execute(
+                "SELECT DISTINCT brand FROM excel_items WHERE trim(coalesce(brand,''))<>''")}
+
+    def normalize_unsubmitted_brand(self, key: str, brand: str) -> bool:
+        """Подставить бренд только пустому и ещё не отправленному payload."""
+        with self._c() as c:
+            changed = c.execute(
+                "UPDATE excel_items SET brand=? WHERE key=? AND trim(coalesce(brand,''))='' "
+                "AND status='new' AND research_request_key IS NULL AND card_request_key IS NULL "
+                "AND research_job IS NULL AND card_job IS NULL", (brand, key))
+            return changed.rowcount == 1
+
     def retry_failed(self) -> int:
         """Вернуть все failed-позиции в конвейер с чистого листа (status new,
         tries 0, error снят) — команда /excel retry (запрос владельца 2026-07-07:
@@ -643,6 +658,7 @@ def tick(store: ExcelStore, submit_research, read_job, submit_card, preview,
         new_items = [item for item in new_items if item.key.startswith(new_key_prefix)]
     if max_new is not None:
         new_items = new_items[:max(0, max_new)]
+    known_brands = None                      # словарь брендов — лениво, один раз за тик
     for item in new_items:
         operation = "cache_photo"
         try:
@@ -655,6 +671,15 @@ def tick(store: ExcelStore, submit_research, read_job, submit_card, preview,
                 model = research_model(item.model)
                 if model != item.model and store.normalize_unsubmitted_model(item.key, item.model, model):
                     item.model = model
+            # Пустой бренд → фотоагент отвечает PHOTO_AUDIT_HOLD «нужны точные бренд и
+            # модель», банк фото по (бренд, модель) промахивается. Бренд из названия.
+            if not (item.brand or "").strip():
+                from content_factory.ingest.excel_price import infer_brand
+                if known_brands is None:
+                    known_brands = store.known_brands()
+                brand = infer_brand(item.name, known_brands)
+                if brand and store.normalize_unsubmitted_brand(item.key, brand):
+                    item.brand = brand
             if prepare is not None:
                 try:
                     prepare(item)

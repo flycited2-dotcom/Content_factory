@@ -369,6 +369,21 @@ def extract_model(name: str, brand: str) -> str:
     return re.sub(r"\s+", " ", clean)
 
 
+def infer_brand(name: str, known_brands) -> str:
+    """Бренд из названия, когда колонка бренда пустая: известный бренд прайса целым словом.
+    У АРУ бренд бывает только в хвосте названия («…AY-2000C AYGER», разбор 2026-11-18).
+    Два разных бренда в названии — не угадываем: ''. Возвращаем написание из словаря."""
+    low = (name or "").casefold()
+    found = {}
+    for brand in known_brands or ():
+        b = (brand or "").strip()
+        if len(b) < 2:
+            continue
+        if re.search(r"(?<![\w-])" + re.escape(b.casefold()) + r"(?![\w-])", low):
+            found.setdefault(b.casefold(), b)
+    return next(iter(found.values())) if len(found) == 1 else ""
+
+
 def research_model(value: str) -> str:
     """Артикул для поиска из старого полного названия; ключи товара не меняем.
 

@@ -11,7 +11,9 @@ from pathlib import Path
 
 from content_factory.orchestrator.excel_pipeline import ExcelStore, _cache_key
 
-_PREVIEW_ACTIONS = ("approve", "reject", "regen", "price")
+# exretry/exphoto — кнопки под алертом об ошибке: фото ответом на алерт тоже принимаем
+# (PHOTO_AUDIT_HOLD «нужны точные бренд и модель», 2026-11-18).
+_PREVIEW_ACTIONS = ("approve", "reject", "regen", "price", "exretry", "exphoto")
 
 
 def preview_code_from_reply(msg: dict) -> str | None:
@@ -52,10 +54,15 @@ def make_manual_photo_fn(state_db, links, confirm_store, regen_fn, photos_dir):
 
         cached = store.cache_get(_cache_key(item))
         utp = (cached[0] if cached else "") or ""
+        if not utp:                           # характеристики из подписи к фото
+            utp = "\n".join(f"✓ {line.strip().lstrip('✓').strip()}"
+                            for line in (msg.get("caption") or "").splitlines() if line.strip())
         store.cache_put(_cache_key(item), utp, str(p), source="manual")
 
         a = confirm_store.get(key)
-        if a is not None:
+        if item.status == "failed":            # ответ на алерт: чистый заход, как «повторить»
+            store.retry_item(key)
+        elif a is not None:
             regen_fn(a)                       # карточка/card_jobs/excel_items → new
             confirm_store.mark(key, "regen")
         else:                                  # превью ещё не было — просто пересборка

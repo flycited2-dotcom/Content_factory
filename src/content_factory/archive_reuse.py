@@ -44,6 +44,25 @@ def model_identity(brand: str, model: str) -> tuple[str, str] | None:
     return brand_key, code
 
 
+_SPEC_SKIP = {"название товара", "бренд", "модель"}
+
+
+def utp_from_specs(specs: str | None) -> str | None:
+    """УТП для подписи из текста задания карточки: строки «✓ …» как есть, а у заданий
+    Авито — короткие «Свойство: значение» из информационного блока. Служебные строки
+    промпта (длинные инструкции, заголовки КАПСОМ, название/бренд/модель) — мимо."""
+    out = []
+    for line in (specs or "").splitlines():
+        line = line.strip()
+        if line.startswith("✓"):
+            out.append(line)
+            continue
+        m = re.fullmatch(r"([^:]{2,40}):\s*(\S.{0,60})", line)
+        if m and m.group(1).casefold() not in _SPEC_SKIP and not m.group(1).isupper():
+            out.append(f"✓ {line}")
+    return "\n".join(out) or None
+
+
 class ArchiveReuse:
     def __init__(self, state_db, queue_db, output_dir, archive_dir):
         self.state_db, self.queue_db = Path(state_db), Path(queue_db)
@@ -52,6 +71,7 @@ class ArchiveReuse:
         self._remote = archive_for(self.archive_dir)
         self._cards = None
         self._photos = None
+        self._bank = None
 
     # ── готовые карточки ──────────────────────────────────────────────────────
     def _card_index(self) -> dict:
@@ -92,12 +112,16 @@ class ArchiveReuse:
             return None
         found = self._card_index().get((name_key(item.name), (item.card_mode or "kbt").casefold()))
         if not found or found[0] == item.key:
-            return None
+            return self._bank_card_for(item)
         _, brand, model, output = found
         utp = self._utp(brand, model)
-        path = self._locate(output)
         if not utp:
-            return None
+            return self._bank_card_for(item)
+        return self._materialize(output, utp) or self._bank_card_for(item)
+
+    def _materialize(self, output: str, utp: str) -> tuple[str, str] | None:
+        """Файл карточки — в выход фотоагента (с диска, из архива по датам или из S3)."""
+        path = self._locate(output)
         if path is None and self._remote is not None:
             target = self.output_dir / f"reuse_{output}"
             if self._remote.restore_to(output, target):
@@ -119,6 +143,37 @@ class ArchiveReuse:
                 os.replace(tmp, target)
             output = target.name
         return output, utp
+
+    # ── банк карточек очереди фотоагента (бренд + код модели) ─────────────────
+    def _bank_index(self) -> dict:
+        """(бренд, код модели, стиль) → [(файл, specs)], свежие первыми. Сюда попадают и
+        карточки конвейера Авито (aru-avito-*): у них нет строки в excel_items, а товар тот же."""
+        if self._bank is not None:
+            return self._bank
+        self._bank = {}
+        if not self.queue_db.is_file():
+            return self._bank
+        with sqlite3.connect(f"file:{self.queue_db.as_posix()}?mode=ro", uri=True) as q:
+            rows = q.execute("SELECT mode, brand, model, output_filename, specs FROM jobs "
+                             "WHERE status='done' AND output_filename IS NOT NULL "
+                             "AND mode<>'research' ORDER BY id DESC").fetchall()
+        for mode, brand, model, output, specs in rows:
+            identity = model_identity(brand, model)
+            if identity:
+                self._bank.setdefault((*identity, (mode or "").casefold()), []).append((output, specs))
+        return self._bank
+
+    def _bank_card_for(self, item) -> tuple[str, str] | None:
+        identity = model_identity(item.brand, item.model)
+        if not identity:
+            return None
+        for output, specs in self._bank_index().get((*identity, (item.card_mode or "kbt").casefold()), []):
+            utp = self._utp(item.brand, item.model) or utp_from_specs(specs)
+            if utp:
+                found = self._materialize(output, utp)
+                if found:
+                    return found
+        return None
 
     def _utp(self, brand: str, model: str) -> str | None:
         with sqlite3.connect(f"file:{self.state_db.as_posix()}?mode=ro", uri=True) as db:
